@@ -1,0 +1,29 @@
+{
+  "checksums": [
+    {
+      "id": "github_release/github.com/kubernetes-sigs/kubebuilder/v4.15.0/kubebuilder_darwin_amd64",
+      "checksum": "C1E2FD86B7E2E392CD26B77A72BB9665511435ECDEEFB16712820BA5DA3E666B",
+      "algorithm": "sha256"
+    },
+    {
+      "id": "github_release/github.com/kubernetes-sigs/kubebuilder/v4.15.0/kubebuilder_darwin_arm64",
+      "checksum": "8A8B2806C352F3E0749D315ECEA91A352B2CE9321AF927FCA823A1604BD3530A",
+      "algorithm": "sha256"
+    },
+    {
+      "id": "github_release/github.com/kubernetes-sigs/kubebuilder/v4.15.0/kubebuilder_linux_amd64",
+      "checksum": "9632BA818C35E10D9664F19090972EE5D667BDFFBF4B83C34E8374C5E846AFA2",
+      "algorithm": "sha256"
+    },
+    {
+      "id": "github_release/github.com/kubernetes-sigs/kubebuilder/v4.15.0/kubebuilder_linux_arm64",
+      "checksum": "BD99723FC106502F64A3541B9C5B7079BC68961A76DF4F465893E311B594D295",
+      "algorithm": "sha256"
+    },
+    {
+      "id": "registries/github_content/github.com/aquaproj/aqua-registry/v4.437.0/registry.yaml",
+      "checksum": "6BA39C842D5B6CD4411440B9020A107861367CA3AF5625F0A6BA2C9593B72EA1",
+      "algorithm": "sha256"
+    }
+  ]
+}
