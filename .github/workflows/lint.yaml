@@ -1,0 +1,149 @@
+name: Lint
+
+# 必須ステータスチェックを単一 gate に集約するオーケストレーター。
+# 各検査は workflow_call の leaf に切り出してあり、ここはそれを組み立てるだけ。
+# ruleset に登録する必須チェックは末尾の `CI Gate` 1 個。
+#
+# トリガーに paths フィルタは付けない。leaf をトリガー側で絞ると、該当しない
+# PR ではチェックが報告されず、必須化された context が
+# "Expected — Waiting for status to be reported" のまま永久にブロックする。
+# 代わりに起動は常にして、`detect` が leaf ごとの実行要否を出す。skip した
+# leaf は gate から見て `skipped` = 合格扱いになるので、報告は常に発生する。
+#
+# push トリガーは持たない。main は ruleset で直 push を禁じており PR 経由で
+# しか更新されない。
+on:
+  pull_request:
+    branches: [main]
+    # `edited` は PR の base 変更を拾うため。別ブランチ宛に開いた PR を後から
+    # main へ付け替えると head SHA が変わらないので、これが無いと旧 base で
+    # 計算した detect の結果がそのまま必須チェックに流用される（fail-open）。
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  # 変更ファイル種別を判定し、各 leaf を実行すべきかを outputs で返す。
+  # merge-base 等のエッジケースを正しく扱うため dorny/paths-filter を使う。
+  #
+  # leaf 自身のワークフローファイルも各フィルタに入れてある（自己参照）。leaf の
+  # 中身を変えた PR がその leaf を走らせないのでは検証にならない。
+  detect:
+    name: detect changes
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter が PR の変更ファイル一覧を API 取得するために必要
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      renovate: ${{ steps.filter.outputs.renovate }}
+      aqua: ${{ steps.filter.outputs.aqua }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'PROJECT'
+              - 'config/**'
+              - '.golangci.yml'
+              - '.custom-gcl.yml'
+              - '.github/workflows/_go.yml'
+            workflows:
+              - '.github/workflows/**'
+            renovate:
+              - 'renovate.json*'
+            aqua:
+              - 'aqua.yaml'
+              - 'aqua-checksums.json'
+
+  go:
+    needs: detect
+    if: ${{ needs.detect.outputs.go == 'true' }}
+    uses: ./.github/workflows/_go.yml
+    permissions:
+      contents: read
+
+  # ワークフローの lint は全リポ共通なので home-actions に寄せてある。
+  # actionlint のピンは呼び先が自前で持つので、こちらの aqua.yaml には要らない。
+  lint-workflows:
+    needs: detect
+    if: ${{ needs.detect.outputs.workflows == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
+    permissions:
+      contents: read
+
+  # renovate.jsonc はまだ無い（issue #25）。フィルタが一致しないので今は常に
+  # skip されるが、置いた瞬間に検査が始まる。設定を足したのに検査を足し忘れる
+  # 側の穴を先に塞いでおく。
+  lint-renovate:
+    needs: detect
+    if: ${{ needs.detect.outputs.renovate == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
+    permissions:
+      contents: read
+
+  # aqua-checksums.json が aqua.yaml と一致しているかの検査。`aqua i` だけでは
+  # registry ref のズレを取りこぼす（aqua が自分で追記して exit 0 になる）ので、
+  # 実インストール後の git 差分で見る。
+  lint-aqua:
+    needs: detect
+    if: ${{ needs.detect.outputs.aqua == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-aqua.yml@10834ead7a2c2ca71677a6b818cd066d329eacbb # v1.2.0
+    permissions:
+      contents: read
+
+  # 唯一の必須チェック。全 leaf の結果を集計し、success/skipped なら合格、
+  # failure/cancelled が 1 つでもあれば fail させる。
+  #
+  # `detect` も needs に含める。detect が失敗すると全 leaf の `if` が偽になって
+  # skip され、skip は合格扱いなので、detect を見ていないと「何も検査していない
+  # 緑」が必須チェックを満たしてしまう。
+  gate:
+    name: CI Gate
+    needs:
+      - detect
+      - go
+      - lint-workflows
+      - lint-renovate
+      - lint-aqua
+    # `!cancelled()` rather than `always()`: under always(), cancelling a run
+    # leaves every leaf reporting `cancelled`, which records the required check
+    # as a failure. A cancelled run has no verdict to give.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Aggregate results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Results: ${RESULTS}"
+          # fail-closed: an empty needs list would make the loop pass vacuously
+          if [ -z "${RESULTS// /}" ]; then
+            echo "::error::No job results to aggregate (empty needs) — failing closed."
+            exit 1
+          fi
+          for r in ${RESULTS}; do
+            case "${r}" in
+              success|skipped) ;;
+              *) echo "::error::A required job concluded with: ${r}"; exit 1 ;;
+            esac
+          done
+          echo "All required jobs passed or were correctly skipped."
