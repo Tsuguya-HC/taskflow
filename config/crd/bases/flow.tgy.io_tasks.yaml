@@ -163,6 +163,13 @@ spec:
                   deadline:
                     format: date-time
                     type: string
+                  infraRetries:
+                    description: |-
+                      InfraRetries counts attempts lost to something other than the handler's
+                      judgement. It is not in the design's status example, but maxInfraRetries
+                      cannot be enforced without somewhere to count.
+                    format: int32
+                    type: integer
                   jobName:
                     description: |-
                       JobName is derived deterministically from the task, phase and runID, so
@@ -170,10 +177,12 @@ spec:
                     type: string
                   phase:
                     description: |-
-                      Phase is the fixed vocabulary a task moves through. It is deliberately not
-                      extensible: CiliumNetworkPolicies and Kyverno policies are written against
-                      these names, so a flow that could invent a phase could reach a pod nobody
-                      wrote a policy for. Flows choose the edges between phases, not the phases.
+                      Phase is a status name. It is a free string chosen by whoever writes the
+                      flow: this framework does not know what the work is, so it has no business
+                      naming its stages. "調査" and "Planning" are equally valid.
+
+                      Two names are reserved, because they are the framework's own answers rather
+                      than anything in the author's domain — see ReservedPhases.
                     type: string
                   runID:
                     format: int32
@@ -188,15 +197,27 @@ spec:
                     HistoryEntry records a completed run. This is the audit trail; the artifacts
                     it points at live in object storage, never in etcd.
                   properties:
+                    directory:
+                      description: |-
+                        Directory the handler wrote into, empty when the run produced no single
+                        answer.
+                      type: string
                     finishedAt:
                       format: date-time
                       type: string
+                    outcome:
+                      description: |-
+                        Outcome is why the task moved: the framework's account of the run,
+                        recorded even when the handler said nothing.
+                      type: string
                     phase:
                       description: |-
-                        Phase is the fixed vocabulary a task moves through. It is deliberately not
-                        extensible: CiliumNetworkPolicies and Kyverno policies are written against
-                        these names, so a flow that could invent a phase could reach a pod nobody
-                        wrote a policy for. Flows choose the edges between phases, not the phases.
+                        Phase is a status name. It is a free string chosen by whoever writes the
+                        flow: this framework does not know what the work is, so it has no business
+                        naming its stages. "調査" and "Planning" are equally valid.
+
+                        Two names are reserved, because they are the framework's own answers rather
+                        than anything in the author's domain — see ReservedPhases.
                       type: string
                     ref:
                       description: Ref points at the run's output in the store.
@@ -204,27 +225,21 @@ spec:
                     runID:
                       format: int32
                       type: integer
-                    verdict:
-                      description: |-
-                        Verdict is what a handler reports by writing into one of the out/
-                        directories. The three below are the vocabulary handlers can produce; the
-                        two after them are produced by the controller and can never be claimed by a
-                        handler, because a handler that could report "indeterminate" as a pass would
-                        break the one rule this design will not bend (P6).
-                      type: string
                   required:
+                  - outcome
                   - phase
                   - runID
-                  - verdict
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
               phase:
                 description: |-
-                  Phase is the fixed vocabulary a task moves through. It is deliberately not
-                  extensible: CiliumNetworkPolicies and Kyverno policies are written against
-                  these names, so a flow that could invent a phase could reach a pod nobody
-                  wrote a policy for. Flows choose the edges between phases, not the phases.
+                  Phase is a status name. It is a free string chosen by whoever writes the
+                  flow: this framework does not know what the work is, so it has no business
+                  naming its stages. "調査" and "Planning" are equally valid.
+
+                  Two names are reserved, because they are the framework's own answers rather
+                  than anything in the author's domain — see ReservedPhases.
                 type: string
               reworkBudget:
                 description: |-

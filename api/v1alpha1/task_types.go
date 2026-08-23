@@ -62,14 +62,26 @@ type RunRef struct {
 	JobName string `json:"jobName,omitempty"`
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
+
+	// InfraRetries counts attempts lost to something other than the handler's
+	// judgement. It is not in the design's status example, but maxInfraRetries
+	// cannot be enforced without somewhere to count.
+	// +optional
+	InfraRetries int32 `json:"infraRetries,omitempty"`
 }
 
 // HistoryEntry records a completed run. This is the audit trail; the artifacts
 // it points at live in object storage, never in etcd.
 type HistoryEntry struct {
-	Phase   Phase   `json:"phase"`
-	RunID   int32   `json:"runID"`
-	Verdict Verdict `json:"verdict"`
+	Phase Phase `json:"phase"`
+	RunID int32 `json:"runID"`
+	// Directory the handler wrote into, empty when the run produced no single
+	// answer.
+	// +optional
+	Directory string `json:"directory,omitempty"`
+	// Outcome is why the task moved: the framework's account of the run,
+	// recorded even when the handler said nothing.
+	Outcome string `json:"outcome"`
 	// Ref points at the run's output in the store.
 	// +optional
 	Ref string `json:"ref,omitempty"`

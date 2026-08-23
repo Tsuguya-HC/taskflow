@@ -9085,15 +9085,16 @@ spec:
                 minimum: 0
                 type: integer
               phase:
-                description: Phase this handler can fill.
-                enum:
-                - Triaging
-                - Planning
-                - PlanReview
-                - Implementing
-                - Review
-                - Verifying
+                description: |-
+                  Phase this handler can fill — a status name from the flow's own
+                  vocabulary. The framework owns only two names and refuses those; every
+                  other string is the author's to choose.
+                minLength: 1
                 type: string
+                x-kubernetes-validations:
+                - message: Escalated and Failed are decided by the controller; a handler
+                    cannot fill them
+                  rule: self != 'Escalated' && self != 'Failed'
               runner:
                 default:
                   type: Job
