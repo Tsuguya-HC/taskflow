@@ -1,0 +1,65 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+
+  "extends": [
+    // config:best-practices = config:recommended + docker:pinDigests
+    // + helpers:pinGitHubActionDigests + :configMigration + :pinDevDependencies
+    // + abandonments:recommended + security:minimumReleaseAgeNpm
+    // + :maintainLockFilesWeekly
+    "config:best-practices",
+
+    // aqua のネイティブ manager は Renovate に存在しない（asdf / mise のみ）。
+    // このプリセットが aqua.yaml のパッケージ版・レジストリ ref・ワークフローの
+    // aqua_version を拾う唯一の手段。レジストリ ref だけは aqua.yaml 側の
+    // `# renovate: depName=aquaproj/aqua-registry` コメントが必須
+    "github>aquaproj/aqua-renovate-config#2.13.0"
+  ],
+
+  "minimumReleaseAge": "3 days",
+
+  "customManagers": [
+    {
+      "description": [
+        "kubebuilder が生成した Makefile がツールを ?= でピンしている。",
+        "どの manager もここを読まないので、放っておくと controller-gen と",
+        "golangci-lint だけが更新から外れる。生成物なので再生成で消えうるが、",
+        "消えたことは CI の drift 検査（make test 後の git diff）で分かる。"
+      ],
+      "customType": "regex",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+ \\?= (?<currentValue>\\S+)"
+      ]
+    }
+  ],
+
+  "packageRules": [
+    {
+      "description": [
+        "First-party code does not soak. minimumReleaseAge buys time for someone",
+        "else to notice a poisoned release before we take it; there is no someone",
+        "else here — we wrote it, reviewed it and merged it."
+      ],
+      "matchPackageNames": ["Tsuguya/**"],
+      "minimumReleaseAge": "0"
+    },
+    {
+      "description": [
+        "A digest has no release date attached (renovate#38656), so the age gate",
+        "cannot be evaluated and renovate/stability-days is set but never clears.",
+        "horenso#22 sat pending on exactly this for 84 days."
+      ],
+      "matchUpdateTypes": ["digest", "pinDigest"],
+      "minimumReleaseAge": "0"
+    },
+    {
+      "description": [
+        "Go の直接依存は控えめに束ねる。controller-runtime と k8s.io/* は",
+        "版が噛み合っている必要があり、片方だけ上げると envtest が落ちる。"
+      ],
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/**"],
+      "groupName": "kubernetes libraries"
+    }
+  ]
+}
