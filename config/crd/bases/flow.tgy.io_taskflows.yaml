@@ -20,10 +20,10 @@ spec:
     - jsonPath: .spec.profile
       name: Profile
       type: string
-    - jsonPath: .status.conditions[?(@.type=="Accepted")].observedGeneration
-      name: Phases
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
       priority: 1
-      type: integer
+      type: string
     - jsonPath: .spec.reworkBudget
       name: Budget
       type: integer

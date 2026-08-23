@@ -58,7 +58,7 @@ type TaskHandlerSpec struct {
 	// other string is the author's to choose.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:XValidation:rule="self != 'Escalated' && self != 'Failed'",message="Escalated and Failed are decided by the controller; a handler cannot fill them"
-	Phase Phase `json:"phase"`
+	Phase Phase `json:"phase"` // CEL above must stay in sync with ReservedPhases (phase.go)
 
 	// +kubebuilder:default={type: Job}
 	// +optional

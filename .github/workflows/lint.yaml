@@ -87,9 +87,7 @@ jobs:
     permissions:
       contents: read
 
-  # renovate.jsonc はまだ無い（issue #25）。フィルタが一致しないので今は常に
-  # skip されるが、置いた瞬間に検査が始まる。設定を足したのに検査を足し忘れる
-  # 側の穴を先に塞いでおく。
+  # renovate.jsonc は既にある。renovate.json* を触った PR では毎回このジョブが走る。
   lint-renovate:
     needs: detect
     if: ${{ needs.detect.outputs.renovate == 'true' }}

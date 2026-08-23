@@ -78,6 +78,15 @@ func TestVisitedIgnoresWhereItStopped(t *testing.T) {
 	}
 }
 
+// TaskStatus.Phase is +optional: a task that has not been dispatched yet has
+// none set. Visited must not treat that as a phase named "" having run.
+func TestVisitedBeforeFirstDispatch(t *testing.T) {
+	got := Visited(&flowv1alpha1.TaskStatus{}, flow())
+	if len(got) != 0 {
+		t.Fatalf("visited = %v, want empty before any run", got)
+	}
+}
+
 func TestAdvanceRecordsAndMoves(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
 		Phase:        phaseReport,
@@ -121,6 +130,9 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 	Advance(s, flow(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, "", at)
 	if s.CurrentRun != nil {
 		t.Fatal("a finished task has nothing in flight; a stale currentRun would make a late verdict look owned")
+	}
+	if s.RunID != 1 {
+		t.Fatalf("runID = %d, want 1 — a terminal move starts no run, so \"current or last run\" must still name the one that happened", s.RunID)
 	}
 }
 

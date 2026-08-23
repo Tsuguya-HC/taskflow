@@ -42,6 +42,10 @@ const (
 // destination. They are the two outcomes the framework owns, and a flow that
 // could bind them could route "no answer" onto its own success path — which
 // is the one thing this design will not allow to be one line away.
+//
+// The CEL rule on TaskHandlerSpec.Phase (taskhandler_types.go) re-encodes
+// these two names as a literal, since CEL cannot reference a Go const —
+// update it too if this changes.
 var ReservedPhases = []Phase{PhaseEscalated, PhaseFailed}
 
 // IsReserved reports whether p is one of the framework's own outcomes.
