@@ -17,71 +17,104 @@ limitations under the License.
 package v1alpha1
 
 import (
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// RunnerType selects how a phase is executed.
+//
+// Argo Workflows is deliberately absent. Multi-step work fits in one pod with
+// shared volumes, so an Argo runner would buy only the reuse of existing
+// WorkflowTemplates — not worth the dependency, and a single pod structurally
+// avoids the "emptyDir is not shared between steps" trap that cost a day.
+// +kubebuilder:validation:Enum=Job;External
+type RunnerType string
 
-// TaskHandlerSpec defines the desired state of TaskHandler
-type TaskHandlerSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+const (
+	// RunnerJob runs the handler as a batch Job. The only runner in Step 1.
+	RunnerJob RunnerType = "Job"
+	// RunnerExternal means something outside the cluster fills the phase and
+	// reports back. A human reviewer is this.
+	RunnerExternal RunnerType = "External"
+)
 
-	// foo is an example field of TaskHandler. Edit taskhandler_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+type RunnerSpec struct {
+	// +kubebuilder:default=Job
+	Type RunnerType `json:"type"`
 }
 
-// TaskHandlerStatus defines the observed state of TaskHandler.
+// TaskHandlerSpec is the box that fills one phase.
+//
+// There is no field here for a prompt, a model, an API key, a store or a
+// notification target, and that absence is the design: the controller's
+// vocabulary is phases, Jobs and verdicts, and everything an LLM needs lives
+// in the pod spec its author writes. The same shape therefore accepts a
+// linter, a test suite or a shell script — from the controller's side there is
+// no difference between those and an agent.
+type TaskHandlerSpec struct {
+	// Phase this handler can fill.
+	// +kubebuilder:validation:Enum=Triaging;Planning;PlanReview;Implementing;Review;Verifying
+	Phase Phase `json:"phase"`
+
+	// +kubebuilder:default={type: Job}
+	// +optional
+	Runner RunnerSpec `json:"runner,omitzero"`
+
+	// JobTemplate is handed to the runner as written. The controller does not
+	// add labels, service accounts or images to it: what a pod must carry to
+	// be selected by a network policy is a property of the cluster it runs in,
+	// not something a framework may decide. What the framework provides is one
+	// place to say it — the same shape CronJob uses — rather than the two
+	// locations with differing semantics that Argo requires.
+	//
+	// Required when runner.type is Job; ignored when it is External.
+	// +optional
+	JobTemplate *batchv1.JobTemplateSpec `json:"jobTemplate,omitempty"`
+
+	// Timeout is the single source of truth for how long a run may take. The
+	// controller writes it into the Job as well, so the kubelet enforces it
+	// too; setting activeDeadlineSeconds yourself is rejected.
+	// +optional
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// MaxInfraRetries bounds retries for failures that are not the handler's
+	// judgement — an image that would not pull, an evicted pod. A handler that
+	// ran and reached no conclusion is not retried here; it is indeterminate,
+	// and indeterminate goes to a human.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxInfraRetries int32 `json:"maxInfraRetries,omitempty"`
+}
+
 type TaskHandlerStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the TaskHandler resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
 	// +listType=map
 	// +listMapKey=type
-	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=th
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.spec.phase`
+// +kubebuilder:printcolumn:name="Runner",type=string,JSONPath=`.spec.runner.type`
+// +kubebuilder:printcolumn:name="Timeout",type=string,JSONPath=`.spec.timeout`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// TaskHandler is the Schema for the taskhandlers API
+// TaskHandler is a reusable box that fills one phase. Flows name it; it does
+// not know which flows use it.
 type TaskHandler struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of TaskHandler
-	// +required
-	Spec TaskHandlerSpec `json:"spec"`
-
-	// status defines the observed state of TaskHandler
-	// +optional
-	Status TaskHandlerStatus `json:"status,omitzero"`
+	Spec   TaskHandlerSpec   `json:"spec,omitempty"`
+	Status TaskHandlerStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// TaskHandlerList contains a list of TaskHandler
+// TaskHandlerList contains a list of TaskHandler.
 type TaskHandlerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

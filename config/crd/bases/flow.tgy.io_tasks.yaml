@@ -14,10 +14,26 @@ spec:
     singular: task
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.flow
+      name: Flow
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.runID
+      name: Run
+      type: integer
+    - jsonPath: .status.reworkBudget
+      name: Budget
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Task is the Schema for the tasks API
+        description: Task is one execution of a flow.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +53,49 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Task
+            description: |-
+              TaskSpec is the whole instance. Four fields, three of them optional: whoever
+              creates a task — a cron, an event, an agent — does not have to know the
+              graph, and the graph can change without them changing.
+
+              The spec is immutable after creation. Editing what a running task was asked
+              to do would leave its history describing a question nobody asked.
             properties:
-              foo:
-                description: foo is an example field of Task. Edit task_types.go to
-                  remove/update
+              dedupKey:
+                description: |-
+                  DedupKey suppresses creation while another task with the same key is
+                  still running. Useful when the producer is an event source that may
+                  deliver twice.
                 type: string
+              flow:
+                description: |-
+                  Flow is resolved in this namespace, always. There is no field naming
+                  another namespace, so "which flows may I start" collapses into "which
+                  namespaces may I create a Task in" — which plain RBAC can express, and
+                  field values cannot.
+                minLength: 1
+                type: string
+              input:
+                description: |-
+                  Input is written to in/input.json and exposed to prompts as template
+                  variables. Its shape is the flow author's business; the controller only
+                  carries it.
+                x-kubernetes-preserve-unknown-fields: true
+            required:
+            - flow
             type: object
           status:
-            description: status defines the observed state of Task
+            description: |-
+              TaskStatus holds control state only. Logs, reports and results are
+              references — etcd has been lost twice here, and a design that puts payloads
+              in it turns that from an outage into data loss.
             properties:
+              artifacts:
+                properties:
+                  store:
+                    type: string
+                type: object
               conditions:
-                description: |-
-                  conditions represent the current state of the Task resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,9 +154,89 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              currentRun:
+                description: |-
+                  RunRef identifies one execution of one phase. runID separates the second
+                  visit to a phase from the first, so a rework does not read what the previous
+                  attempt left behind.
+                properties:
+                  deadline:
+                    format: date-time
+                    type: string
+                  jobName:
+                    description: |-
+                      JobName is derived deterministically from the task, phase and runID, so
+                      a controller restart re-creates the same object instead of a second one.
+                    type: string
+                  phase:
+                    description: |-
+                      Phase is the fixed vocabulary a task moves through. It is deliberately not
+                      extensible: CiliumNetworkPolicies and Kyverno policies are written against
+                      these names, so a flow that could invent a phase could reach a pod nobody
+                      wrote a policy for. Flows choose the edges between phases, not the phases.
+                    type: string
+                  runID:
+                    format: int32
+                    type: integer
+                required:
+                - phase
+                - runID
+                type: object
+              history:
+                items:
+                  description: |-
+                    HistoryEntry records a completed run. This is the audit trail; the artifacts
+                    it points at live in object storage, never in etcd.
+                  properties:
+                    finishedAt:
+                      format: date-time
+                      type: string
+                    phase:
+                      description: |-
+                        Phase is the fixed vocabulary a task moves through. It is deliberately not
+                        extensible: CiliumNetworkPolicies and Kyverno policies are written against
+                        these names, so a flow that could invent a phase could reach a pod nobody
+                        wrote a policy for. Flows choose the edges between phases, not the phases.
+                      type: string
+                    ref:
+                      description: Ref points at the run's output in the store.
+                      type: string
+                    runID:
+                      format: int32
+                      type: integer
+                    verdict:
+                      description: |-
+                        Verdict is what a handler reports by writing into one of the out/
+                        directories. The three below are the vocabulary handlers can produce; the
+                        two after them are produced by the controller and can never be claimed by a
+                        handler, because a handler that could report "indeterminate" as a pass would
+                        break the one rule this design will not bend (P6).
+                      type: string
+                  required:
+                  - phase
+                  - runID
+                  - verdict
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              phase:
+                description: |-
+                  Phase is the fixed vocabulary a task moves through. It is deliberately not
+                  extensible: CiliumNetworkPolicies and Kyverno policies are written against
+                  these names, so a flow that could invent a phase could reach a pod nobody
+                  wrote a policy for. Flows choose the edges between phases, not the phases.
+                type: string
+              reworkBudget:
+                description: |-
+                  ReworkBudget remaining. Counted down by the controller as reworks are
+                  taken, never declared by the flow.
+                format: int32
+                type: integer
+              runID:
+                description: RunID of the current or last run.
+                format: int32
+                type: integer
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true

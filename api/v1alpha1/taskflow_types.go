@@ -21,70 +21,106 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// Profile is a validation schema, not a behaviour switch: it says which phases
+// a flow must bind. It is a controller-side enum rather than a third CRD —
+// adding one should mean code, tests and a matching network policy, not a line
+// of YAML.
+// +kubebuilder:validation:Enum=investigate
+type Profile string
 
-// TaskFlowSpec defines the desired state of TaskFlow
-type TaskFlowSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+const (
+	ProfileInvestigate Profile = "investigate"
+)
 
-	// foo is an example field of TaskFlow. Edit taskflow_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+// PhaseBinding says who fills a phase and where each of their verdicts leads.
+// Both halves are required. Edges live here rather than in a global table
+// because the destination of (Review, pass) differs per flow; a global table
+// would need the profile as an argument to the transition function, and that
+// argument was where the first version had its bug.
+type PhaseBinding struct {
+	// Handler names a TaskHandler in the same namespace. There is deliberately
+	// no field for another namespace: keeping resolution local reduces "which
+	// flows may I start" to "which namespaces may I create a Task in", which
+	// plain RBAC can express.
+	// +kubebuilder:validation:MinLength=1
+	Handler string `json:"handler"`
+
+	// Outcomes maps a verdict to the next phase. A verdict that is not listed
+	// routes to Escalated — unknown is not approval. indeterminate and timeout
+	// may not appear here at all.
+	// +kubebuilder:validation:MinProperties=1
+	Outcomes map[Verdict]Phase `json:"outcomes"`
 }
 
-// TaskFlowStatus defines the observed state of TaskFlow.
+// TTLSpec is how long a finished task sticks around. Cleanup is anchored on
+// the Task and propagates through ownerReferences; Jobs are never given a TTL
+// of their own, because a Job that deletes itself takes the verdict with it.
+type TTLSpec struct {
+	// +optional
+	Succeeded *metav1.Duration `json:"succeeded,omitempty"`
+	// +optional
+	Failed *metav1.Duration `json:"failed,omitempty"`
+}
+
+// TaskFlowSpec is the topology. It is validated once, when the TaskFlow is
+// created, and not re-derived per task.
+type TaskFlowSpec struct {
+	Profile Profile `json:"profile"`
+
+	// Bindings is keyed by phase name.
+	// +kubebuilder:validation:MinProperties=1
+	Bindings map[Phase]PhaseBinding `json:"bindings"`
+
+	// ReworkBudget caps how many times this flow may send work back. It is
+	// spent at runtime by the controller, never declared per edge — an edge
+	// that had to say "and decrement" would be an expression, and expressions
+	// cannot be checked without running them (P9).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ReworkBudget int32 `json:"reworkBudget,omitempty"`
+
+	// MaxInFlight caps concurrent tasks of this flow.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxInFlight *int32 `json:"maxInFlight,omitempty"`
+
+	// +optional
+	TTL *TTLSpec `json:"ttl,omitempty"`
+}
+
+// TaskFlowStatus reports whether the flow was accepted. Nothing reconciles a
+// TaskFlow on its own; this is set when it is validated.
 type TaskFlowStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the TaskFlow resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
 	// +listType=map
 	// +listMapKey=type
-	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=tf
+// +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profile`
+// +kubebuilder:printcolumn:name="Phases",type=integer,JSONPath=`.status.conditions[?(@.type=="Accepted")].observedGeneration`,priority=1
+// +kubebuilder:printcolumn:name="Budget",type=integer,JSONPath=`.spec.reworkBudget`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// TaskFlow is the Schema for the taskflows API
+// TaskFlow is the type of a task: which phases exist, who fills them, and
+// where each verdict leads.
 type TaskFlow struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of TaskFlow
-	// +required
-	Spec TaskFlowSpec `json:"spec"`
-
-	// status defines the observed state of TaskFlow
-	// +optional
-	Status TaskFlowStatus `json:"status,omitzero"`
+	Spec   TaskFlowSpec   `json:"spec,omitempty"`
+	Status TaskFlowStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// TaskFlowList contains a list of TaskFlow
+// TaskFlowList contains a list of TaskFlow.
 type TaskFlowList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []TaskFlow `json:"items"`
 }
 
