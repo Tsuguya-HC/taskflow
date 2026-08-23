@@ -106,7 +106,7 @@ type TaskFlowStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=tf
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profile`
-// +kubebuilder:printcolumn:name="Phases",type=integer,JSONPath=`.status.conditions[?(@.type=="Accepted")].observedGeneration`,priority=1
+// +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
 // +kubebuilder:printcolumn:name="Budget",type=integer,JSONPath=`.spec.reworkBudget`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

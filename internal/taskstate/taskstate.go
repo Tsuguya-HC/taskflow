@@ -70,14 +70,16 @@ func Advance(
 
 	status.Phase = res.Next
 	status.ReworkBudget = res.Budget
-	status.RunID++
 
 	// A stopped task has nothing in flight. Leaving a stale currentRun here
-	// would let a late answer look like it belonged to something.
+	// would let a late answer look like it belonged to something, and
+	// incrementing runID here would leave status.runID naming a run that
+	// never happened — "last run" would stop being true.
 	if transition.IsTerminal(bindings, res.Next) {
 		status.CurrentRun = nil
 		return
 	}
+	status.RunID++
 	status.CurrentRun = &flowv1alpha1.RunRef{Phase: res.Next, RunID: status.RunID}
 }
 

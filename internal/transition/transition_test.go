@@ -117,6 +117,18 @@ func TestNoSingleAnswerEscalates(t *testing.T) {
 	}
 }
 
+// The fail-closed path (P6) needs a message even when the caller did not
+// bother to say why — an empty NoAnswer must not become an empty Detail.
+func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
+	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Visited: visited(phaseInvestigate), Budget: 2})
+	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
+		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
+	}
+	if got.Detail != "the run produced no single answer" {
+		t.Fatalf("detail = %q, want the default message", got.Detail)
+	}
+}
+
 // The handler cannot invent this — the directory would not exist — but a flow
 // edited under a running task can leave one behind.
 func TestUndeclaredDirectoryEscalates(t *testing.T) {
@@ -169,6 +181,9 @@ func TestForwardEdgesIgnoreBudget(t *testing.T) {
 	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 0})
 	if got.Next != phaseReport || got.Outcome != OutcomeDeclared {
 		t.Fatalf("got %q/%q, want 報告/Declared with no budget", got.Next, got.Outcome)
+	}
+	if got.Budget != 0 {
+		t.Fatalf("budget = %d, want it untouched at 0 — a forward edge must not spend it", got.Budget)
 	}
 }
 
