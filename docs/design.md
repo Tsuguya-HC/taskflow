@@ -1,4 +1,4 @@
-# AgentTask — フェーズ管理エージェント実行基盤（設計メモ）
+# フェーズ管理エージェント実行基盤（設計メモ）
 
 status: draft / 未着手
 date: 2026-08-21
@@ -69,7 +69,7 @@ date: 2026-08-21
 
 | 層 | 担当 | 実体 |
 |---|---|---|
-| 意図・フェーズ・監査 | AgentTask | 自作コントローラ |
+| 意図・フェーズ・監査 | Task | 自作コントローラ |
 | 実行環境の形 | （将来）SandboxTemplate | 上流 kubernetes-sigs/agent-sandbox |
 | 1 フェーズの実行 | Job | **batch/v1（組み込み・依存なし）** |
 | タスクの起票・定期実行 | 任意 | Argo CronWorkflow / CronJob / 人間（コントローラの関知外） |
@@ -98,6 +98,32 @@ CronJob→Job、WorkflowTemplate→Workflow と同じ関係にする。
 31 行ぶんの間違え方があるが、`flow` 名 + `input` の 4 行なら壊し方がほとんど無く、
 残りは admission が検証する。**分割は「あると綺麗」ではなく必須。**
 
+### API group と kind（確定）
+
+```
+apiVersion: flow.tgy.io/v1alpha1
+
+kind: TaskFlow      # 型     — トポロジ（どのフェーズを誰が埋め、どこへ行くか）
+kind: TaskHandler   # 型     — 誰が埋めるか（権限・Pod の形・何を実行するか）
+kind: Task          # 実体   — flow と input だけ
+```
+
+実体を `AgentTask` から **`Task`** に変えた。`AgentHandler` → `TaskHandler` の理由
+（handler は lint / CI / 人間になりうるので誤称）が実体側にもそのまま当てはまり、
+**エージェントが実行するとは限らないものを `Agent*` と呼ぶ**のは同じ誤りだった。
+接頭辞が `Task*` と `Agent*` に割れていたのも、その名残でしかない。
+
+group は `flow.tgy.io`。**リソースとして存在するのは Flow / Handler / Task の 3 つで、
+「フェーズ」は `TaskFlow` の中のフィールドでしかない**ため、`phases.tgy.io` は
+リソースでないものを主語に置くことになる。group は `argoproj.io` / `tekton.dev` / `batch` と同じく
+その API 面の主語を指すもので、ここでの主語は flow。
+
+`tasks.tgy.io` も技術的な衝突は無いが、完全修飾が `tasks.tasks.tgy.io` になるだけで意味が増えない。
+クラスタに `Task` を名乗る kind は無く（Argo のものは `WorkflowTask*` 接頭辞）、
+`kubectl get task` は曖昧にならない（実測）。
+
+**この決定は CRD を 1 行も書いていない時点で行った。** 書いた後だと API バージョンの話になる。
+
 ### TaskFlow（型 / **namespaced**、GitOps）
 
 ```yaml
@@ -119,10 +145,10 @@ spec:
 
 厳格検証（到達性・必須束縛・予約語・自己レビュー禁止）は **TaskFlow の作成時に一度だけ**走る。
 
-### AgentTask（実体 / namespaced）
+### Task（実体 / namespaced）
 
 ```yaml
-kind: AgentTask
+kind: Task
 spec:
   flow: cnp-check
   input:                      # タスク固有の入力。in/input.json に落ちる + プロンプトのテンプレート変数
@@ -137,7 +163,7 @@ spec:
 
 `spec.flow` は **常に同一 namespace で解決する**。参照先の namespace を指定するフィールドを作らない。
 
-これで「どの flow を起動できるか」が「**どの namespace に AgentTask を作れるか**」に還元され、
+これで「どの flow を起動できるか」が「**どの namespace に Task を作れるか**」に還元され、
 **素の RBAC で表現できる**。RBAC はフィールド値では絞れない（`resourceNames` は既存オブジェクトの
 get/update/delete 用）ので、当初は ValidatingAdmissionPolicy を持ち出していたが、
 問題の方を namespace に寄せれば admission policy は要らない。
@@ -177,7 +203,7 @@ namespace ごとに生成すればよく、cluster-scoped な種類を足す理�
 新設するものは無い。
 
 注意点は 1 つ。**`ownerReference` も namespace を跨げない**ので、チェーンの GC と追跡は
-framework の外になる。独立した 2 本の AgentTask になり親子関係が残らないので、
+framework の外になる。独立した 2 本の Task になり親子関係が残らないので、
 `input` に相関 ID を持たせてログとレポート側で辿れるようにしておく。
 
 **先例として `ClusterWorkflowTemplate` がある。** 当初 cluster-scoped にしようとしていたのは
@@ -203,7 +229,7 @@ status:
 フェーズを埋める「箱」。先に作っておいて、使うときに名前で指名する。
 
 ```yaml
-kind: AgentHandler
+kind: TaskHandler
 metadata: {name: claude-reviewer}
 spec:
   phase: Review
@@ -288,7 +314,7 @@ runner の選択とは別に、**包む単位**という論点自体は残る。
 
 | 層 | `runner` が見えるか |
 |---|---|
-| `AgentTask`（実体、エージェントが書く） | **見えない**（`flow` と `input` だけ） |
+| `Task`（実体、エージェントが書く） | **見えない**（`flow` と `input` だけ） |
 | `TaskFlow`（型） | **見えない** |
 | `TaskHandler`（人間が git で書く、6 個程度） | 見える。**handler ごとに 1 回だけ** |
 
@@ -338,7 +364,7 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
 
-- `ownerReferences`（AgentTask 所有）と決定論的な Job 名
+- `ownerReferences`（Task 所有）と決定論的な Job 名
 - ラベル（`agent.tgy.io/{phase,profile,task-uid}`）
 - env: `AGENT_TASK_UID` / `AGENT_RUN_ID` / `AGENT_PHASE` / `AGENT_INPUT`（`spec.input` の JSON）
 - `activeDeadlineSeconds`（handler の `timeout` から）
@@ -357,7 +383,7 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 | フィールド | 拒否する理由 |
 |---|---|
 | `backoffLimit`（0 以外） | リトライ機構が 2 つになる。Job 内リトライは runID が据え置きで、前回の残骸と同じ prefix を見る |
-| `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は AgentTask の TTL + ownerRef に一本化 |
+| `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化 |
 | `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） |
 | `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる |
 | `restartPolicy: OnFailure` | 同上（Pod 内再起動で out/ に前回の残骸が残る）。`Never` のみ許可 |
@@ -470,7 +496,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | `Done` に到達する経路が 1 本も無い | 成功しえないタスク |
 | jobTemplate の予約フィールド（§4 の表） | 不変条件を壊す |
 
-**`AgentTask.spec` は作成後 immutable**（CEL の `oldSelf` で拒否）。
+**`Task.spec` は作成後 immutable**（CEL の `oldSelf` で拒否）。
 実行中にグラフが書き換わる race を丸ごと消す。変更したければ作り直す。
 
 ### 実行時の矛盾は修復せず `Failed`
@@ -712,12 +738,12 @@ Renovate PR のトリアージ（Step 2）では、PR 本文や依存の release
 **終端 verdict を持てない**（`pass` でも Done に行かず必ず人間の承認を経由する）ものとする。
 v1 では該当タスクを載せないことで回避し、Step 2 で導入する。
 
-### AgentTask を作れることは特権である
+### Task を作れることは特権である
 
-`AgentTask` の create 権限を持つ者は、`spec.input` でプロンプトを操作しつつ任意の handler を
+`Task` の create 権限を持つ者は、`spec.input` でプロンプトを操作しつつ任意の handler を
 指名できる。**実質的に handler の SA の権限でコードを実行できる**（Pod create 権限と同じ構造）。
 
-これだけ最小権限を設計した以上、`claude-code` namespace の AgentTask create/update は
+これだけ最小権限を設計した以上、`claude-code` namespace の Task create/update は
 CronWorkflow の SA と管理者グループだけに絞る。ValidatingAdmissionPolicy で
 「この SA が指名できる profile / handler」も制限できる。
 
@@ -741,7 +767,7 @@ CronWorkflow の SA と管理者グループだけに絞る。ValidatingAdmissio
 | ワークスペース | 作業ツリー・plan.md・diff | S3 prefix または PVC | タスク中 |
 | 経緯・メモ（対人） | 各フェーズの報告・判断理由 | horenso posts | 永続 |
 | 横断知識 | 過去タスクの教訓 | Qdrant（memory.infra） | 永続 |
-| 制御状態 | phase / bindings / 参照 URL | AgentTask.status | タスク中 |
+| 制御状態 | phase / bindings / 参照 URL | Task.status | タスク中 |
 
 ### 「人間への報連相」と「フェーズ間の引き継ぎ」は別物
 
@@ -794,8 +820,8 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 
 | 層 | 手段 |
 |---|---|
-| K8s 内（Workflow / PVC / ConfigMap） | **ownerReferences** で AgentTask 所有 → カスケード |
-| AgentTask 自身 | **TTL**（succeeded 1h / failed 168h）※ etcd 保護のため必須 |
+| K8s 内（Workflow / PVC / ConfigMap） | **ownerReferences** で Task 所有 → カスケード |
+| Task 自身 | **TTL**（succeeded 1h / failed 168h）※ etcd 保護のため必須 |
 | K8s の外（S3 prefix / git ブランチ / Harbor タグ） | **`task-uid` + 定期 sweep**（1 本に統合） |
 
 ### S3 lifecycle は使わない（2026-08-22 実測）
@@ -810,8 +836,8 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
   実行中タスクの成果物が消える**（fail-closed で `indeterminate` にはなるが、原因が分からない）
 
 → **S3 の掃除も `task-uid` の sweep に寄せる。** 元々 git ブランチ・Harbor タグ用に sweep が必要なので、
-掃除機構が 1 本に減る。「対応する AgentTask が存在しない `task-uid` の prefix を消す」だけで、
-経過日数の判定すら要らない（TTL で AgentTask が消えた時点で対象になる）。
+掃除機構が 1 本に減る。「対応する Task が存在しない `task-uid` の prefix を消す」だけで、
+経過日数の判定すら要らない（TTL で Task が消えた時点で対象になる）。
 - finalizer は **best-effort + デッドライン**。N 分試して駄目なら外し、漏れは sweep に拾わせる。
   掃除の正しさを finalizer に賭けると、GitHub API が 500 を返しているだけで object が
   永久に Terminating で刺さる
@@ -874,7 +900,7 @@ S3 publish、プロンプト調整。
 
 ### Step 1 — コントローラ
 
-`AgentTask` + `AgentHandler`、runner は `Workflow` のみ、profile は `investigate` のみ。
+`TaskFlow` + `TaskHandler` + `Task`、runner は `Job` のみ、profile は `investigate` のみ。
 循環の骨格（遷移表 / runID / reworkBudget / history）は最初から入れるが、
 investigate では 1 つも発火しない。**正しさは単体テストで確かめ、実クラスタでは
 一番安全なタスクだけ回す。**
@@ -915,7 +941,7 @@ home-cluster には同居させない。**新規リポを 1 つ作る。**
 | リポ | 中身 |
 |---|---|
 | 新規（`agenttask`?） | コントローラ本体、CRD 定義（`config/crd/`）、遷移表と単体テスト、サイドカー、イメージビルド |
-| home-cluster | `apps/agenttask.yaml`、`AgentHandler` の箱、phase 別 CNP、Kyverno ポリシー |
+| home-cluster | `apps/phases.yaml`、`TaskHandler` の箱、phase 別 CNP、Kyverno ポリシー |
 
 **「エージェントが何をできるか」は home-cluster 側（PR レビューを通る）、「どう動くか」は新リポ。**
 P2（コントローラはポリシーを持たない）の分離がリポ境界と一致する。
@@ -950,7 +976,7 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
 
 ```yaml
 apiVersion: agent.tgy.io/v1alpha1
-kind: AgentHandler
+kind: TaskHandler
 metadata: {name: cnp-planner}
 spec:
   phase: Planning
@@ -988,7 +1014,7 @@ spec:
               volumeMounts: [{name: work, mountPath: /workspace}]
 ---
 apiVersion: agent.tgy.io/v1alpha1
-kind: AgentHandler
+kind: TaskHandler
 metadata: {name: cnp-reviewer}
 spec:
   phase: Review
@@ -1051,7 +1077,7 @@ spec:
 
 ```yaml
 apiVersion: agent.tgy.io/v1alpha1
-kind: AgentTask
+kind: Task
 metadata:
   generateName: cnp-check-
   namespace: claude-code
@@ -1079,7 +1105,7 @@ spec:
           action: create
           manifest: |
             apiVersion: agent.tgy.io/v1alpha1
-            kind: AgentTask
+            kind: Task
             metadata: {generateName: cnp-check-}
             spec:
               flow: cnp-check
@@ -1367,11 +1393,11 @@ Argo の `concurrencyPolicy: Forbid` は cron 1 本に対する制御であっ�
 
 ### ③ 生成元が選べる flow の制限
 
-「AgentTask を作れることは特権」は、**作るのがエージェントになると現実の問題**になる。
+「Task を作れることは特権」は、**作るのがエージェントになると現実の問題**になる。
 Issue を立てるエージェントが `infra-modify` 系の flow を指名できてはいけない。
 
 > `TaskFlow` / `TaskHandler` を namespaced にし、`spec.flow` を同一 namespace 解決に限る。
-> あとは **素の RBAC**（どの namespace に AgentTask を create できるか）で決まる（§4）
+> あとは **素の RBAC**（どの namespace に Task を create できるか）で決まる（§4）
 
 なお Implementing と Review は別 Pod でコンテキストを共有せず、レビュアーは `in/` の成果物しか
 見ない。**すでに「自己」レビューではない**ので、同一 handler を禁止する規則は置かない（§5）。
@@ -1405,18 +1431,18 @@ TaskSequence は**連鎖全体を定義時に一度 authorize する**。低権�
 
 「連鎖を定義できるか」が**単一の RBAC 付与**になる。粗いが正直な粒度で、
 **階層をまたぐ連鎖を定義する行為そのものが特権**であり、階層ごとに委譲するものではない。
-エージェントは自 namespace の `AgentTask` create だけを持ち、`TaskSequence` は持たない。
+エージェントは自 namespace の `Task` create だけを持ち、`TaskSequence` は持たない。
 
 #### 別コントローラ・別 SA にする
 
-TaskSequence は cross-namespace で AgentTask を create する。これを v1 のコントローラに
+TaskSequence は cross-namespace で Task を create する。これを v1 のコントローラに
 持たせると「**コントローラを取れば定義済みの任意の flow を任意の namespace で起動できる**」に
 なり、v1 の性質（コントローラはタスクを作らない）が後退する。
 
 | コントローラ | 権限 |
 |---|---|
-| AgentTask（v1） | 自 namespace の Job 作成と status 更新。**タスクは作らない** |
-| TaskSequence（v2） | cross-ns の AgentTask create のみ |
+| Task（v1） | 自 namespace の Job 作成と status 更新。**タスクは作らない** |
+| TaskSequence（v2） | cross-ns の Task create のみ |
 
 #### 枷 2 つ
 
@@ -1428,8 +1454,8 @@ TaskSequence は cross-namespace で AgentTask を create する。これを v1 
 
 #### 純粋に追加である
 
-`AgentTask` / `TaskFlow` / `TaskHandler` は 1 フィールドも変わらない。紐付けはラベル 1 枚
-（`agent.tgy.io/sequence`）。GC も**各 AgentTask が自分の TTL を持つ**ので、
+`Task` / `TaskFlow` / `TaskHandler` は 1 フィールドも変わらない。紐付けはラベル 1 枚
+（`agent.tgy.io/sequence`）。GC も**各 Task が自分の TTL を持つ**ので、
 TaskSequence が cross-ns の掃除をする必要がない（`ownerReference` は namespace を跨げない）。
 
 ### Step の順序への影響
