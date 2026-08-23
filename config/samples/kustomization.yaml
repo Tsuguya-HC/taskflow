@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- flow_v1alpha1_taskflow.yaml
+- flow_v1alpha1_taskhandler.yaml
+- flow_v1alpha1_task.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
