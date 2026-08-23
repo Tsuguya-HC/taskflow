@@ -45,18 +45,19 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: exampleFlow, Namespace: resourceNamespace},
 			Spec: flowv1alpha1.TaskFlowSpec{
 				Profile: flowv1alpha1.ProfileInvestigate,
+				// Statuses named by whoever wrote the flow, and directories
+				// named by them too. Nothing here comes from the framework.
 				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-					flowv1alpha1.PhasePlanning: {
-						Handler:  "claude-planner",
-						Outcomes: map[flowv1alpha1.Verdict]flowv1alpha1.Phase{flowv1alpha1.VerdictPass: flowv1alpha1.PhaseReview},
-					},
-					flowv1alpha1.PhaseReview: {
-						Handler: "claude-reviewer",
-						Outcomes: map[flowv1alpha1.Verdict]flowv1alpha1.Phase{
-							flowv1alpha1.VerdictPass:     flowv1alpha1.PhaseDone,
-							flowv1alpha1.VerdictRework:   flowv1alpha1.PhasePlanning,
-							flowv1alpha1.VerdictEscalate: flowv1alpha1.PhaseEscalated,
+					"調査": {
+						Handler: "claude-planner",
+						Next: map[flowv1alpha1.Phase]string{
+							"報告": "ok",
+							"調査": "more",
 						},
+					},
+					"報告": {
+						Handler: "claude-reviewer",
+						Next:    map[flowv1alpha1.Phase]string{"おわり": "sent"},
 					},
 				},
 				ReworkBudget: 2,
@@ -73,7 +74,7 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 		h := &flowv1alpha1.TaskHandler{
 			ObjectMeta: metav1.ObjectMeta{Name: "claude-reviewer", Namespace: resourceNamespace},
 			Spec: flowv1alpha1.TaskHandlerSpec{
-				Phase:  flowv1alpha1.PhaseReview,
+				Phase:  "報告",
 				Runner: flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
 				JobTemplate: &batchv1.JobTemplateSpec{
 					Spec: batchv1.JobSpec{
@@ -122,17 +123,17 @@ var _ = Describe("the API refuses what the design forbids", func() {
 			Spec: flowv1alpha1.TaskFlowSpec{
 				Profile: "whatever",
 				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-					flowv1alpha1.PhaseReview: {Handler: "h", Outcomes: map[flowv1alpha1.Verdict]flowv1alpha1.Phase{flowv1alpha1.VerdictPass: flowv1alpha1.PhaseDone}},
+					"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"おわり": "sent"}},
 				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, flow)).NotTo(Succeed())
 	})
 
-	It("refuses a handler bound to a terminal phase", func() {
+	It("refuses a handler bound to a name the framework owns", func() {
 		h := &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: "handler-for-done", Namespace: resourceNamespace},
-			Spec:       flowv1alpha1.TaskHandlerSpec{Phase: flowv1alpha1.PhaseDone},
+			ObjectMeta: metav1.ObjectMeta{Name: "handler-for-escalated", Namespace: resourceNamespace},
+			Spec:       flowv1alpha1.TaskHandlerSpec{Phase: flowv1alpha1.PhaseEscalated},
 		}
 		Expect(k8sClient.Create(ctx, h)).NotTo(Succeed())
 	})

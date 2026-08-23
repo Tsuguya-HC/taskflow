@@ -53,8 +53,11 @@ type RunnerSpec struct {
 // linter, a test suite or a shell script — from the controller's side there is
 // no difference between those and an agent.
 type TaskHandlerSpec struct {
-	// Phase this handler can fill.
-	// +kubebuilder:validation:Enum=Triaging;Planning;PlanReview;Implementing;Review;Verifying
+	// Phase this handler can fill — a status name from the flow's own
+	// vocabulary. The framework owns only two names and refuses those; every
+	// other string is the author's to choose.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self != 'Escalated' && self != 'Failed'",message="Escalated and Failed are decided by the controller; a handler cannot fill them"
 	Phase Phase `json:"phase"`
 
 	// +kubebuilder:default={type: Job}

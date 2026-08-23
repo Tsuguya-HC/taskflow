@@ -32,11 +32,17 @@ const (
 	ProfileInvestigate Profile = "investigate"
 )
 
-// PhaseBinding says who fills a phase and where each of their verdicts leads.
-// Both halves are required. Edges live here rather than in a global table
-// because the destination of (Review, pass) differs per flow; a global table
-// would need the profile as an argument to the transition function, and that
-// argument was where the first version had its bug.
+// PhaseBinding says who fills a phase and where each of their answers leads.
+//
+// Next is keyed by the status to move to, and its value is the directory a
+// handler writes into to choose that status. One declaration does three jobs:
+// it is the edge, it is the set of directories the framework creates for the
+// run, and — because those are the only directories that exist — it is the
+// handler's entire vocabulary. A token outside it cannot be produced rather
+// than merely being rejected.
+//
+// Two statuses must not share a directory; that is refused at creation, since
+// at runtime it would leave the destination undecidable.
 type PhaseBinding struct {
 	// Handler names a TaskHandler in the same namespace. There is deliberately
 	// no field for another namespace: keeping resolution local reduces "which
@@ -45,11 +51,10 @@ type PhaseBinding struct {
 	// +kubebuilder:validation:MinLength=1
 	Handler string `json:"handler"`
 
-	// Outcomes maps a verdict to the next phase. A verdict that is not listed
-	// routes to Escalated — unknown is not approval. indeterminate and timeout
-	// may not appear here at all.
+	// Next maps a destination status to the directory that selects it.
+	// A destination with no binding of its own is where the task stops.
 	// +kubebuilder:validation:MinProperties=1
-	Outcomes map[Verdict]Phase `json:"outcomes"`
+	Next map[Phase]string `json:"next"`
 }
 
 // TTLSpec is how long a finished task sticks around. Cleanup is anchored on

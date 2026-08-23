@@ -35,7 +35,7 @@ date: 2026-08-21
 | P6 | **判定不能は絶対に pass に倒さない** | 不明 → `indeterminate` → Escalated |
 | P7 | **コントローラは LLM を知らない** | プロンプト・モデル・API キー・store は全てユーザーの pod spec の話。コントローラの語彙は「フェーズ・Job・verdict」だけ |
 | P8 | **厳格に検証し、矛盾したら即座に終わる** | デフォルト値・暗黙のマージ・推測による修復をしない。構造的な矛盾は修復せず `Failed`。曖昧なまま進むより止まる方が安い |
-| P9 | **宣言に式を書かせない** | 遷移は `outcomes` のテーブル引きだけ。条件式・算術・テンプレート分岐を入れると、正しさが実行するまで分からなくなる |
+| P9 | **宣言に式を書かせない** | 遷移は `next` のテーブル引きだけ。条件式・算術・テンプレート分岐を入れると、正しさが実行するまで分からなくなる |
 
 ### 式を持たないこと（P9）
 
@@ -43,12 +43,12 @@ date: 2026-08-21
 
 | | 許す | 許さない |
 |---|---|---|
-| 遷移 | `outcomes: {pass: Verifying, rework: Implementing}` | `when: "... == pass && budget > 0"` |
+| 遷移 | `next: {報告: ok, 調査: more}` | `when: "... == pass && budget > 0"` |
 | 予算 | 実行時にコントローラが数える | `{{=asInt(budget) - 1}}` |
 | 入力 | `input` の値をプロンプトへ差し込む | 入力の値による分岐 |
 
 理由は**検証可能性の一点**。テーブルは create 時に全件検査できる — 未知の verdict、
-到達不能なフェーズ、`outcomes` の欠落、失敗系の上書き。式は**走らせるまで正しさが分からない**。
+到達不能なフェーズ、`next` の欠落、同じディレクトリを指す 2 ステータス。式は**走らせるまで正しさが分からない**。
 
 §19 で測ったとおり、Argo では `- 1` を `+ 1` と書いても止まらず、`when` 2 本が補集合になって
 いるかも誰も見ない。表現力があることと、書き間違いを検出できることは別で、
@@ -165,12 +165,14 @@ metadata: {name: cnp-check}
 spec:
   profile: investigate        # 必須フェーズを規定する検証スキーマ（コントローラ組み込みの enum）
   bindings:                   # 各フェーズを誰が埋めるか + 次にどこへ行くか（両方必須）
-    Planning:
-      handler: claude-planner
-      outcomes: {ok: Review}
-    Review:
-      handler: claude-reviewer
-      outcomes: {pass: Done, rework: Planning, escalate: Escalated}
+    調査:                      # ステータス名は利用側が決める
+      handler: cnp-reader
+      next:                   # 「このステータスへ行くには、このディレクトリに書く」
+        報告: ok
+        調査: more
+    報告:
+      handler: discord-notify
+      next: {おわり: sent}     # おわり は束縛が無い = そこで止まる
   reworkBudget: 2
   maxInFlight: 2              # この flow の同時実行数上限
   ttl: {succeeded: 1h, failed: 168h}
@@ -369,7 +371,7 @@ verdict を書くのが人間の `kubectl patch` でも Argo Events 経由の we
 ```yaml
 Review:
   handlers: [lint, test, agent-review]
-  outcomes: {pass: Verifying, rework: Implementing, escalate: Escalated}
+  next: {検証: ok, 実装: rework, Escalated: stuck}
 ```
 
 合成規則は**固定**（設定可能にすると DSL 化する）:
@@ -437,6 +439,8 @@ profile を増やすのは「コード変更 + テスト + 対応する CNP の�
 
 ## 5. フェーズと遷移
 
+**ステータス名は利用側のもの。** framework は語彙を持たない。下は 1 つの例にすぎない:
+
 ```
 Pending → Triaging → Planning ⇄ PlanReview
                                     ↓
@@ -447,24 +451,38 @@ Pending → Triaging → Planning ⇄ PlanReview
                             Escalated（人間へ）/ Failed
 ```
 
+初版はこの語彙を framework が固定していた（理由は「CNP / Kyverno がこの名前に対して書かれるから」）。
+**それは利用側のドメインを framework が決めることだった。** ポリシーを書くのは利用側で、
+どんな名前に対して書くかも利用側が決めればよい。§2 の責務表に照らせば取り違えで、
+`Pod の形` をコントローラに持たせようとしたのと同じ誤り。
+
+framework が持つ名前は **2 つだけ**:
+
+| 名前 | いつ | 束縛できるか |
+|---|---|---|
+| `Escalated` | 答えが 1 つに定まらなかった（0 個 / 2 個以上 / 時間切れ / 宣言に無いディレクトリ） | ✗ |
+| `Failed` | flow 自体が壊れている（束縛の無いフェーズ、同じディレクトリを指す 2 ステータス） | ✗ |
+
+**束縛の無いステータスが終端。** `Done` を特別扱いしない — 行き先を持たないなら、そこで止まる。
+
 **循環するのが本質。** Argo Workflow の DAG は非巡回なので差し戻しが表現できない。
 これがコントローラを書く最大の理由。
 
 ### 遷移関数
 
-遷移表はコントローラが持たない。**`bindings[phase].outcomes` が辺を宣言し、それが必須。**
+遷移表はコントローラが持たない。**`bindings[phase].next` が辺を宣言し、それが必須。**
 
 ```
-next(bindings, phase, verdict, visited, budget) → phase
+next(bindings, phase, directory, visited, budget) → phase
 ```
 
 コントローラ組み込みなのは**失敗系だけ**：
 
 ```
-verdict が outcomes に無い     → Escalated   （未知のトークン = 判定不能）
-verdict == timeout            → Escalated
-verdict == indeterminate      → Escalated
-構造的な矛盾（下記）           → Failed
+非空ディレクトリがちょうど 1 つでない  → Escalated   （0 個も 2 個以上も時間切れも同じ）
+宣言に無いディレクトリ                → Escalated
+束縛の無いフェーズ                    → Failed
+同じディレクトリを指す 2 ステータス    → Failed（行き先が決まらない）
 ```
 
 **失敗系は宣言で上書きできない。** ここを可変にすると P6（判定不能を pass に倒さない）が
@@ -480,7 +498,7 @@ YAML 一行で破れる。
 
 ### 予算消費は宣言させず、実行時に判定する
 
-`outcomes` で自由に辺を張れると、減少する量のない循環が書けてしまう。
+`next` で自由に辺を張れると、減少する量のない循環が書けてしまう。
 `consumesBudget: true` のような注釈にすると付け忘れる。
 
 > **遷移先が「このタスクで既に訪問済みのフェーズ」なら、自動的に rework 辺とみなして
@@ -513,11 +531,13 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 
 | 条件 | 拒否理由 |
 |---|---|
-| `outcomes` が無い binding がある | 必須。デフォルトの行き先を推測しない |
+| `next` が無い binding がある | 必須。デフォルトの行き先を推測しない |
 | profile に含まれるフェーズに binding が無い | 実行中に「行き先はあるが担い手が無い」で止まる |
 | profile に無いフェーズの binding がある | 意図の取り違え。黙って無視しない |
-| `outcomes` の行き先が profile 外 / 未束縛 | 実行時の停止を作成時のエラーに変える |
-| `outcomes` に `timeout` / `indeterminate` が現れる | 予約語。失敗系は上書き不可 |
+| `next` の行き先が未束縛でも終端でもない | 実行時の停止を作成時のエラーに変える |
+| `next` のキーに `Escalated` / `Failed` が現れる | 予約語。失敗系は上書き不可 |
+| 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない |
+| ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え |
 | 開始フェーズから到達できないフェーズがある | 孤島。書き間違い以外にありえない |
 | `Done` に到達する経路が 1 本も無い | 成功しえないタスク |
@@ -563,17 +583,22 @@ handler の変更検知は `status.currentRun.handlerHash` に解決済み spec 
 
 パーサが存在しない = パースエラーが存在しない。`ls` が判定になる。
 
+**ディレクトリの集合は `next` の宣言そのものから来る。** framework は宣言されたものだけを作る。
+
+```yaml
+next: {報告: ok, 調査: more}
+```
+
 ```
 out/
-  pass/     ← 空（initContainer が事前作成）
-  rework/
+  ok/       ← 空
+  more/
     report.md        必須（自由記述）
     findings.json    任意。あれば使う、壊れていても判定は覆らない
     _done            最後に書く。これが無いディレクトリは無視
-  escalate/
 ```
 
-- **ディレクトリ名 = 遷移表のキーそのもの**（`ok`/`ng` にしない。変換表を挟むとズレる）
+- **宣言が 3 つの役目を同時に果たす** — ①辺 ②作るディレクトリ ③エージェントの語彙
 - **非空がちょうど 1 つ**でなければ `indeterminate`。0 個も 2 個以上も同じ扱い
 - `_done` マーカーを最後に書くことで、書き込み途中を読む競合を防ぐ
   （**v1（Job runner）では sidecar が同一 Pod 内で読むため実質不要**。長命 runner を足すときに効く）
@@ -583,12 +608,16 @@ out/
 
 ```
 out/           root:root  0555   ← 書けない
-out/pass/      agent      0755
-out/rework/    agent      0755
-out/escalate/  agent      0755
+out/ok/        agent      0755   ← next の宣言から生成
+out/more/      agent      0755
 ```
 
 `mkdir out/NG` が EACCES で失敗する。**バリデーションがカーネルに降りる。**
+
+そして語彙外のトークンは**そもそも表現できない**。宣言に無いディレクトリは存在しないので、
+「未知のトークンを出す」という事象が起こらない。初版は `pass` / `rework` / `escalate` を
+framework が固定し、パーミッションで 4 つ目を防いでいたが、**宣言から生成すれば
+固定する必要そのものが消える。**
 
 ### 「わからない」の逃げ道を必ず用意する
 
@@ -893,7 +922,7 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 | API キーをコントローラが管理 | 普通に `envFrom: secretRef`。ユーザーの pod spec の話 |
 | グローバルな遷移表をコントローラが持つ | `(Review, pass)` の行き先が profile 依存になり、遷移関数に profile 引数が要る。辺を束縛側に置けばこの分岐自体が消える |
 | 予算消費を `consumesBudget: true` で宣言 | 付け忘れる。訪問済みフェーズへの遷移を実行時に検出すれば迂回不可能 |
-| `outcomes` に行き先のデフォルトを持たせる | 隠れた挙動。必須にして書かせる（P8） |
+| `next` に行き先のデフォルトを持たせる | 隠れた挙動。必須にして書かせる（P8） |
 | 実行時の構造矛盾を修復する | 曖昧なまま進むより止まる方が安い。`Failed` にして作り直させる |
 | フェーズ内に順序や `stopOnFailure` を持たせる | 安いゲートを前段のフェーズに置けば済む。機構を増やさない |
 | 複数 handler の合成規則を設定可能にする | DSL 化する。「最も不利な verdict が勝つ」で固定 |
@@ -1095,10 +1124,10 @@ spec:
   bindings:
     Planning:
       handler: cnp-planner
-      outcomes: {ok: Review}
+      next: {報告: ok}
     Review:
       handler: cnp-reviewer
-      outcomes: {pass: Done, rework: Planning, escalate: Escalated}
+      next: {おわり: sent, 調査: more, Escalated: stuck}
   reworkBudget: 0                 # investigate に循環は無い
   maxInFlight: 1
   ttl: {succeeded: 1h, failed: 168h}
