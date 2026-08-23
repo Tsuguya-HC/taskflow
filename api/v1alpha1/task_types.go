@@ -17,71 +17,123 @@ limitations under the License.
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// TaskSpec defines the desired state of Task
+// TaskSpec is the whole instance. Four fields, three of them optional: whoever
+// creates a task — a cron, an event, an agent — does not have to know the
+// graph, and the graph can change without them changing.
+//
+// The spec is immutable after creation. Editing what a running task was asked
+// to do would leave its history describing a question nobody asked.
 type TaskSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// Flow is resolved in this namespace, always. There is no field naming
+	// another namespace, so "which flows may I start" collapses into "which
+	// namespaces may I create a Task in" — which plain RBAC can express, and
+	// field values cannot.
+	// +kubebuilder:validation:MinLength=1
+	Flow string `json:"flow"`
 
-	// foo is an example field of Task. Edit task_types.go to remove/update
+	// Input is written to in/input.json and exposed to prompts as template
+	// variables. Its shape is the flow author's business; the controller only
+	// carries it.
+	// +kubebuilder:pruning:PreserveUnknownFields
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Input *apiextensionsv1.JSON `json:"input,omitempty"`
+
+	// DedupKey suppresses creation while another task with the same key is
+	// still running. Useful when the producer is an event source that may
+	// deliver twice.
+	// +optional
+	DedupKey string `json:"dedupKey,omitempty"`
 }
 
-// TaskStatus defines the observed state of Task.
+// RunRef identifies one execution of one phase. runID separates the second
+// visit to a phase from the first, so a rework does not read what the previous
+// attempt left behind.
+type RunRef struct {
+	Phase Phase `json:"phase"`
+	RunID int32 `json:"runID"`
+	// JobName is derived deterministically from the task, phase and runID, so
+	// a controller restart re-creates the same object instead of a second one.
+	// +optional
+	JobName string `json:"jobName,omitempty"`
+	// +optional
+	Deadline *metav1.Time `json:"deadline,omitempty"`
+}
+
+// HistoryEntry records a completed run. This is the audit trail; the artifacts
+// it points at live in object storage, never in etcd.
+type HistoryEntry struct {
+	Phase   Phase   `json:"phase"`
+	RunID   int32   `json:"runID"`
+	Verdict Verdict `json:"verdict"`
+	// Ref points at the run's output in the store.
+	// +optional
+	Ref string `json:"ref,omitempty"`
+	// +optional
+	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+}
+
+type ArtifactsRef struct {
+	// +optional
+	Store string `json:"store,omitempty"`
+}
+
+// TaskStatus holds control state only. Logs, reports and results are
+// references — etcd has been lost twice here, and a design that puts payloads
+// in it turns that from an outage into data loss.
 type TaskStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// +optional
+	Phase Phase `json:"phase,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// RunID of the current or last run.
+	// +optional
+	RunID int32 `json:"runID,omitempty"`
 
-	// conditions represent the current state of the Task resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// ReworkBudget remaining. Counted down by the controller as reworks are
+	// taken, never declared by the flow.
+	// +optional
+	ReworkBudget int32 `json:"reworkBudget,omitempty"`
+
+	// +optional
+	CurrentRun *RunRef `json:"currentRun,omitempty"`
+
+	// +optional
+	Artifacts *ArtifactsRef `json:"artifacts,omitempty"`
+
+	// +optional
+	// +listType=atomic
+	History []HistoryEntry `json:"history,omitempty"`
+
+	// +optional
 	// +listType=map
 	// +listMapKey=type
-	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Flow",type=string,JSONPath=`.spec.flow`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Run",type=integer,JSONPath=`.status.runID`
+// +kubebuilder:printcolumn:name="Budget",type=integer,JSONPath=`.status.reworkBudget`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Task is the Schema for the tasks API
+// Task is one execution of a flow.
 type Task struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of Task
-	// +required
-	Spec TaskSpec `json:"spec"`
-
-	// status defines the observed state of Task
-	// +optional
-	Status TaskStatus `json:"status,omitzero"`
+	Spec   TaskSpec   `json:"spec,omitempty"`
+	Status TaskStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// TaskList contains a list of Task
+// TaskList contains a list of Task.
 type TaskList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
