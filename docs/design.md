@@ -956,10 +956,14 @@ Implementing / Review の循環を有効化。PVC store、rework 予算、長命
 
 - profile の粒度（`investigate` / `implement` / `infra-modify`？）※ CRD ではなくコントローラ組み込みの検証スキーマで確定
 - ワークスペース PVC のライフサイクル（完了で消す / rework のために残す、NFS か SeaweedFS か、RWX の要否）
-- コントローラの実装言語（kubebuilder / controller-runtime 前提でよいか）
-- 新リポの名前（`agenttask`？）
+- ~~コントローラの実装言語~~ → **Go + kubebuilder / controller-runtime に確定**（Discussion #9）。
+  ワークスペース唯一の Go になるが、CRD コントローラの生態系がここに集中しており、
+  envtest / CEL / RBAC 生成を自前で組み直す方が高くつく
+- ~~新リポの名前~~ → **`taskflow` に確定**。`agent-phases` は、この設計が既に外した誤りを 2 つ
+  含んでいた（`agent` = `AgentTask` から外した誤称、`phases` = group 名として却下した理由）
 - ~~`AgentHandler` の改名~~ → **`TaskHandler` に確定**（handler は lint / CI / 人間になりうるので誤称だった）。
-  やるなら CRD を 1 行も書いていない**今**（後からだと API バージョンの話になる）
+  ~~やるなら CRD を 1 行も書いていない**今**~~ → 実体側も含めて `TaskFlow` / `TaskHandler` / `Task`、
+  group は `flow.tgy.io` で確定済み（§4）
 - `Escalated` から戻る辺を定義するか（現状は終端。人間は新規タスクを作り直すことになり履歴が切れる）
 - profile の信頼レベル属性（`trusted` / `untrusted`）の導入時期
 
