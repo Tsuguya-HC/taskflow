@@ -101,9 +101,10 @@ type TaskHandlerSpec struct {
 	// add labels, service accounts or images to it: what a pod must carry to
 	// be selected by a network policy is a property of the cluster it runs in,
 	// not something a framework may decide. What the framework provides is one
-	// place to say it — a pod template as CronJob users know it, under a Job
-	// layer deliberately smaller than CronJob's (see JobTemplate) — rather
-	// than the two locations with differing semantics that Argo requires.
+	// place to say it — a pod template as CronJob users know it, but with only
+	// template and no job-level spec (no backoffLimit, no completions, no
+	// parallelism) — rather than the two locations with differing semantics
+	// that Argo requires.
 	//
 	// Required when runner.type is Job; ignored when it is External.
 	// +optional

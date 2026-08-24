@@ -158,7 +158,9 @@ endif
 
 .PHONY: install
 # --server-side: the taskhandlers CRD embeds PodSpec and exceeds the 256KB
-# last-applied-configuration annotation limit of client-side apply.
+# last-applied-configuration annotation limit of client-side apply. deploy
+# below applies the same CRD via config/default and needs it for the same
+# reason.
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	@out="$$( "$(KUSTOMIZE)" build config/crd 2>/dev/null || true )"; \
 	if [ -n "$$out" ]; then echo "$$out" | "$(KUBECTL)" apply --server-side -f -; else echo "No CRDs to install; skipping."; fi

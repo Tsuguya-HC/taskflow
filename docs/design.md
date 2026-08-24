@@ -1230,7 +1230,7 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
    `status` にコストを持つのは後付けが面倒なので最初から。
    **実測値: 裁定 1 回（sonnet-4-6 / 2 ターン / 37 秒）で $0.095。** 1 日 1 回の cron なら月 $3 程度、
    rework が 3 往復すると 1 タスク $0.3〜0.4 になる計算
-4. **CRD が肥大する。** JobTemplateSpec を実型で埋めるため、生成される CRD YAML は CronJob 並みになる。
+4. **CRD が肥大する。** `template.spec`（`corev1.PodSpec`）を標準のまま埋め込むため、生成される CRD YAML は CronJob 並みになる。
    `kubectl apply` の last-applied-configuration 注釈は 262144 バイト上限なので素朴に apply すると失敗する。
    ArgoCD 側で `ServerSideApply=true`（または `Replace=true`）を Application に付けておく
 
