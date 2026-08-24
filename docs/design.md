@@ -401,10 +401,17 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
 
 - `ownerReferences`（Task 所有）と決定論的な Job 名
-- ラベル（`flow.tgy.io/{phase,profile,task-uid}`）— **身元**であってポリシーではない。
-  何を要求するかを決めるのは利用側で、CNP はこのラベルに対して利用側が書く（§16）
+- ラベル `flow.tgy.io/task-uid`（**自分の Job を見つけるための帳簿**。値は UID なので
+  ラベル値の文字種制約に収まる）
+
+**フェーズ名はラベルに入れない。** ステータス名は利用側の自由文字列なので、
+`調査` のような値は K8s のラベル値として通らない（実測: `Invalid value: "調査"`）。
+それ以前に、**ポリシーが選択するためのラベルを framework が決めるのは越権**（§20）。
+ポリシーが何を選ぶかは利用側が `jobTemplate` に書く。フェーズ名は annotation に置けば
+UTF-8 のまま入り、長さの制約も無い。
 - env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
-- annotation: `flow.tgy.io/run-id`、`flow.tgy.io/prev-run-id`（初回は付けない）
+- annotation: `flow.tgy.io/phase`（UTF-8 のまま）、`flow.tgy.io/run-id`、
+  `flow.tgy.io/prev-run-id`（初回は付けない）
 - `activeDeadlineSeconds`（handler の `timeout` から）
 
 `FLOW_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
@@ -461,7 +468,7 @@ CRD の `x-kubernetes-validations`（CEL）で表現できるので webhook は�
 
 profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。profile が規定するのは
 **どのフェーズの束縛が必須か**であって、フェーズの語彙そのものではない。それでも YAML で
-勝手に増やせるようにはせず、profile を増やすのは「コード変更 + テスト + 対応する CNP の追加」で
+勝手に増やせるようにはせず、profile を増やすのは「コード変更 + テスト」で
 あるべき。
 
 実際の一式は §16 を参照。
@@ -813,36 +820,51 @@ run 終了を観測（Job の watch / _done / deadline）
 
 ## 8. 権限・ポリシーの外出し
 
-コントローラが書き込むのは**ラベル 1 枚だけ**。
+コントローラが書き込むラベルは**自分の Job を見つけるための 1 枚だけ**。
 
 ```yaml
 labels:
-  flow.tgy.io/phase:    planning
-  flow.tgy.io/profile:  investigate
-  flow.tgy.io/task-uid: <uid>
+  flow.tgy.io/task-uid: <uid>       # 帳簿。ポリシーのためではない
+annotations:
+  flow.tgy.io/phase:   調査          # UTF-8 のまま
+  flow.tgy.io/run-id:  "2"
+```
+
+**ポリシーが選択するラベルは handler の `jobTemplate` が持つ。**
+フェーズごとに handler があるので、それがそのままフェーズ別のラベルになる — しかも
+利用側の語彙で。
+
+```yaml
+kind: TaskHandler
+spec:
+  phase: 調査
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels: {role: cnp-reader}   # 名前も語彙も利用側のもの
 ```
 
 あとは既存の仕組みが反応する。
 
 | 何を | 誰が決めるか |
 |---|---|
-| ネットワーク | CNP の `endpointSelector` が phase ラベルに match |
-| Pod の中身（SA / RuntimeClass kata / securityContext） | **handler の `jobTemplate` が宣言、Kyverno は validate** |
-| profile の選択可能範囲 | ValidatingAdmissionPolicy |
+| ネットワーク | **クラスタのポリシー機構**。何を選択するかは利用側が決める |
+| Pod の中身（SA / RuntimeClass / securityContext） | **handler の `jobTemplate` が宣言** |
+| profile の選択可能範囲 | admission |
 
-フェーズ別の想定posture：
+**framework はネットワークポリシーの機構を知らない。** Cilium でも Calico でも
+NetworkPolicy でも、あるいは何も無くても動く。Pod がポリシーに選ばれるために何を
+持つべきかはクラスタ側の性質で、**それを書くのは handler の `jobTemplate`**。
 
-| Phase | 権限 | egress |
-|---|---|---|
-| Planning | 読み取り専用 | api.github.com, Harbor pull |
-| Implementing | 単一ブランチ限定 push | + Harbor push |
-| Review | なし | なし |
-| Verifying | 対象 ns の get/list のみ | + kube-api |
+フェーズごとに posture を変えたいなら、フェーズごとに handler があるので
+`jobTemplate` のラベルと SA をフェーズごとに変えればよい。**framework は
+フェーズ名を知っているが、それが何を意味するかは知らない。**
 
 **Kyverno に mutate させない**（image digest のピン留めを除く）。`jobTemplate` に書いた SA や
 RuntimeClass を Kyverno が後勝ちで黙って書き換えると、YAML と実物が乖離して追跡不能になる。
-Kyverno の役割は「phase ラベルと SA の組み合わせが許可された対応表に載っているか」の
-**検証**に限定する。
+ポリシー機構の役割は **検証**に限定する（「この Pod が名乗る役割と SA の組み合わせが
+許可された対応表に載っているか」等）。何を対応表にするかは利用側が決める。
 
 コントローラは RBAC 書き込み権限を持たない。「エージェントが何をできるか」の定義は
 git にあり PR レビューを通る。**監査証跡が etcd でもコードでもなく git log になる。**
@@ -852,10 +874,21 @@ git にあり PR レビューを通る。**監査証跡が etcd でもコード�
 設定ミスがコントローラのエラーではなく **謎の DROPPED** として出る
 （horenso デプロイ時に踏んだ「PreSync hook が CNP より先」と同じ形）。
 
-- 遷移前に、参照する SA と `phase=X` を選択する CNP の**実在を確認**。無ければ
-  `status.conditions` に `PolicyNotReady` を立てて止まる
-- Cilium identity の反映待ち。デフォルト deny なので漏れる方向には倒れないが、
-  エージェント起動を Ready 待ちにしないと初回 egress が死ぬ
+**この代償を framework が引き受けることはできない。** ポリシーが期待どおり掛かって
+いるかを確認するには、どの機構が使われているか（Cilium / Calico / 素の NetworkPolicy）を
+知る必要があり、それは P2 と P7 に反する。初版はここでコントローラに
+「`phase=X` を選択する CNP の実在を確認させる」と書いていたが、**それは framework が
+Cilium を知る設計**だった。
+
+引き受けるのは利用側で、置き場所は既にある:
+
+- **前提の確認は handler の initContainer**。到達したい先に実際に到達できるかを起動時に
+  確かめ、駄目なら落ちる（`jobTemplate` に書けるので framework の機能は要らない）
+- Pod が起動しなければ verdict は出ず、**fail-closed で `Escalated` に倒れる**。
+  安全側に倒れること自体は framework が保証する
+
+framework が保証するのは「答えが出なければ人間に渡る」までで、
+**なぜ出なかったかの診断は運用者のもの**。
 
 ### 信頼できない入力を読む handler の制約
 
@@ -1142,6 +1175,8 @@ spec:
   jobTemplate:
     spec:
       template:
+        metadata:
+          labels: {role: cnp-reader}               # 下の CNP がこれを選ぶ（framework は知らない）
         spec:
           runtimeClassName: kata
           serviceAccountName: agent-cnp-reader     # CNP と Pod の get/list のみ
@@ -1218,15 +1253,16 @@ spec:
 コントローラの知らないユーザーの pod spec に畳まれている（P7、§11 で却下した
 `promptConfigMapRef` / `contextStores` / `publishTo` はここに畳む）。
 
-対応する CNP（phase ラベルで選択、これも home-cluster）:
+対応する CNP（**handler が `jobTemplate` に書いたラベル**で選択。これも home-cluster 側であり、
+framework はこの存在を知らない）:
 
 ```yaml
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
-metadata: {name: agent-phase-investigate, namespace: claude-code}
+metadata: {name: agent-cnp-reader, namespace: claude-code}
 spec:
   endpointSelector:
-    matchLabels: {flow.tgy.io/phase: 調査}
+    matchLabels: {role: cnp-reader}
   egress:
     - toEntities: [kube-apiserver]
     - toFQDNs: [{matchName: api.anthropic.com}]
@@ -1314,7 +1350,7 @@ status:
   history:
     - {phase: 調査, runID: 1, directory: ok, outcome: Declared, ref: "s3://.../1/"}
   conditions:
-    - {type: PolicyReady, status: "True", reason: HandlerAndCNPResolved}
+    - {type: Ready, status: "True", reason: HandlerResolved}
 ```
 
 ### kubectl から見える形（additionalPrinterColumns）
