@@ -401,12 +401,45 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
 
 - `ownerReferences`（Task 所有）と決定論的な Job 名
-- ラベル（`flow.tgy.io/{phase,profile,task-uid}`）
-- env: `AGENT_TASK_UID` / `AGENT_RUN_ID` / `AGENT_PHASE` / `AGENT_INPUT`（`spec.input` の JSON）
+- ラベル（`flow.tgy.io/{phase,profile,task-uid}`）— **身元**であってポリシーではない。
+  何を要求するかを決めるのは利用側で、CNP はこのラベルに対して利用側が書く（§16）
+- env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
+- annotation: `flow.tgy.io/run-id`、`flow.tgy.io/prev-run-id`（初回は付けない）
 - `activeDeadlineSeconds`（handler の `timeout` から）
 
-`AGENT_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
+`FLOW_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
 （それも pod spec の話であってコントローラの関知外）。
+
+### run 番号は annotation で渡す（env ではない）
+
+**値は提供するが、どのコンテナに引き込むかは利用側が決める。**
+
+```yaml
+- name: publish
+  env:
+    - name: RUN_ID
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.annotations['flow.tgy.io/run-id']
+```
+
+run 番号が要るのは**配管**であってエージェントではない:
+
+| | 要るか | なぜ |
+|---|---|---|
+| init / publish サイドカー | 要る | S3 のような backend では `results/<runID>/` へ上げる先を知る必要がある |
+| エージェント（main） | **要らない** | `<path>/results/1/ok` を開けば読める。数える必要が無い |
+
+しかもエージェントに渡すのは**避けたい**。実測に基づく理由がある — implement フローで
+レビュアーに**残りの差し戻し回数を伝えない**ようにしたのと同じで、「あと 1 回しかない」を
+知ると判定の基準が動く。run 番号にも「3 周目だからそろそろ通そう」が起こりうる。
+
+**全コンテナに env を注入すると、エージェントに見せない選択肢が利用側から消える。**
+annotation なら「配管だけが読む」が書ける。
+
+なお PVC backend で、書き込み先を `results/<runID>/` への **subPath マウント**にした場合は、
+`<path>/ok` に書いた時点で正しい場所に落ちるので**誰も番号を知らなくてよい**。
+その構成では annotation は使われない。**どちらを採るかは利用側が選ぶ。**
 
 init・サイドカー・RuntimeClass・SA・volume は全部 home-cluster 側の YAML のまま。
 P2 の分離が保たれ、かつ Job / JobTemplateSpec は K8s 標準なので**サードパーティ依存がゼロ**になる。
@@ -668,10 +701,46 @@ workflow レベルの `emptyDir` で判定を渡そうとしていたが、empty
 ### Pod 構成
 
 ```
-initContainer:  in/ を store から取得、next の宣言から out/{ok,more,...}/ を作成 + パーミッション設定
+initContainer:  過去の run を /results/ に用意し、next の宣言から書き込み先を作る
 main:           エージェント（ローカルのボリュームに書くだけ。S3 認証情報も egress も持たない）
-sidecar:        SIGTERM を trap → out/ を検証して store へ publish
+sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し、termination message に名前を返す
+                中身は /results/<runID>/ へ封じる
 ```
+
+### ワークスペースのレイアウト
+
+**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める:
+
+```yaml
+kind: TaskHandler
+spec:
+  workspace:
+    path: /work          # 既定。ここを基点にレイアウトが敷かれる
+```
+
+**エージェントは自分が何周目かを知らない。**
+
+| パス | 権限 | 中身 |
+|---|---|---|
+| `<path>/<宣言されたディレクトリ>` | エージェントが書ける | この run の結果（`/work/ok`, `/work/more` …） |
+| `<path>/results/<runID>/<name>` | 読み取り専用 | 過去の全 run |
+
+**基点を `TaskFlow` ではなく `TaskHandler` に置く。** マウントパスは Pod の形であり
+（§2 の責務表では handler の作者のもの）、handler は複数の flow で使い回せる。
+`/work` を前提に書かれた handler が、flow 側の指定で壊れるのはおかしい。
+同じボリュームを別のパスにマウントするだけなので**フェーズごとに違っても成立する**
+（1 周目が `/work` で書き、2 周目が `/data` でマウントしても中身は同じ）。
+
+書き込み側は平らで runID を含まない。履歴は `<path>/results/` の下に run ごとに積まれる。
+3 周目のエージェントが 1 周目の報告を読むのは `<path>/results/1/ok/report.md` を開くだけで、
+**framework が過去の場所を教える必要も、エージェントが番号を数える必要も無い。**
+
+> **宣言が見えるのはファイルシステムそのもの。** `ok/` と `more/` が存在して、それ以外は無い。
+> 語彙外のトークンを出せないのは、禁じているからではなく**存在しないから**。
+
+backend の違い（S3 prefix / PVC）は、この 2 つのパスをどう用意するかに閉じる
+（PVC なら subPath マウント、S3 なら init が `/results` へ引き落として sidecar が上げる）。
+**framework が知るのはパスの形だけで、中身にも backend にも触らない。**
 
 **権限分離が本命の理由。** エージェントは書ける場所がローカルの 3 ディレクトリだけ。
 サイドカーは store の認証情報を持つが LLM を持たない、固定の小さいプログラム。
@@ -696,8 +765,11 @@ store へ到達するために開けた egress は agent コンテナからも�
   Job は Complete になる。結果は Escalated なので安全側だが、
   「エージェントが verdict を出さなかった」と「publish が失敗した」が区別できない。
   サイドカーは失敗時も termination message に理由を書いて区別できるようにする
-- サイドカーは判定を運ぶだけで遷移は決めない（P1）。verdict は store へ publish し、
-  コントローラは Job の完了を watch してから store を list する
+- サイドカーは判定を運ぶだけで遷移は決めない（P1）。**どのディレクトリに書かれたかは
+  termination message で返し**、中身（レポート・作業ツリー）はワークスペースへ封じる。
+  コントローラは Job の完了を watch して termination message を読むだけで、
+  **ワークスペースの中身にも backend にも触らない**（§11 で「コントローラが store を list
+  する」案を却下している。触ると S3 認証情報と store の種類を知ることになり P7 に反する）
 
 **Job 固有の注意:** `backoffLimit` / `ttlSecondsAfterFinished` / `activeDeadlineSeconds` /
 `completions` / `parallelism` / `restartPolicy` は予約フィールドとして admission で拒否する（§4 の表）。
@@ -853,9 +925,12 @@ CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける
 | investigate | **S3 prefix** | 短命・読み取り専用・並列可。PVC の attach サイクルが無駄、掃除も lifecycle に丸投げできる |
 | implement | PVC | git ツリーが要る。rework で生き残る必要がある |
 
-パスに runID を含める：`s3://.../<task-uid>/<runID>/<directory>/report.md`（`<directory>` は
-宣言した `next` のキーが選ぶ、その run のディレクトリ名）
-→ 遅れて到着した古い run が書いても別 prefix になり、現在の判定を汚染しない。
+レイアウトに runID を含める：`<path>/results/<runID>/<directory>/report.md`（`<path>` は handler が決める）
+（`<directory>` は宣言した `next` の値が選ぶ、その run のディレクトリ名）
+→ 遅れて到着した古い run が書いても別の場所になり、現在の判定を汚染しない。
+
+**エージェントから見えるのは書き込み側の平らなパス**（`<path>/ok` 等）だけで、runID は現れない
+（§7「ワークスペースのレイアウト」）。
 
 ### 実装はユーザーの pod spec 側（コントローラの機能ではない）
 
