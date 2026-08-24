@@ -186,6 +186,66 @@ func TestDoesNotOverwriteTheHandlersEnv(t *testing.T) {
 	}
 }
 
+// FLOW_INPUT is Spec.Input.Raw, a string the Task's author fully controls.
+// Kubernetes expands $(VAR_NAME) in an env value against vars declared
+// earlier in the same container, including ones resolved from a
+// secretKeyRef — so the injected vars must come before whatever the handler
+// declared, or a handler's secret placed after them would leak into
+// FLOW_INPUT via a value like "$(GITHUB_TOKEN)".
+func TestInjectedEnvComesBeforeTheHandlersEnv(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.JobTemplate.Template.Spec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "GITHUB_TOKEN", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{Key: "token"},
+			}},
+		}
+	})
+	job := build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+
+	idx := map[string]int{}
+	for i, e := range job.Spec.Template.Spec.Containers[0].Env {
+		idx[e.Name] = i
+	}
+	for _, injected := range []string{EnvTaskUID, EnvPhase, EnvInput} {
+		if idx[injected] > idx["GITHUB_TOKEN"] {
+			t.Fatalf("%s (index %d) comes after GITHUB_TOKEN (index %d); the handler's secret could expand into it",
+				injected, idx[injected], idx["GITHUB_TOKEN"])
+		}
+	}
+}
+
+// The escaping is what actually stops expansion: putting the injected vars
+// first does nothing against a secret pulled in via envFrom, which is
+// resolvable from the very first env entry. FLOW_PHASE is covered too — the
+// phase name is a free string the flow's author controls.
+func TestAuthorControlledVarRefsAreEscaped(t *testing.T) {
+	tk := task()
+	tk.Spec.Input = &apiextensionsv1.JSON{Raw: []byte(`$(GITHUB_TOKEN)`)}
+	phase := flowv1alpha1.Phase("調査-$(GITHUB_TOKEN)")
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.Phase = phase
+	})
+	job := build(t, Input{Task: tk, Handler: h, Phase: phase, RunID: 1})
+
+	want := map[string]string{
+		EnvInput: `$$(GITHUB_TOKEN)`,
+		EnvPhase: `調査-$$(GITHUB_TOKEN)`,
+	}
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		expected, ok := want[e.Name]
+		if !ok {
+			continue
+		}
+		if e.Value != expected {
+			t.Fatalf("%s = %q, want $( escaped to $$( so Kubernetes cannot expand it", e.Name, e.Value)
+		}
+		delete(want, e.Name)
+	}
+	for name := range want {
+		t.Fatalf("%s was not set", name)
+	}
+}
+
 func TestLeavesTheHandlerUntouched(t *testing.T) {
 	h := handler()
 	_ = build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
@@ -247,6 +307,18 @@ func TestNameStaysWithinTheLimit(t *testing.T) {
 	}
 	if name == JobName(long, "報告", 12) {
 		t.Fatal("truncation collapsed two phases onto one name")
+	}
+}
+
+// generateName tends to put the part that tells two objects apart at the
+// end of the name, exactly where truncation would otherwise chop it off.
+func TestTruncatedNamesStayDistinct(t *testing.T) {
+	a := "cnp-check-" + strings.Repeat("a", 60) + "-x7f2a"
+	b := "cnp-check-" + strings.Repeat("a", 60) + "-q91zz"
+	nameA := JobName(a, phaseInvestigate, 1)
+	nameB := JobName(b, phaseInvestigate, 1)
+	if nameA == nameB {
+		t.Fatalf("two task names differing only after the truncation point collided on %q", nameA)
 	}
 }
 

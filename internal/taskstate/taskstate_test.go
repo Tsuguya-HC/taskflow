@@ -19,6 +19,7 @@ package taskstate
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
@@ -133,6 +134,53 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 	}
 	if s.RunID != 1 {
 		t.Fatalf("runID = %d, want 1 — a terminal move starts no run, so \"current or last run\" must still name the one that happened", s.RunID)
+	}
+}
+
+func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{}
+	Begin(s, phaseInvestigate, 2)
+
+	if s.Phase != phaseInvestigate {
+		t.Fatalf("phase = %q, want %q", s.Phase, phaseInvestigate)
+	}
+	if s.RunID != 1 {
+		t.Fatalf("runID = %d, want 1", s.RunID)
+	}
+	if s.ReworkBudget != 2 {
+		t.Fatalf("reworkBudget = %d, want 2", s.ReworkBudget)
+	}
+	if s.CurrentRun == nil || s.CurrentRun.Phase != phaseInvestigate || s.CurrentRun.RunID != 1 {
+		t.Fatalf("currentRun = %+v, want %q at run 1", s.CurrentRun, phaseInvestigate)
+	}
+}
+
+func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      3,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3},
+	}
+	Fail(s, "flow \"cnp-check\" does not exist in this namespace")
+
+	if s.Phase != flowv1alpha1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed", s.Phase)
+	}
+	if s.CurrentRun != nil {
+		t.Fatal("a failed task has nothing in flight")
+	}
+	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
+	if cond == nil {
+		t.Fatal("no Ready condition was set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready condition status = %q, want False", cond.Status)
+	}
+	if cond.Reason != "FlowBroken" {
+		t.Fatalf("Ready condition reason = %q, want FlowBroken", cond.Reason)
+	}
+	if cond.Message != "flow \"cnp-check\" does not exist in this namespace" {
+		t.Fatalf("Ready condition message = %q", cond.Message)
 	}
 }
 

@@ -36,10 +36,12 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
 )
@@ -75,6 +77,10 @@ const (
 	maxNameLength = 63
 	// phaseHashLength is how much of the phase digest goes into the name.
 	phaseHashLength = 8
+	// taskHashLength is how much of the task name's digest survives a
+	// truncation, so the part that gets cut is not the only thing telling
+	// two task names apart.
+	taskHashLength = 8
 )
 
 // Input is everything the Job is built from.
@@ -102,12 +108,22 @@ var ErrReservedField = errors.New("jobTemplate sets a reserved field")
 // The phase is hashed rather than spelled: status names are free strings and
 // 調査 is not a legal object name. Whoever wants to read it looks at the
 // annotation.
+//
+// When the task name has to be cut to fit the limit, the truncation drops a
+// hash of the full name in alongside it rather than just chopping the tail.
+// Object names commonly carry their distinguishing part at the end — a
+// generateName suffix, for instance — and two task names that agree up to
+// the cut would otherwise collide on the exact same Job name.
 func JobName(taskName string, phase flowv1alpha1.Phase, runID int32) string {
-	sum := sha256.Sum256([]byte(phase))
-	suffix := fmt.Sprintf("-%d-%s", runID, hex.EncodeToString(sum[:])[:phaseHashLength])
+	phaseSum := sha256.Sum256([]byte(phase))
+	suffix := fmt.Sprintf("-%d-%s", runID, hex.EncodeToString(phaseSum[:])[:phaseHashLength])
 	prefix := taskName
 	if len(prefix)+len(suffix) > maxNameLength {
-		prefix = prefix[:maxNameLength-len(suffix)]
+		taskSum := sha256.Sum256([]byte(taskName))
+		taskHash := hex.EncodeToString(taskSum[:])[:taskHashLength]
+		budget := maxNameLength - len(suffix) - len(taskHash) - 1 // -1 for the separator before the hash
+		budget = min(max(budget, 0), len(taskName))
+		prefix = taskName[:budget] + "-" + taskHash
 	}
 	return prefix + suffix
 }
@@ -170,6 +186,20 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	}, nil
 }
 
+// OwnedByTask reports whether job is controlled by the task with this UID,
+// rather than merely bearing the deterministic name that task would have
+// picked. It is the read side of the ownerReference BuildJob writes: the name
+// is deterministic, not exclusive, so whoever finds a Job under it has to ask
+// this before trusting what's there.
+func OwnedByTask(job *batchv1.Job, taskUID types.UID) bool {
+	for _, ref := range job.OwnerReferences {
+		if ref.Controller != nil && *ref.Controller && ref.UID == taskUID {
+			return true
+		}
+	}
+	return false
+}
+
 func annotations(in Input) map[string]string {
 	a := map[string]string{
 		AnnotationPhase: string(in.Phase),
@@ -198,13 +228,22 @@ func checkReserved(t *flowv1alpha1.JobTemplate) error {
 // injectEnv adds the task's identity to every container. Existing entries are
 // left alone: a handler that already sets FLOW_PHASE means it, and silently
 // overwriting would leave the YAML disagreeing with what ran.
+//
+// FLOW_PHASE and FLOW_INPUT carry free strings their authors control — the
+// flow's phase name and the task's spec.input — so both have $(...) escaped.
+// Kubernetes expands $(VAR_NAME) in an env value against everything resolved
+// before it: all of the container's envFrom, then env entries earlier in the
+// list. The injected vars also go in front of the handler's env, which closes
+// the env-list route on its own — but a secret pulled in via envFrom is
+// resolvable from the very first env entry, so against that route ordering
+// does nothing and the escaping is the defense that actually holds.
 func injectEnv(pod *corev1.PodSpec, in Input) {
 	env := []corev1.EnvVar{
 		{Name: EnvTaskUID, Value: string(in.Task.UID)},
-		{Name: EnvPhase, Value: string(in.Phase)},
+		{Name: EnvPhase, Value: escapeVarRefs(string(in.Phase))},
 	}
 	if in.Task.Spec.Input != nil {
-		env = append(env, corev1.EnvVar{Name: EnvInput, Value: string(in.Task.Spec.Input.Raw)})
+		env = append(env, corev1.EnvVar{Name: EnvInput, Value: escapeVarRefs(string(in.Task.Spec.Input.Raw))})
 	}
 	for i := range pod.InitContainers {
 		pod.InitContainers[i].Env = merge(pod.InitContainers[i].Env, env)
@@ -214,17 +253,31 @@ func injectEnv(pod *corev1.PodSpec, in Input) {
 	}
 }
 
+// escapeVarRefs turns $(...) into $$(...) so Kubernetes' env-var expansion
+// leaves it as a literal $(...) instead of trying to resolve it against
+// another variable in the same container.
+func escapeVarRefs(s string) string {
+	return strings.ReplaceAll(s, "$(", "$$(")
+}
+
+// merge puts add in front of existing, dropping anything add already has a
+// same-named entry for — a handler's own value wins, both because it is left
+// untouched and because it stays after what injectEnv adds.
 func merge(existing, add []corev1.EnvVar) []corev1.EnvVar {
 	have := make(map[string]bool, len(existing))
 	for _, e := range existing {
 		have[e.Name] = true
 	}
+	var prepend []corev1.EnvVar
 	for _, e := range add {
 		if !have[e.Name] {
-			existing = append(existing, e)
+			prepend = append(prepend, e)
 		}
 	}
-	return existing
+	if len(prepend) == 0 {
+		return existing
+	}
+	return append(prepend, existing...)
 }
 
 func ptr[T any](v T) *T { return &v }
