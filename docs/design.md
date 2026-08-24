@@ -668,10 +668,31 @@ workflow レベルの `emptyDir` で判定を渡そうとしていたが、empty
 ### Pod 構成
 
 ```
-initContainer:  in/ を store から取得、next の宣言から out/{ok,more,...}/ を作成 + パーミッション設定
+initContainer:  過去の run を /results/ に用意し、next の宣言から書き込み先を作る
 main:           エージェント（ローカルのボリュームに書くだけ。S3 認証情報も egress も持たない）
-sidecar:        SIGTERM を trap → out/ を検証して store へ publish
+sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し、termination message に名前を返す
+                中身は /results/<runID>/ へ封じる
 ```
+
+### ワークスペースのレイアウト
+
+**エージェントは自分が何周目かを知らない。**
+
+| パス | 権限 | 中身 |
+|---|---|---|
+| `/<宣言されたディレクトリ>` | エージェントが書ける | この run の結果（`/ok`, `/more` …） |
+| `/results/<runID>/<name>` | 読み取り専用 | 過去の全 run |
+
+書き込み側は平らで runID を含まない。履歴は `/results/` の下に run ごとに積まれる。
+3 周目のエージェントが 1 周目の報告を読むのは `/results/1/ok/report.md` を開くだけで、
+**framework が過去の場所を教える必要も、エージェントが番号を数える必要も無い。**
+
+> **宣言が見えるのはファイルシステムそのもの。** `/ok` と `/more` が存在して、それ以外は無い。
+> 語彙外のトークンを出せないのは、禁じているからではなく**存在しないから**。
+
+backend の違い（S3 prefix / PVC）は、この 2 つのパスをどう用意するかに閉じる
+（PVC なら subPath マウント、S3 なら init が `/results` へ引き落として sidecar が上げる）。
+**framework が知るのはパスの形だけで、中身にも backend にも触らない。**
 
 **権限分離が本命の理由。** エージェントは書ける場所がローカルの 3 ディレクトリだけ。
 サイドカーは store の認証情報を持つが LLM を持たない、固定の小さいプログラム。
@@ -696,8 +717,11 @@ store へ到達するために開けた egress は agent コンテナからも�
   Job は Complete になる。結果は Escalated なので安全側だが、
   「エージェントが verdict を出さなかった」と「publish が失敗した」が区別できない。
   サイドカーは失敗時も termination message に理由を書いて区別できるようにする
-- サイドカーは判定を運ぶだけで遷移は決めない（P1）。verdict は store へ publish し、
-  コントローラは Job の完了を watch してから store を list する
+- サイドカーは判定を運ぶだけで遷移は決めない（P1）。**どのディレクトリに書かれたかは
+  termination message で返し**、中身（レポート・作業ツリー）はワークスペースへ封じる。
+  コントローラは Job の完了を watch して termination message を読むだけで、
+  **ワークスペースの中身にも backend にも触らない**（§11 で「コントローラが store を list
+  する」案を却下している。触ると S3 認証情報と store の種類を知ることになり P7 に反する）
 
 **Job 固有の注意:** `backoffLimit` / `ttlSecondsAfterFinished` / `activeDeadlineSeconds` /
 `completions` / `parallelism` / `restartPolicy` は予約フィールドとして admission で拒否する（§4 の表）。
@@ -853,9 +877,12 @@ CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける
 | investigate | **S3 prefix** | 短命・読み取り専用・並列可。PVC の attach サイクルが無駄、掃除も lifecycle に丸投げできる |
 | implement | PVC | git ツリーが要る。rework で生き残る必要がある |
 
-パスに runID を含める：`s3://.../<task-uid>/<runID>/<directory>/report.md`（`<directory>` は
-宣言した `next` のキーが選ぶ、その run のディレクトリ名）
-→ 遅れて到着した古い run が書いても別 prefix になり、現在の判定を汚染しない。
+レイアウトに runID を含める：`<workspace>/results/<runID>/<directory>/report.md`
+（`<directory>` は宣言した `next` の値が選ぶ、その run のディレクトリ名）
+→ 遅れて到着した古い run が書いても別の場所になり、現在の判定を汚染しない。
+
+**エージェントから見えるのは書き込み側の平らなパス**（`/ok` 等）だけで、runID は現れない
+（§7「ワークスペースのレイアウト」）。
 
 ### 実装はユーザーの pod spec 側（コントローラの機能ではない）
 
