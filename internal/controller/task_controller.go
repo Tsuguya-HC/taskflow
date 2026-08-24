@@ -80,7 +80,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// tell. Checking that before the flow is resolved means a Task already at
 	// Escalated is never at the mercy of a flow that GitOps has since deleted
 	// or renamed out from under it.
-	if task.Status.Phase == flowv1alpha1.PhaseEscalated || task.Status.Phase == flowv1alpha1.PhaseFailed {
+	if task.Status.Phase.IsReserved() {
 		return ctrl.Result{}, nil
 	}
 
@@ -199,7 +199,7 @@ func (r *TaskReconciler) ensureJob(
 		// permission on Jobs could have taken it first. Trusting whatever sits
 		// under it without checking who made it would let that Job's outcome
 		// pass for this task's.
-		if !ownedByTask(&existing, task.UID) {
+		if !runner.OwnedByTask(&existing, task.UID) {
 			return nil, fmt.Errorf("job %q exists but is not owned by task %s (uid %s): owners = %s",
 				name, task.Name, task.UID, ownerSummary(existing.OwnerReferences))
 		}
@@ -243,7 +243,7 @@ func (r *TaskReconciler) ensureJob(
 			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &got); err != nil {
 				return nil, err
 			}
-			if !ownedByTask(&got, task.UID) {
+			if !runner.OwnedByTask(&got, task.UID) {
 				return nil, fmt.Errorf("job %q exists but is not owned by task %s (uid %s): owners = %s",
 					name, task.Name, task.UID, ownerSummary(got.OwnerReferences))
 			}
@@ -252,18 +252,6 @@ func (r *TaskReconciler) ensureJob(
 		return nil, err
 	}
 	return job, nil
-}
-
-// ownedByTask reports whether job is controlled by the task with this UID,
-// rather than merely bearing the deterministic name that task would have
-// picked.
-func ownedByTask(job *batchv1.Job, taskUID types.UID) bool {
-	for _, ref := range job.OwnerReferences {
-		if ref.Controller != nil && *ref.Controller && ref.UID == taskUID {
-			return true
-		}
-	}
-	return false
 }
 
 // ownerSummary renders a Job's actual owners for an error message, so

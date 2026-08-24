@@ -214,22 +214,36 @@ func TestInjectedEnvComesBeforeTheHandlersEnv(t *testing.T) {
 	}
 }
 
-// Even with the injected vars placed first, the escaping is what actually
-// stops expansion — a future reordering must not reopen the leak.
-func TestInputVarRefsAreEscaped(t *testing.T) {
+// The escaping is what actually stops expansion: putting the injected vars
+// first does nothing against a secret pulled in via envFrom, which is
+// resolvable from the very first env entry. FLOW_PHASE is covered too — the
+// phase name is a free string the flow's author controls.
+func TestAuthorControlledVarRefsAreEscaped(t *testing.T) {
 	tk := task()
 	tk.Spec.Input = &apiextensionsv1.JSON{Raw: []byte(`$(GITHUB_TOKEN)`)}
-	job := build(t, Input{Task: tk, Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	phase := flowv1alpha1.Phase("調査-$(GITHUB_TOKEN)")
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.Phase = phase
+	})
+	job := build(t, Input{Task: tk, Handler: h, Phase: phase, RunID: 1})
 
-	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
-		if e.Name == EnvInput {
-			if e.Value != `$$(GITHUB_TOKEN)` {
-				t.Fatalf("%s = %q, want $( escaped to $$( so Kubernetes cannot expand it", EnvInput, e.Value)
-			}
-			return
-		}
+	want := map[string]string{
+		EnvInput: `$$(GITHUB_TOKEN)`,
+		EnvPhase: `調査-$$(GITHUB_TOKEN)`,
 	}
-	t.Fatal("FLOW_INPUT was not set")
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		expected, ok := want[e.Name]
+		if !ok {
+			continue
+		}
+		if e.Value != expected {
+			t.Fatalf("%s = %q, want $( escaped to $$( so Kubernetes cannot expand it", e.Name, e.Value)
+		}
+		delete(want, e.Name)
+	}
+	for name := range want {
+		t.Fatalf("%s was not set", name)
+	}
 }
 
 func TestLeavesTheHandlerUntouched(t *testing.T) {

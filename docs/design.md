@@ -426,11 +426,29 @@ properties 無しで出力し、structural schema がそこにぶら下がる po
 UTF-8 のまま入り、長さの制約も無い。
 
 **Job 名も同じ理由でフェーズ名を直接使えない**（RFC 1123）。
-`<task>-<runID>-<フェーズ名のハッシュ 8 桁>` にする。決定論的なので `AlreadyExists` で
-冪等になり、読みたい人は annotation を見る。
+`<task>-<runID>-<フェーズ名のハッシュ 8 桁>` にする。task 名が長くて 63 文字に収まらない
+ときは、切り詰めた task 名の横に**全体のハッシュ 8 桁**を添える — 名前の判別部分は末尾に
+来がち（`generateName` のサフィックス等）なので、尻尾を捨てるだけだと途中まで同じ
+2 つの task が同じ Job 名に衝突する。読みたい人は annotation を見る。
+
+決定論的な名前は、コントローラが再起動して同じ run を作り直しても `AlreadyExists` に
+なる、というところまでしか保証しない。**決定論的であって排他的ではない** — Job を
+create できる誰かが先にその名前を取れる。だからコントローラは名前の下に居る Job を
+採用する前に必ず ownerReference（controller かつ Task の UID 一致）を検証し、他人の
+Job なら結果を流用せずエラーにする。冪等性は「名前が同じ」ではなく
+「名前 + 所有権検証」で成り立っている。
 
 `FLOW_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
 （それも pod spec の話であってコントローラの関知外）。
+
+**`$(...)` はリテラルで届く（利用側の契約）。** K8s は env の値の `$(VAR_NAME)` を、同じ
+コンテナで先に解決された変数（envFrom の全部と、リストで前にある env）へ展開する。
+`spec.input` とフェーズ名は作者が自由に書ける文字列なので、コントローラは注入時に
+`$(` を `$$(` へエスケープする。`spec.input` に書いた `$(FOO)` はコンテナに文字列
+`$(FOO)` のまま届き、**展開されることは決してない** — 展開に頼る入力は書けないし、
+handler の secret が `FLOW_INPUT` / `FLOW_PHASE` 越しに漏れることもない。注入 env を
+リスト先頭に置く並びも維持しているが、それが効くのは env リスト経路だけで、envFrom で
+引いた secret は先頭の env からでも解決できる。**穴を塞いでいるのはエスケープ**。
 
 ### run 番号は annotation で渡す（env ではない）
 
@@ -622,8 +640,9 @@ handler の変更検知は `status.currentRun.handlerHash` に解決済み spec 
 ### 循環に必要なもの
 
 - **減少する量**：`reworkBudget` は減るだけ、絶対に増やさない。循環が複数あるなら辺ごとに別予算
-- **runID**：フェーズ名だけでは実行を識別できなくなるため。子リソース名を `<task>-<phase>-<runID>` と
-  決定論的にして `AlreadyExists` で冪等にする（`generateName` は使わない）。
+- **runID**：フェーズ名だけでは実行を識別できなくなるため。子リソース名を
+  `<task>-<runID>-<フェーズ名のハッシュ>` と決定論的にする（`generateName` は使わない。
+  形式と所有権検証は §4）。
   遅れて到着した古い run の verdict は runID 不一致で黙って捨てる
 
 ### カウンタは 2 本
@@ -844,7 +863,7 @@ runID が据え置きになり、前回の残骸と同じ prefix を見る）。
 run 終了を観測（Job の watch / _done / deadline）
   → verdict を list で回収
   → 遷移表に食わせる
-  → 次の runID を採番して dispatch（決定論的な名前で冪等）
+  → 次の runID を採番して dispatch（決定論的な名前 + 所有権検証で冪等）
 ```
 
 **終了コードは verdict ではない。** exit 0 でも verdict ディレクトリが空なら判定不能。
@@ -1378,7 +1397,7 @@ status:
   currentRun:
     phase: 報告
     runID: 2
-    jobName: cnp-check-x7f2-run-2           # 決定論的な名前 → 冪等
+    jobName: cnp-check-x7f2-2-64442e2b      # <task>-<runID>-<フェーズ名のハッシュ 8 桁>（§4）
     deadline: "2026-08-21T12:20:00Z"
   artifacts:
     store: "s3://agent-tasks/cnp-check-x7f2/"

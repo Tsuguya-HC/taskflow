@@ -41,6 +41,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
 )
@@ -185,6 +186,20 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	}, nil
 }
 
+// OwnedByTask reports whether job is controlled by the task with this UID,
+// rather than merely bearing the deterministic name that task would have
+// picked. It is the read side of the ownerReference BuildJob writes: the name
+// is deterministic, not exclusive, so whoever finds a Job under it has to ask
+// this before trusting what's there.
+func OwnedByTask(job *batchv1.Job, taskUID types.UID) bool {
+	for _, ref := range job.OwnerReferences {
+		if ref.Controller != nil && *ref.Controller && ref.UID == taskUID {
+			return true
+		}
+	}
+	return false
+}
+
 func annotations(in Input) map[string]string {
 	a := map[string]string{
 		AnnotationPhase: string(in.Phase),
@@ -214,19 +229,18 @@ func checkReserved(t *flowv1alpha1.JobTemplate) error {
 // left alone: a handler that already sets FLOW_PHASE means it, and silently
 // overwriting would leave the YAML disagreeing with what ran.
 //
-// The injected vars go in front of whatever the handler declared, and
-// FLOW_INPUT has any $(...) syntax escaped. Kubernetes expands $(VAR_NAME) in
-// an env value against vars declared earlier in the same container's list,
-// including ones resolved from a secretKeyRef — so a handler's secret placed
-// after FLOW_INPUT would otherwise leak into it verbatim, and Spec.Input.Raw
-// is a string the Task's author fully controls. Both defenses are kept:
-// escaping so the value can never be expanded, ordering so there is nothing
-// declared before it to expand against even if the escaping were ever
-// dropped.
+// FLOW_PHASE and FLOW_INPUT carry free strings their authors control — the
+// flow's phase name and the task's spec.input — so both have $(...) escaped.
+// Kubernetes expands $(VAR_NAME) in an env value against everything resolved
+// before it: all of the container's envFrom, then env entries earlier in the
+// list. The injected vars also go in front of the handler's env, which closes
+// the env-list route on its own — but a secret pulled in via envFrom is
+// resolvable from the very first env entry, so against that route ordering
+// does nothing and the escaping is the defense that actually holds.
 func injectEnv(pod *corev1.PodSpec, in Input) {
 	env := []corev1.EnvVar{
 		{Name: EnvTaskUID, Value: string(in.Task.UID)},
-		{Name: EnvPhase, Value: string(in.Phase)},
+		{Name: EnvPhase, Value: escapeVarRefs(string(in.Phase))},
 	}
 	if in.Task.Spec.Input != nil {
 		env = append(env, corev1.EnvVar{Name: EnvInput, Value: escapeVarRefs(string(in.Task.Spec.Input.Raw))})
