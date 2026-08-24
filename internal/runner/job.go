@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -75,6 +76,10 @@ const (
 	maxNameLength = 63
 	// phaseHashLength is how much of the phase digest goes into the name.
 	phaseHashLength = 8
+	// taskHashLength is how much of the task name's digest survives a
+	// truncation, so the part that gets cut is not the only thing telling
+	// two task names apart.
+	taskHashLength = 8
 )
 
 // Input is everything the Job is built from.
@@ -102,12 +107,22 @@ var ErrReservedField = errors.New("jobTemplate sets a reserved field")
 // The phase is hashed rather than spelled: status names are free strings and
 // 調査 is not a legal object name. Whoever wants to read it looks at the
 // annotation.
+//
+// When the task name has to be cut to fit the limit, the truncation drops a
+// hash of the full name in alongside it rather than just chopping the tail.
+// Object names commonly carry their distinguishing part at the end — a
+// generateName suffix, for instance — and two task names that agree up to
+// the cut would otherwise collide on the exact same Job name.
 func JobName(taskName string, phase flowv1alpha1.Phase, runID int32) string {
-	sum := sha256.Sum256([]byte(phase))
-	suffix := fmt.Sprintf("-%d-%s", runID, hex.EncodeToString(sum[:])[:phaseHashLength])
+	phaseSum := sha256.Sum256([]byte(phase))
+	suffix := fmt.Sprintf("-%d-%s", runID, hex.EncodeToString(phaseSum[:])[:phaseHashLength])
 	prefix := taskName
 	if len(prefix)+len(suffix) > maxNameLength {
-		prefix = prefix[:maxNameLength-len(suffix)]
+		taskSum := sha256.Sum256([]byte(taskName))
+		taskHash := hex.EncodeToString(taskSum[:])[:taskHashLength]
+		budget := maxNameLength - len(suffix) - len(taskHash) - 1 // -1 for the separator before the hash
+		budget = min(max(budget, 0), len(taskName))
+		prefix = taskName[:budget] + "-" + taskHash
 	}
 	return prefix + suffix
 }
@@ -198,13 +213,23 @@ func checkReserved(t *flowv1alpha1.JobTemplate) error {
 // injectEnv adds the task's identity to every container. Existing entries are
 // left alone: a handler that already sets FLOW_PHASE means it, and silently
 // overwriting would leave the YAML disagreeing with what ran.
+//
+// The injected vars go in front of whatever the handler declared, and
+// FLOW_INPUT has any $(...) syntax escaped. Kubernetes expands $(VAR_NAME) in
+// an env value against vars declared earlier in the same container's list,
+// including ones resolved from a secretKeyRef — so a handler's secret placed
+// after FLOW_INPUT would otherwise leak into it verbatim, and Spec.Input.Raw
+// is a string the Task's author fully controls. Both defenses are kept:
+// escaping so the value can never be expanded, ordering so there is nothing
+// declared before it to expand against even if the escaping were ever
+// dropped.
 func injectEnv(pod *corev1.PodSpec, in Input) {
 	env := []corev1.EnvVar{
 		{Name: EnvTaskUID, Value: string(in.Task.UID)},
 		{Name: EnvPhase, Value: string(in.Phase)},
 	}
 	if in.Task.Spec.Input != nil {
-		env = append(env, corev1.EnvVar{Name: EnvInput, Value: string(in.Task.Spec.Input.Raw)})
+		env = append(env, corev1.EnvVar{Name: EnvInput, Value: escapeVarRefs(string(in.Task.Spec.Input.Raw))})
 	}
 	for i := range pod.InitContainers {
 		pod.InitContainers[i].Env = merge(pod.InitContainers[i].Env, env)
@@ -214,17 +239,31 @@ func injectEnv(pod *corev1.PodSpec, in Input) {
 	}
 }
 
+// escapeVarRefs turns $(...) into $$(...) so Kubernetes' env-var expansion
+// leaves it as a literal $(...) instead of trying to resolve it against
+// another variable in the same container.
+func escapeVarRefs(s string) string {
+	return strings.ReplaceAll(s, "$(", "$$(")
+}
+
+// merge puts add in front of existing, dropping anything add already has a
+// same-named entry for — a handler's own value wins, both because it is left
+// untouched and because it stays after what injectEnv adds.
 func merge(existing, add []corev1.EnvVar) []corev1.EnvVar {
 	have := make(map[string]bool, len(existing))
 	for _, e := range existing {
 		have[e.Name] = true
 	}
+	var prepend []corev1.EnvVar
 	for _, e := range add {
 		if !have[e.Name] {
-			existing = append(existing, e)
+			prepend = append(prepend, e)
 		}
 	}
-	return existing
+	if len(prepend) == 0 {
+		return existing
+	}
+	return append(prepend, existing...)
 }
 
 func ptr[T any](v T) *T { return &v }

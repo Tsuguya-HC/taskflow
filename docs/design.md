@@ -270,22 +270,21 @@ spec:
   phase: Review
   runner:
     type: Job                         # 組み込み。将来 Sandbox を足す口
-  jobTemplate:                        # ← batchv1.JobTemplateSpec（CronJob と同じ形）
-    spec:
-      template:
-        spec:
-          runtimeClassName: kata
-          serviceAccountName: agent-readonly   # 既存 SA を参照するだけ（生成しない）
-          restartPolicy: Never
-          initContainers:
-            - name: prepare           # in/ 取得 + bindings.next の宣言から out/{ok,more,...}/ 作成 + パーミッション
-              ...
-            - name: publish           # ネイティブサイドカー（restartPolicy: Always）
-              restartPolicy: Always
-              ...
-          containers:
-            - name: agent
-              ...
+  jobTemplate:                        # ← 自前の最小型（§4「自前型の理由」）
+    template:
+      spec:
+        runtimeClassName: kata
+        serviceAccountName: agent-readonly   # 既存 SA を参照するだけ（生成しない）
+        restartPolicy: Never
+        initContainers:
+          - name: prepare           # in/ 取得 + bindings.next の宣言から out/{ok,more,...}/ 作成 + パーミッション
+            ...
+          - name: publish           # ネイティブサイドカー（restartPolicy: Always）
+            restartPolicy: Always
+            ...
+        containers:
+          - name: agent
+            ...
   timeout: 30m
   maxInfraRetries: 2
 ```
@@ -394,8 +393,17 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 「コンテナを走らせて verdict を受け取り、必要なら差し戻す」だけの汎用機構になる。
 カナリア検証やマイグレーションの検証ステップにもそのまま使える。public リポにする理由もここで強くなる。
 
-**`batchv1.JobTemplateSpec` を実型のまま埋める**（CronJob の `spec.jobTemplate` と同一）。
-`kubectl explain agenthandler.spec.jobTemplate.spec.template.spec.containers` が効き、覚えることが増えない。
+**`batchv1.JobTemplateSpec` は使わず、自前の最小型（`template.metadata` / `template.spec` だけを
+持つ `JobTemplate`）で埋める。** 理由は 2 つ。一つは、`JobSpec` の大半（`backoffLimit` /
+`ttlSecondsAfterFinished` / `activeDeadlineSeconds` / `completions` / `parallelism`）が§4 の
+不変条件を壊す予約フィールドで、フィールドごと型から無ければ間違えようがない。もう一つは、
+その `ObjectMeta`（Job にも埋め込まれた Pod テンプレートにも出てくる）を `controller-gen` が
+properties 無しで出力し、structural schema がそこにぶら下がる pod のラベルを刈ってしまうことを
+実測で確認したため（サーバに保存された値が `{}` だった。§20 CNP がラベルで選択する以上、
+黙って消えるラベルは default-deny namespace で「通信が消える」という症状になる）。
+代わりに使う `EmbeddedObjectMeta` は `labels` / `annotations` だけを素直な struct フィールドとして
+持つので、この問題自体が起きない。
+`kubectl explain taskhandler.spec.jobTemplate.template.spec.containers` が効き、覚えることが増えない。
 コントローラ側は deep-copy して名前・owner・ラベルを立て、volume と env を注入して create するだけになる。
 
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
@@ -458,20 +466,23 @@ annotation なら「配管だけが読む」が書ける。
 init・サイドカー・RuntimeClass・SA・volume は全部 home-cluster 側の YAML のまま。
 P2 の分離が保たれ、かつ Job / JobTemplateSpec は K8s 標準なので**サードパーティ依存がゼロ**になる。
 
-### 予約フィールド（CEL validation で create 時に拒否する）
+### 予約フィールド（担保の実態は 2 種類に分かれる）
 
 JobTemplateSpec をそのまま開放すると、設計の不変条件をユーザーが壊せてしまう。
-黙って上書きすると「書いた値と違う」で混乱するので、**admission で落とす。**
+黙って上書きすると「書いた値と違う」で混乱するので、書けないようにするか拒否するかのどちらかにする。
 
-| フィールド | 拒否する理由 |
-|---|---|
-| `backoffLimit`（0 以外） | リトライ機構が 2 つになる。Job 内リトライは runID が据え置きで、前回の残骸と同じ prefix を見る |
-| `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化 |
-| `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） |
-| `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる |
-| `restartPolicy: OnFailure` | 同上（Pod 内再起動で out/ に前回の残骸が残る）。`Never` のみ許可 |
+| フィールド | 拒否する理由 | 担保の実態 |
+|---|---|---|
+| `backoffLimit`（0 以外） | リトライ機構が 2 つになる。Job 内リトライは runID が据え置きで、前回の残骸と同じ prefix を見る | **型から除去。** `JobTemplate` に対応するフィールドが無く、書けない |
+| `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化 | 同上 |
+| `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） | 同上 |
+| `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる | 同上 |
+| `restartPolicy: OnFailure` | 同上（Pod 内再起動で out/ に前回の残骸が残る）。`Never` のみ許可 | **reconcile 時に Go コードで拒否**（`internal/runner/job.go` の `checkReserved`）。Task が動く時点で `Failed` になるのであって、`TaskHandler` の作成自体は防げていない |
 
-CRD の `x-kubernetes-validations`（CEL）で表現できるので webhook は不要。
+上の 5 種は型からフィールドが消えているので、CRD の validation で「拒否する」対象がそもそも
+存在しない。CEL で書けているのは `phase` に `Escalated` / `Failed` を予約するルールだけ
+（`taskflows` 側の CEL validation は 0 件）で、`restartPolicy` を admission で落とす仕組みは無い。
+admission での拒否（`TaskHandler` の作成自体を止める）は #17 の範囲。
 
 profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。profile が規定するのは
 **どのフェーズの束縛が必須か**であって、フェーズの語彙そのものではない。それでも YAML で
@@ -589,7 +600,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない |
 | ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え |
-| 開始フェーズから到達できないフェーズがある ※ 開始フェーズの決め方は未決（§13） | 孤島。書き間違い以外にありえない |
+| 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない |
 | 束縛の無いステータス（＝終端）に到達する経路が 1 本も無い（`Escalated` / `Failed` 自体は除く） | 成功しえないタスク |
 | jobTemplate の予約フィールド（§4 の表） | 不変条件を壊す |
 
@@ -736,16 +747,21 @@ sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し�
                 中身は /results/<runID>/ へ封じる
 ```
 
-### ワークスペースのレイアウト
+### ワークスペースのレイアウト（構想。未実装）
 
-**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める:
+**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める、という
+構想で、こう置く予定:
 
 ```yaml
 kind: TaskHandler
 spec:
   workspace:
-    path: /work          # 既定。ここを基点にレイアウトが敷かれる
+    path: /work          # こう置く予定。ここを基点にレイアウトが敷かれる
 ```
+
+`TaskHandlerSpec` にはまだ `workspace` フィールドが無く、`runner.BuildJob` も参照しない
+（#16 の範囲で入れる）。以下のレイアウトの規約自体は決まっているが、それを敷く仕組みはまだ
+コードになっていない。
 
 **エージェントは自分が何周目かを知らない。**
 
@@ -861,10 +877,9 @@ kind: TaskHandler
 spec:
   phase: 調査
   jobTemplate:
-    spec:
-      template:
-        metadata:
-          labels: {role: cnp-reader}   # 名前も語彙も利用側のもの
+    template:
+      metadata:
+        labels: {role: cnp-reader}   # 名前も語彙も利用側のもの
 ```
 
 あとは既存の仕組みが反応する。
@@ -1129,12 +1144,11 @@ Implementing / Review の循環を有効化。PVC store、rework 予算、長命
   group は `flow.tgy.io` で確定済み（§4）
 - `Escalated` から戻る辺を定義するか（現状は終端。人間は新規タスクを作り直すことになり履歴が切れる）
 - profile の信頼レベル属性（`trusted` / `untrusted`）の導入時期
-- **開始フェーズの決め方**（§5「厳格検証」の「開始フェーズから到達できないフェーズ」が前提にしている、
-  その開始フェーズ自体の決定手段が未定義）。候補は少なくとも 2 つ、優劣は未検討：
-  - 明示フィールド（`TaskFlow.spec.start` 等）— P8「デフォルト値・暗黙のマージ・推測による修復をしない」
-    と素直に整合するが、API が 1 つ増える
+- ~~開始フェーズの決め方~~ → **明示フィールドに確定**（`TaskFlow.spec.start`、`+kubebuilder:validation:MinLength=1`
+  で必須）。検討していた候補は 2 つ：
+  - 明示フィールド（採用）— P8「デフォルト値・暗黙のマージ・推測による修復をしない」と素直に整合する
   - 推論（`next` の値として一度も現れないフェーズを開始とみなす）— 書く量は減るが、開始フェーズ自身が
-    rework の戻り先になっている flow では候補が消える。それが P8 の禁じる「推測」に当たるかも要検討
+    rework の戻り先になっている flow では候補が消える（P8 の禁じる「推測」に当たる）ため見送った
 - **`untrusted` handler に人間承認を必ず経由させる仕組み**（§8「信頼できない入力を読む handler の制約」）。
   現状決まっているのは「束縛の無いステータスへの直接の辺を禁じる」ことだけで、経由先のフェーズが
   実際に人間承認を伴うかは何も保証しない。「このフェーズは人間承認ゲートである」という属性と、
@@ -1195,38 +1209,37 @@ spec:
   timeout: 20m
   maxInfraRetries: 2
   jobTemplate:
-    spec:
-      template:
-        metadata:
-          labels: {role: cnp-reader}               # 下の CNP がこれを選ぶ（framework は知らない）
-        spec:
-          runtimeClassName: kata
-          serviceAccountName: agent-cnp-reader     # CNP と Pod の get/list のみ
-          restartPolicy: Never
-          volumes:
-            - name: work
-              emptyDir: {}
-            - name: prompt
-              configMap: {name: cnp-planner-prompt}   # プロンプトはユーザーの pod spec の話（P7）
-          initContainers:
-            - name: prepare
-              image: registry.infra.tgy.io/tools/agent-sidecar:latest
-              args: ["prepare"]                    # in/ 取得・bindings.next の宣言から out/ を作成・0555
-              volumeMounts: [{name: work, mountPath: /workspace}]
-            - name: publish                        # ネイティブサイドカー
-              image: registry.infra.tgy.io/tools/agent-sidecar:latest
-              args: ["publish"]                    # SIGTERM trap → 検証 → store へ
-              restartPolicy: Always
-              envFrom: [{secretRef: {name: agent-s3-credentials}}]
-              volumeMounts: [{name: work, mountPath: /workspace}]
-          containers:
-            - name: agent
-              image: registry.infra.tgy.io/tools/claude-code:latest
-              workingDir: /workspace
-              # S3 認証情報も egress も持たない。書けるのは out/ の宣言済みディレクトリだけ
-              volumeMounts:
-                - {name: work, mountPath: /workspace}
-                - {name: prompt, mountPath: /prompt, readOnly: true}
+    template:
+      metadata:
+        labels: {role: cnp-reader}               # 下の CNP がこれを選ぶ（framework は知らない）
+      spec:
+        runtimeClassName: kata
+        serviceAccountName: agent-cnp-reader     # CNP と Pod の get/list のみ
+        restartPolicy: Never
+        volumes:
+          - name: work
+            emptyDir: {}
+          - name: prompt
+            configMap: {name: cnp-planner-prompt}   # プロンプトはユーザーの pod spec の話（P7）
+        initContainers:
+          - name: prepare
+            image: registry.infra.tgy.io/tools/agent-sidecar:latest
+            args: ["prepare"]                    # in/ 取得・bindings.next の宣言から out/ を作成・0555
+            volumeMounts: [{name: work, mountPath: /workspace}]
+          - name: publish                        # ネイティブサイドカー
+            image: registry.infra.tgy.io/tools/agent-sidecar:latest
+            args: ["publish"]                    # SIGTERM trap → 検証 → store へ
+            restartPolicy: Always
+            envFrom: [{secretRef: {name: agent-s3-credentials}}]
+            volumeMounts: [{name: work, mountPath: /workspace}]
+        containers:
+          - name: agent
+            image: registry.infra.tgy.io/tools/claude-code:latest
+            workingDir: /workspace
+            # S3 認証情報も egress も持たない。書けるのは out/ の宣言済みディレクトリだけ
+            volumeMounts:
+              - {name: work, mountPath: /workspace}
+              - {name: prompt, mountPath: /prompt, readOnly: true}
 ---
 apiVersion: flow.tgy.io/v1alpha1
 kind: TaskHandler
@@ -1237,37 +1250,36 @@ spec:
   timeout: 20m
   maxInfraRetries: 2
   jobTemplate:
-    spec:
-      template:
-        spec:
-          runtimeClassName: kata
-          serviceAccountName: agent-readonly   # 何も書けない
-          restartPolicy: Never
-          volumes:
-            - name: work
-              emptyDir: {}
-            - name: prompt
-              configMap: {name: cnp-reviewer-prompt}
-          initContainers:
-            - name: prepare
-              image: registry.infra.tgy.io/tools/agent-sidecar:latest
-              args: ["prepare"]
-              volumeMounts: [{name: work, mountPath: /workspace}]
-            - name: publish
-              image: registry.infra.tgy.io/tools/agent-sidecar:latest
-              args: ["publish", "--also=horenso"]   # 終端なので人間にも出す。宛先はサイドカー側の話（P7）
-              restartPolicy: Always
-              envFrom:
-                - {secretRef: {name: agent-s3-credentials}}
-                - {secretRef: {name: horenso-webhook}}
-              volumeMounts: [{name: work, mountPath: /workspace}]
-          containers:
-            - name: agent
-              image: registry.infra.tgy.io/tools/claude-code:latest
-              workingDir: /workspace
-              volumeMounts:
-                - {name: work, mountPath: /workspace}
-                - {name: prompt, mountPath: /prompt, readOnly: true}
+    template:
+      spec:
+        runtimeClassName: kata
+        serviceAccountName: agent-readonly   # 何も書けない
+        restartPolicy: Never
+        volumes:
+          - name: work
+            emptyDir: {}
+          - name: prompt
+            configMap: {name: cnp-reviewer-prompt}
+        initContainers:
+          - name: prepare
+            image: registry.infra.tgy.io/tools/agent-sidecar:latest
+            args: ["prepare"]
+            volumeMounts: [{name: work, mountPath: /workspace}]
+          - name: publish
+            image: registry.infra.tgy.io/tools/agent-sidecar:latest
+            args: ["publish", "--also=horenso"]   # 終端なので人間にも出す。宛先はサイドカー側の話（P7）
+            restartPolicy: Always
+            envFrom:
+              - {secretRef: {name: agent-s3-credentials}}
+              - {secretRef: {name: horenso-webhook}}
+            volumeMounts: [{name: work, mountPath: /workspace}]
+        containers:
+          - name: agent
+            image: registry.infra.tgy.io/tools/claude-code:latest
+            workingDir: /workspace
+            volumeMounts:
+              - {name: work, mountPath: /workspace}
+              - {name: prompt, mountPath: /prompt, readOnly: true}
 ```
 
 `prepare` と `publish` は**同一イメージの 2 サブコマンド**。判定を封する側のコードが 1 箇所に集まる。
@@ -1301,6 +1313,7 @@ kind: TaskFlow
 metadata: {name: cnp-check}
 spec:
   profile: investigate            # 調査 / 報告 が必須のスキーマ
+  start: 調査
   bindings:
     調査:
       handler: cnp-planner

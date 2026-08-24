@@ -23,11 +23,16 @@ limitations under the License.
 package taskstate
 
 import (
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
 	"github.com/Tsuguya/taskflow/internal/transition"
 )
+
+// ConditionReady is the single condition a task carries: whether the
+// framework can go on with it.
+const ConditionReady = "Ready"
 
 // Visited is every phase this task has already run, derived from history
 // rather than stored beside it. Two records of the same fact drift; this one
@@ -81,6 +86,28 @@ func Advance(
 	}
 	status.RunID++
 	status.CurrentRun = &flowv1alpha1.RunRef{Phase: res.Next, RunID: status.RunID}
+}
+
+// Begin puts a fresh task on the flow's starting phase.
+func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase, budget int32) {
+	status.Phase = start
+	status.RunID = 1
+	status.ReworkBudget = budget
+	status.CurrentRun = &flowv1alpha1.RunRef{Phase: start, RunID: 1}
+}
+
+// Fail stops a task whose flow is broken. Nothing is retried: the fault is in
+// the definition rather than in the work, and guessing at a repair would hide
+// it.
+func Fail(status *flowv1alpha1.TaskStatus, reason string) {
+	status.Phase = flowv1alpha1.PhaseFailed
+	status.CurrentRun = nil
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:    ConditionReady,
+		Status:  metav1.ConditionFalse,
+		Reason:  "FlowBroken",
+		Message: reason,
+	})
 }
 
 // RetryInfra prepares another attempt at the same phase after a failure that
