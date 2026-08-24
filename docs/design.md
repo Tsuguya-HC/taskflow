@@ -404,15 +404,22 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 - ラベル `flow.tgy.io/task-uid`（**自分の Job を見つけるための帳簿**。値は UID なので
   ラベル値の文字種制約に収まる）
 
+- env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
+- annotation: `flow.tgy.io/phase`（UTF-8 のまま）、`flow.tgy.io/run-id`、
+  `flow.tgy.io/prev-run-id`（初回は付けない）
+- `backoffLimit: 0`（Job 内リトライを止める。インフラ起因の再実行は新しい runID で
+  Job を作り直す）
+- `activeDeadlineSeconds`（handler の `timeout` から）
+
 **フェーズ名はラベルに入れない。** ステータス名は利用側の自由文字列なので、
 `調査` のような値は K8s のラベル値として通らない（実測: `Invalid value: "調査"`）。
 それ以前に、**ポリシーが選択するためのラベルを framework が決めるのは越権**（§20）。
 ポリシーが何を選ぶかは利用側が `jobTemplate` に書く。フェーズ名は annotation に置けば
 UTF-8 のまま入り、長さの制約も無い。
-- env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
-- annotation: `flow.tgy.io/phase`（UTF-8 のまま）、`flow.tgy.io/run-id`、
-  `flow.tgy.io/prev-run-id`（初回は付けない）
-- `activeDeadlineSeconds`（handler の `timeout` から）
+
+**Job 名も同じ理由でフェーズ名を直接使えない**（RFC 1123）。
+`<task>-<runID>-<フェーズ名のハッシュ 8 桁>` にする。決定論的なので `AlreadyExists` で
+冪等になり、読みたい人は annotation を見る。
 
 `FLOW_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
 （それも pod spec の話であってコントローラの関知外）。
