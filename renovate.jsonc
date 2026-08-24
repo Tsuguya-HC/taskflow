@@ -69,13 +69,16 @@
     },
     {
       "description": [
-        "patch と digest は自動で入れる。この repo の CI は build・test",
-        "（envtest 込み）・lint に加えて、make test 後の git diff で生成物の",
-        "取り込み漏れまで見るので、壊れるものは赤くなる。人間が押すだけの",
-        "PR を溜めても、レビューの密度は上がらない。"
+        "minor までは自動で入れる。この repo の CI は build・test（envtest 込み）・",
+        "lint に加えて、make test 後の git diff で生成物の取り込み漏れまで見るので、",
+        "壊れるものは赤くなる。人間が押すだけの PR を溜めても、レビューの密度は",
+        "上がらない。",
+        "minor を含めているのは今の段階の判断で、利用者もデプロイ先もまだ無く、",
+        "壊れたときの発見と巻き戻しが安いから。実際に動くものが載ったら patch まで",
+        "狭める判断があってよい。"
       ],
       "matchManagers": ["github-actions", "gomod"],
-      "matchUpdateTypes": ["patch", "digest"],
+      "matchUpdateTypes": ["patch", "minor", "digest"],
       "automerge": true
     },
     {
