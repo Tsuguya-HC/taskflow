@@ -17,7 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
-	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -38,6 +38,39 @@ const (
 	// reports back. A human reviewer is this.
 	RunnerExternal RunnerType = "External"
 )
+
+// EmbeddedObjectMeta is the part of a pod's metadata a handler may set.
+//
+// Spelled out rather than embedding metav1.ObjectMeta, because controller-gen
+// renders that as an object with no properties and a structural schema drops
+// everything inside one. Labels written there vanish on write with nothing
+// said — and those are the labels a network policy selects on, so in a
+// default-deny namespace the symptom is traffic disappearing rather than an
+// error. Measured, not guessed: the server stored template.metadata as {}.
+type EmbeddedObjectMeta struct {
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// PodTemplate is the pod a run consists of.
+type PodTemplate struct {
+	// +optional
+	Metadata EmbeddedObjectMeta `json:"metadata,omitzero"`
+	Spec     corev1.PodSpec     `json:"spec"`
+}
+
+// JobTemplate is what a handler runs.
+//
+// Deliberately not batchv1.JobTemplateSpec. Most of a JobSpec is reserved —
+// backoffLimit, ttlSecondsAfterFinished, activeDeadlineSeconds, completions
+// and parallelism all break something the design relies on — and a field that
+// does not exist cannot be set wrong. The directories work the same way: a
+// token outside the vocabulary is not rejected, it is unwritable.
+type JobTemplate struct {
+	Template PodTemplate `json:"template"`
+}
 
 type RunnerSpec struct {
 	// +kubebuilder:default=Job
@@ -73,7 +106,7 @@ type TaskHandlerSpec struct {
 	//
 	// Required when runner.type is Job; ignored when it is External.
 	// +optional
-	JobTemplate *batchv1.JobTemplateSpec `json:"jobTemplate,omitempty"`
+	JobTemplate *JobTemplate `json:"jobTemplate,omitempty"`
 
 	// Timeout is the single source of truth for how long a run may take. The
 	// controller writes it into the Job as well, so the kubelet enforces it

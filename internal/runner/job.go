@@ -130,12 +130,22 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 
 	// A deep copy: the handler is a cached object shared with everything else
 	// reading it, and the caller would not expect building a Job to edit it.
-	spec := *in.Handler.Spec.JobTemplate.Spec.DeepCopy()
+	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
 
-	// Job-internal retry is off. An attempt that failed for reasons outside
-	// the handler's judgement is re-run by the controller under a new runID,
-	// so it gets fresh directories rather than reading what the last one left.
-	spec.BackoffLimit = ptr(int32(0))
+	spec := batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels:      tpl.Metadata.Labels,
+				Annotations: tpl.Metadata.Annotations,
+			},
+			Spec: tpl.Spec,
+		},
+		// Job-internal retry is off. An attempt that failed for reasons
+		// outside the handler's judgement is re-run by the controller under a
+		// new runID, so it gets fresh directories rather than reading what the
+		// last one left.
+		BackoffLimit: ptr(int32(0)),
+	}
 	if in.Handler.Spec.Timeout != nil {
 		spec.ActiveDeadlineSeconds = ptr(int64(in.Handler.Spec.Timeout.Seconds()))
 	}
@@ -172,22 +182,14 @@ func annotations(in Input) map[string]string {
 }
 
 // checkReserved refuses a template that sets what the controller relies on.
-// Admission refuses these too; doing it here as well means the runner does not
-// depend on admission having run.
-func checkReserved(t *batchv1.JobTemplateSpec) error {
-	s := t.Spec
-	switch {
-	case s.BackoffLimit != nil && *s.BackoffLimit != 0:
-		return fmt.Errorf("%w: backoffLimit — a second retry mechanism would reuse the runID", ErrReservedField)
-	case s.TTLSecondsAfterFinished != nil:
-		return fmt.Errorf("%w: ttlSecondsAfterFinished — the Job would be gone before its result was read", ErrReservedField)
-	case s.ActiveDeadlineSeconds != nil:
-		return fmt.Errorf("%w: activeDeadlineSeconds — spec.timeout is the only deadline", ErrReservedField)
-	case s.Completions != nil && *s.Completions != 1:
-		return fmt.Errorf("%w: completions — one run answers once", ErrReservedField)
-	case s.Parallelism != nil && *s.Parallelism != 1:
-		return fmt.Errorf("%w: parallelism — one run answers once", ErrReservedField)
-	case s.Template.Spec.RestartPolicy != corev1.RestartPolicyNever:
+//
+// One row, where the design's table has six. The other five — backoffLimit,
+// ttlSecondsAfterFinished, activeDeadlineSeconds, completions, parallelism —
+// are no longer fields of JobTemplate at all, so there is nothing to check.
+// restartPolicy survives because it belongs to the pod, and a pod that
+// restarts in place would find the previous attempt's directories.
+func checkReserved(t *flowv1alpha1.JobTemplate) error {
+	if t.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		return fmt.Errorf("%w: restartPolicy must be Never — a restarted pod would find the last attempt's directories", ErrReservedField)
 	}
 	return nil
