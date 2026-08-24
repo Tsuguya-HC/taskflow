@@ -17,6 +17,12 @@
 
   "minimumReleaseAge": "3 days",
 
+  // GitHub のネイティブ auto-merge を使う（Renovate 自身がマージしない）。
+  // リポジトリ側の `allow_auto_merge` が有効であることが前提で、無効だと
+  // Renovate は黙って自分でマージする側に落ちる。既定値だが、
+  // **層をまたいだ前提**なので明示しておく。
+  "platformAutomerge": true,
+
   "customManagers": [
     {
       "description": [
@@ -60,6 +66,30 @@
       "matchManagers": ["gomod"],
       "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/**"],
       "groupName": "kubernetes libraries"
+    },
+    {
+      "description": [
+        "minor までは自動で入れる。この repo の CI は build・test（envtest 込み）・",
+        "lint に加えて、make test 後の git diff で生成物の取り込み漏れまで見るので、",
+        "壊れるものは赤くなる。人間が押すだけの PR を溜めても、レビューの密度は",
+        "上がらない。",
+        "minor を含めているのは今の段階の判断で、利用者もデプロイ先もまだ無く、",
+        "壊れたときの発見と巻き戻しが安いから。実際に動くものが載ったら patch まで",
+        "狭める判断があってよい。"
+      ],
+      "matchManagers": ["github-actions", "gomod"],
+      "matchUpdateTypes": ["patch", "minor", "digest"],
+      "automerge": true
+    },
+    {
+      "description": [
+        "kubernetes libraries のグループは自動マージしない。controller-runtime と",
+        "k8s.io/* は patch でも envtest のアセット版と噛み合わなくなることがあり、",
+        "CI が緑でも実クラスタで落ちる余地が残る。ここは目を通す。"
+      ],
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["k8s.io/**", "sigs.k8s.io/**"],
+      "automerge": false
     }
   ]
 }
