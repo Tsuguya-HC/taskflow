@@ -1,0 +1,47 @@
+name: go
+
+# Go の検査を workflow_call で公開する leaf。オーケストレーターは `Lint`
+# （lint.yaml）で、必須チェックはそこの `CI Gate` 1 個だけ。直接のトリガーは
+# 持たない — leaf 自身が pull_request で起動すると、同じコミットに対して
+# gate 経由の結果と重複した check run が並ぶ。
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  go:
+    name: build & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # `make test` は manifests / generate / fmt / vet も走らせてから
+      # envtest でテストする。ツールのピンは Makefile 側にある
+      # （CONTROLLER_TOOLS_VERSION / ENVTEST_VERSION / GOLANGCI_LINT_VERSION）。
+      - name: Test
+        run: make test
+
+      # 上の make が生成物を作り直すので、ここで差分が出るなら
+      # 「型を変えたのに CRD を再生成していない」か「fmt を通していない」。
+      # 生成物をコミットする構成では、これが唯一その取りこぼしを捕まえる。
+      - name: Generated files are committed
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code; then
+            echo "::error::生成物がコミットされていません。make manifests generate fmt を実行して差分を入れてください。"
+            exit 1
+          fi
+
+      - name: Lint
+        run: make lint
