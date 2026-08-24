@@ -52,8 +52,9 @@ const phaseDone flowv1alpha1.Phase = "おわり"
 // differ. What they check is the shape the design requires: a declaration
 // decides its own vocabulary, the two reserved names cannot be bound, and the
 // required fields are enforced. They run against a real API server so the
-// generated schema — enums, required fields, the embedded JobTemplateSpec —
-// is what gets tested, not a struct literal that only the compiler saw.
+// generated schema — enums, required fields, the embedded PodSpec under the
+// curated JobTemplate type — is what gets tested, not a struct literal that
+// only the compiler saw.
 var _ = Describe("the API accepts the shapes design.md documents", func() {
 	ctx := context.Background()
 
