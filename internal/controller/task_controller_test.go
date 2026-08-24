@@ -30,12 +30,12 @@ import (
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
 )
 
+// Shared by the tests in this package.
+const resourceNamespace = "default"
+
 var _ = Describe("Task Controller", func() {
 	Context("When reconciling a resource", func() {
-		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
-		)
+		const resourceName = "test-resource"
 
 		ctx := context.Background()
 
@@ -54,7 +54,9 @@ var _ = Describe("Task Controller", func() {
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					// spec.flow is required: a task that names no flow has
+					// no graph to walk.
+					Spec: flowv1alpha1.TaskSpec{Flow: exampleFlow},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
