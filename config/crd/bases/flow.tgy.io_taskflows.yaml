@@ -11,13 +11,31 @@ spec:
     kind: TaskFlow
     listKind: TaskFlowList
     plural: taskflows
+    shortNames:
+    - tf
     singular: taskflow
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.profile
+      name: Profile
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      priority: 1
+      type: string
+    - jsonPath: .spec.reworkBudget
+      name: Budget
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: TaskFlow is the Schema for the taskflows API
+        description: |-
+          TaskFlow is the type of a task: which phases exist, who fills them, and
+          where each verdict leads.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +55,92 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of TaskFlow
+            description: |-
+              TaskFlowSpec is the topology. It is validated once, when the TaskFlow is
+              created, and not re-derived per task.
             properties:
-              foo:
-                description: foo is an example field of TaskFlow. Edit taskflow_types.go
-                  to remove/update
+              bindings:
+                additionalProperties:
+                  description: |-
+                    PhaseBinding says who fills a phase and where each of their answers leads.
+
+                    Next is keyed by the status to move to, and its value is the directory a
+                    handler writes into to choose that status. One declaration does three jobs:
+                    it is the edge, it is the set of directories the framework creates for the
+                    run, and — because those are the only directories that exist — it is the
+                    handler's entire vocabulary. A token outside it cannot be produced rather
+                    than merely being rejected.
+
+                    Two statuses must not share a directory; that is refused at creation, since
+                    at runtime it would leave the destination undecidable.
+                  properties:
+                    handler:
+                      description: |-
+                        Handler names a TaskHandler in the same namespace. There is deliberately
+                        no field for another namespace: keeping resolution local reduces "which
+                        flows may I start" to "which namespaces may I create a Task in", which
+                        plain RBAC can express.
+                      minLength: 1
+                      type: string
+                    next:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Next maps a destination status to the directory that selects it.
+                        A destination with no binding of its own is where the task stops.
+                      minProperties: 1
+                      type: object
+                  required:
+                  - handler
+                  - next
+                  type: object
+                description: Bindings is keyed by phase name.
+                minProperties: 1
+                type: object
+              maxInFlight:
+                description: MaxInFlight caps concurrent tasks of this flow.
+                format: int32
+                minimum: 1
+                type: integer
+              profile:
+                description: |-
+                  Profile is a validation schema, not a behaviour switch: it says which phases
+                  a flow must bind. It is a controller-side enum rather than a third CRD —
+                  adding one should mean code, tests and a matching network policy, not a line
+                  of YAML.
+                enum:
+                - investigate
                 type: string
+              reworkBudget:
+                description: |-
+                  ReworkBudget caps how many times this flow may send work back. It is
+                  spent at runtime by the controller, never declared per edge — an edge
+                  that had to say "and decrement" would be an expression, and expressions
+                  cannot be checked without running them (P9).
+                format: int32
+                minimum: 0
+                type: integer
+              ttl:
+                description: |-
+                  TTLSpec is how long a finished task sticks around. Cleanup is anchored on
+                  the Task and propagates through ownerReferences; Jobs are never given a TTL
+                  of their own, because a Job that deletes itself takes the verdict with it.
+                properties:
+                  failed:
+                    type: string
+                  succeeded:
+                    type: string
+                type: object
+            required:
+            - bindings
+            - profile
             type: object
           status:
-            description: status defines the observed state of TaskFlow
+            description: |-
+              TaskFlowStatus reports whether the flow was accepted. Nothing reconciles a
+              TaskFlow on its own; this is set when it is validated.
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the TaskFlow resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -117,8 +200,6 @@ spec:
                 - type
                 x-kubernetes-list-type: map
             type: object
-        required:
-        - spec
         type: object
     served: true
     storage: true

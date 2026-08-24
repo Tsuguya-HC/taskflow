@@ -32,10 +32,10 @@ date: 2026-08-21
 | P3 | **Pod は使い捨て、ボリュームが真実** | プロセス状態に耐久性を賭けない。ノード再起動が日常的に起きる前提 |
 | P4 | **制御フローの入力は成果物であって発話ではない** | 最終メッセージは切れる・拒否される・ドリフトする。ファイルの有無だけを見る |
 | P5 | **etcd には制御状態だけ。中身は入れない** | ログ・結果・レポートは S3 / PG。status は参照のみ。etcd 障害を 2 回踏んでいる |
-| P6 | **判定不能は絶対に pass に倒さない** | 不明 → `indeterminate` → Escalated |
+| P6 | **判定不能は絶対に pass に倒さない** | 答えが 1 つに定まらないなら直接 Escalated |
 | P7 | **コントローラは LLM を知らない** | プロンプト・モデル・API キー・store は全てユーザーの pod spec の話。コントローラの語彙は「フェーズ・Job・verdict」だけ |
 | P8 | **厳格に検証し、矛盾したら即座に終わる** | デフォルト値・暗黙のマージ・推測による修復をしない。構造的な矛盾は修復せず `Failed`。曖昧なまま進むより止まる方が安い |
-| P9 | **宣言に式を書かせない** | 遷移は `outcomes` のテーブル引きだけ。条件式・算術・テンプレート分岐を入れると、正しさが実行するまで分からなくなる |
+| P9 | **宣言に式を書かせない** | 遷移は `next` のテーブル引きだけ。条件式・算術・テンプレート分岐を入れると、正しさが実行するまで分からなくなる |
 
 ### 式を持たないこと（P9）
 
@@ -43,12 +43,12 @@ date: 2026-08-21
 
 | | 許す | 許さない |
 |---|---|---|
-| 遷移 | `outcomes: {pass: Verifying, rework: Implementing}` | `when: "... == pass && budget > 0"` |
+| 遷移 | `next: {報告: ok, 調査: more}` | `when: "... == pass && budget > 0"` |
 | 予算 | 実行時にコントローラが数える | `{{=asInt(budget) - 1}}` |
 | 入力 | `input` の値をプロンプトへ差し込む | 入力の値による分岐 |
 
 理由は**検証可能性の一点**。テーブルは create 時に全件検査できる — 未知の verdict、
-到達不能なフェーズ、`outcomes` の欠落、失敗系の上書き。式は**走らせるまで正しさが分からない**。
+到達不能なフェーズ、`next` の欠落、同じディレクトリを指す 2 ステータス。式は**走らせるまで正しさが分からない**。
 
 §19 で測ったとおり、Argo では `- 1` を `+ 1` と書いても止まらず、`when` 2 本が補集合になって
 いるかも誰も見ない。表現力があることと、書き間違いを検出できることは別で、
@@ -165,12 +165,14 @@ metadata: {name: cnp-check}
 spec:
   profile: investigate        # 必須フェーズを規定する検証スキーマ（コントローラ組み込みの enum）
   bindings:                   # 各フェーズを誰が埋めるか + 次にどこへ行くか（両方必須）
-    Planning:
-      handler: claude-planner
-      outcomes: {ok: Review}
-    Review:
-      handler: claude-reviewer
-      outcomes: {pass: Done, rework: Planning, escalate: Escalated}
+    調査:                      # ステータス名は利用側が決める
+      handler: cnp-reader
+      next:                   # 「このステータスへ行くには、このディレクトリに書く」
+        報告: ok
+        調査: more
+    報告:
+      handler: discord-notify
+      next: {おわり: sent}     # おわり は束縛が無い = そこで止まる
   reworkBudget: 2
   maxInFlight: 2              # この flow の同時実行数上限
   ttl: {succeeded: 1h, failed: 168h}
@@ -276,7 +278,7 @@ spec:
           serviceAccountName: agent-readonly   # 既存 SA を参照するだけ（生成しない）
           restartPolicy: Never
           initContainers:
-            - name: prepare           # in/ 取得 + out/{pass,rework,escalate}/ 作成 + パーミッション
+            - name: prepare           # in/ 取得 + bindings.next の宣言から out/{ok,more,...}/ 作成 + パーミッション
               ...
             - name: publish           # ネイティブサイドカー（restartPolicy: Always）
               restartPolicy: Always
@@ -352,7 +354,7 @@ runner の選択とは別に、**包む単位**という論点自体は残る。
 | `TaskHandler`（人間が git で書く、6 個程度） | 見える。**handler ごとに 1 回だけ** |
 
 フェーズ・タイムアウト・TTL・`status` の形・fail-closed の挙動は runner によらず共通なので、
-`kubectl get agenttask` の見え方もデバッグ手順も失敗の仕方も変わらない。
+`kubectl get task` の見え方もデバッグ手順も失敗の仕方も変わらない。
 
 **消せない差が 1 つだけある**: handler が表現できることが違う（`Job` は 1 Pod、`External` は何も起動しない）。
 これは隠すべきではない。隠すと「なぜ handler A でできて B でできないのか」が説明不能になる。
@@ -369,12 +371,13 @@ verdict を書くのが人間の `kubectl patch` でも Argo Events 経由の we
 ```yaml
 Review:
   handlers: [lint, test, agent-review]
-  outcomes: {pass: Verifying, rework: Implementing, escalate: Escalated}
+  next: {検証: ok, 実装: rework, Escalated: stuck}
 ```
 
 合成規則は**固定**（設定可能にすると DSL 化する）:
 
-> **最も不利な verdict が勝つ。** `indeterminate` が 1 つでもあればフェーズは `indeterminate`。
+> **最も不利な結果が勝つ。** 単一の答えを出せなかった handler が 1 つでもあれば、フェーズ全体が
+> 単一の答えを出せなかった扱いになり、直接 Escalated。
 
 決定論的・全域・設定項目ゼロ。P1 とも一貫する。
 
@@ -398,12 +401,45 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
 
 - `ownerReferences`（Task 所有）と決定論的な Job 名
-- ラベル（`agent.tgy.io/{phase,profile,task-uid}`）
-- env: `AGENT_TASK_UID` / `AGENT_RUN_ID` / `AGENT_PHASE` / `AGENT_INPUT`（`spec.input` の JSON）
+- ラベル（`flow.tgy.io/{phase,profile,task-uid}`）— **身元**であってポリシーではない。
+  何を要求するかを決めるのは利用側で、CNP はこのラベルに対して利用側が書く（§16）
+- env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
+- annotation: `flow.tgy.io/run-id`、`flow.tgy.io/prev-run-id`（初回は付けない）
 - `activeDeadlineSeconds`（handler の `timeout` から）
 
-`AGENT_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
+`FLOW_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
 （それも pod spec の話であってコントローラの関知外）。
+
+### run 番号は annotation で渡す（env ではない）
+
+**値は提供するが、どのコンテナに引き込むかは利用側が決める。**
+
+```yaml
+- name: publish
+  env:
+    - name: RUN_ID
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.annotations['flow.tgy.io/run-id']
+```
+
+run 番号が要るのは**配管**であってエージェントではない:
+
+| | 要るか | なぜ |
+|---|---|---|
+| init / publish サイドカー | 要る | S3 のような backend では `results/<runID>/` へ上げる先を知る必要がある |
+| エージェント（main） | **要らない** | `<path>/results/1/ok` を開けば読める。数える必要が無い |
+
+しかもエージェントに渡すのは**避けたい**。実測に基づく理由がある — implement フローで
+レビュアーに**残りの差し戻し回数を伝えない**ようにしたのと同じで、「あと 1 回しかない」を
+知ると判定の基準が動く。run 番号にも「3 周目だからそろそろ通そう」が起こりうる。
+
+**全コンテナに env を注入すると、エージェントに見せない選択肢が利用側から消える。**
+annotation なら「配管だけが読む」が書ける。
+
+なお PVC backend で、書き込み先を `results/<runID>/` への **subPath マウント**にした場合は、
+`<path>/ok` に書いた時点で正しい場所に落ちるので**誰も番号を知らなくてよい**。
+その構成では annotation は使われない。**どちらを採るかは利用側が選ぶ。**
 
 init・サイドカー・RuntimeClass・SA・volume は全部 home-cluster 側の YAML のまま。
 P2 の分離が保たれ、かつ Job / JobTemplateSpec は K8s 標準なので**サードパーティ依存がゼロ**になる。
@@ -423,15 +459,10 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 
 CRD の `x-kubernetes-validations`（CEL）で表現できるので webhook は不要。
 
-profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。フェーズ語彙が固定である以上、
-profile を増やすのは「コード変更 + テスト + 対応する CNP の追加」であるべきで、YAML で勝手に
-生やせる方が危ない。
-
-実際の一式は §16 を参照。
-
-profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。フェーズ語彙が固定である以上、
-profile を増やすのは「コード変更 + テスト + 対応する CNP の追加」であるべきで、YAML で勝手に
-生やせる方が危ない。
+profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。profile が規定するのは
+**どのフェーズの束縛が必須か**であって、フェーズの語彙そのものではない。それでも YAML で
+勝手に増やせるようにはせず、profile を増やすのは「コード変更 + テスト + 対応する CNP の追加」で
+あるべき。
 
 実際の一式は §16 を参照。
 
@@ -443,6 +474,8 @@ profile を増やすのは「コード変更 + テスト + 対応する CNP の�
 
 ## 5. フェーズと遷移
 
+**ステータス名は利用側のもの。** framework は語彙を持たない。下は 1 つの例にすぎない:
+
 ```
 Pending → Triaging → Planning ⇄ PlanReview
                                     ↓
@@ -453,24 +486,38 @@ Pending → Triaging → Planning ⇄ PlanReview
                             Escalated（人間へ）/ Failed
 ```
 
+初版はこの語彙を framework が固定していた（理由は「CNP / Kyverno がこの名前に対して書かれるから」）。
+**それは利用側のドメインを framework が決めることだった。** ポリシーを書くのは利用側で、
+どんな名前に対して書くかも利用側が決めればよい。§2 の責務表に照らせば取り違えで、
+`Pod の形` をコントローラに持たせようとしたのと同じ誤り。
+
+framework が持つ名前は **2 つだけ**:
+
+| 名前 | いつ | 束縛できるか |
+|---|---|---|
+| `Escalated` | 答えが 1 つに定まらなかった（0 個 / 2 個以上 / 時間切れ / 宣言に無いディレクトリ） | ✗ |
+| `Failed` | flow 自体が壊れている（束縛の無いフェーズ、同じディレクトリを指す 2 ステータス） | ✗ |
+
+**束縛の無いステータスが終端。** `Done` を特別扱いしない — 行き先を持たないなら、そこで止まる。
+
 **循環するのが本質。** Argo Workflow の DAG は非巡回なので差し戻しが表現できない。
 これがコントローラを書く最大の理由。
 
 ### 遷移関数
 
-遷移表はコントローラが持たない。**`bindings[phase].outcomes` が辺を宣言し、それが必須。**
+遷移表はコントローラが持たない。**`bindings[phase].next` が辺を宣言し、それが必須。**
 
 ```
-next(bindings, phase, verdict, visited, budget) → phase
+next(bindings, phase, directory, visited, budget) → phase
 ```
 
 コントローラ組み込みなのは**失敗系だけ**：
 
 ```
-verdict が outcomes に無い     → Escalated   （未知のトークン = 判定不能）
-verdict == timeout            → Escalated
-verdict == indeterminate      → Escalated
-構造的な矛盾（下記）           → Failed
+非空ディレクトリがちょうど 1 つでない  → Escalated   （0 個も 2 個以上も時間切れも同じ）
+宣言に無いディレクトリ                → Escalated
+束縛の無いフェーズ                    → Failed
+同じディレクトリを指す 2 ステータス    → Failed（行き先が決まらない）
 ```
 
 **失敗系は宣言で上書きできない。** ここを可変にすると P6（判定不能を pass に倒さない）が
@@ -481,12 +528,13 @@ YAML 一行で破れる。
 グローバルな遷移表だと `(Review, pass)` の行き先が profile によって変わり、遷移関数に profile 引数が
 必要になる（初版はここを取り違えてバグっていた）。**辺を束縛側に置くとその分岐が存在しなくなる。**
 
-フェーズ**名**の語彙は固定のまま（CNP / Kyverno ポリシーが書けなくなるため）。
-自由にできるのは**辺だけ**であって、フェーズを増やせるわけではない。
+固定されているのはフェーズ**名**の語彙ではなく、**遷移の枠組みと失敗系**（`Escalated` / `Failed`）
+だけ。CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける — 辺を束縛側に置いたことで
+自由になったのは辺そのものであって、フェーズの名前を含めた束縛の集合全体が利用側のものになる。
 
 ### 予算消費は宣言させず、実行時に判定する
 
-`outcomes` で自由に辺を張れると、減少する量のない循環が書けてしまう。
+`next` で自由に辺を張れると、減少する量のない循環が書けてしまう。
 `consumesBudget: true` のような注釈にすると付け忘れる。
 
 > **遷移先が「このタスクで既に訪問済みのフェーズ」なら、自動的に rework 辺とみなして
@@ -511,7 +559,7 @@ git のレビューを通る。**レビューを通ったうえでの選択**に
 `lint` を Checks と Verifying の両方に置くような正当なケースも塞いでしまう。
 P8 の「矛盾したら拒否」は構造的矛盾に対するものであって、判断の是非には及ばない。
 
-タイムアウトも特別扱いせず `verdict: timeout` に合成して同じ表に流す。経路は 1 本だけ。
+タイムアウトも特別扱いせず `NoAnswer` の一種として同じ Escalated 経路に流す。経路は 1 本だけ。
 
 ### 厳格検証（admission / CEL）— 矛盾したら作らせない
 
@@ -519,14 +567,16 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 
 | 条件 | 拒否理由 |
 |---|---|
-| `outcomes` が無い binding がある | 必須。デフォルトの行き先を推測しない |
+| `next` が無い binding がある | 必須。デフォルトの行き先を推測しない |
 | profile に含まれるフェーズに binding が無い | 実行中に「行き先はあるが担い手が無い」で止まる |
 | profile に無いフェーズの binding がある | 意図の取り違え。黙って無視しない |
-| `outcomes` の行き先が profile 外 / 未束縛 | 実行時の停止を作成時のエラーに変える |
-| `outcomes` に `timeout` / `indeterminate` が現れる | 予約語。失敗系は上書き不可 |
+| `next` の行き先が未束縛でも終端でもない | 実行時の停止を作成時のエラーに変える |
+| `next` のキーに `Escalated` / `Failed` が現れる | 予約語。失敗系は上書き不可 |
+| 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない |
+| ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え |
-| 開始フェーズから到達できないフェーズがある | 孤島。書き間違い以外にありえない |
-| `Done` に到達する経路が 1 本も無い | 成功しえないタスク |
+| 開始フェーズから到達できないフェーズがある ※ 開始フェーズの決め方は未決（§13） | 孤島。書き間違い以外にありえない |
+| 束縛の無いステータス（＝終端）に到達する経路が 1 本も無い（`Escalated` / `Failed` 自体は除く） | 成功しえないタスク |
 | jobTemplate の予約フィールド（§4 の表） | 不変条件を壊す |
 
 **`Task.spec` は作成後 immutable**（CEL の `oldSelf` で拒否）。
@@ -538,7 +588,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 
 | 種類 | 例 | 結果 |
 |---|---|---|
-| エージェント起因 | verdict が無い / ディレクトリが 2 つ / 未知のトークン | `indeterminate` → **Escalated**（人間が見る） |
+| エージェント起因 | verdict が無い / ディレクトリが 2 つ / 未知のトークン | 直接 **Escalated**（人間が見る） |
 | 構造起因 | handler が実行中に編集・削除された / 束縛の無いフェーズを指した | **Failed**（修復を試みない） |
 
 handler の変更検知は `status.currentRun.handlerHash` に解決済み spec のハッシュを置く。
@@ -569,18 +619,23 @@ handler の変更検知は `status.currentRun.handlerHash` に解決済み spec 
 
 パーサが存在しない = パースエラーが存在しない。`ls` が判定になる。
 
+**ディレクトリの集合は `next` の宣言そのものから来る。** framework は宣言されたものだけを作る。
+
+```yaml
+next: {報告: ok, 調査: more}
+```
+
 ```
 out/
-  pass/     ← 空（initContainer が事前作成）
-  rework/
+  ok/       ← 空
+  more/
     report.md        必須（自由記述）
     findings.json    任意。あれば使う、壊れていても判定は覆らない
     _done            最後に書く。これが無いディレクトリは無視
-  escalate/
 ```
 
-- **ディレクトリ名 = 遷移表のキーそのもの**（`ok`/`ng` にしない。変換表を挟むとズレる）
-- **非空がちょうど 1 つ**でなければ `indeterminate`。0 個も 2 個以上も同じ扱い
+- **宣言が 3 つの役目を同時に果たす** — ①辺 ②作るディレクトリ ③エージェントの語彙
+- **非空がちょうど 1 つ**でなければ直接 Escalated。0 個も 2 個以上も同じ扱い
 - `_done` マーカーを最後に書くことで、書き込み途中を読む競合を防ぐ
   （**v1（Job runner）では sidecar が同一 Pod 内で読むため実質不要**。長命 runner を足すときに効く）
 - 詳細（findings.json）は任意。**steer するビットと、間違いうるビットを分離する**
@@ -589,12 +644,16 @@ out/
 
 ```
 out/           root:root  0555   ← 書けない
-out/pass/      agent      0755
-out/rework/    agent      0755
-out/escalate/  agent      0755
+out/ok/        agent      0755   ← next の宣言から生成
+out/more/      agent      0755
 ```
 
 `mkdir out/NG` が EACCES で失敗する。**バリデーションがカーネルに降りる。**
+
+そして語彙外のトークンは**そもそも表現できない**。宣言に無いディレクトリは存在しないので、
+「未知のトークンを出す」という事象が起こらない。初版は `pass` / `rework` / `escalate` を
+framework が固定し、パーミッションで 4 つ目を防いでいたが、**宣言から生成すれば
+固定する必要そのものが消える。**
 
 ### 「わからない」の逃げ道を必ず用意する
 
@@ -608,14 +667,14 @@ pod の中身が全部ユーザー定義になるため、**コントローラ�
 
 | 区間 | 手段 | その区間で守りたい性質 |
 |---|---|---|
-| エージェント → サイドカー | **ディレクトリ**（`out/{pass,rework,escalate}/`） | LLM の散文・フォーマット崩れに耐える。パーミッションで語彙を強制 |
+| エージェント → サイドカー | **ディレクトリ**（`next` の宣言から生成、例: `out/{ok,more}/`） | LLM の散文・フォーマット崩れに耐える。パーミッションで語彙を強制 |
 | サイドカー → コントローラ | **termination message**（`/dev/termination-log`） | K8s ネイティブ。認証情報も store 依存も不要。両端が決定論的プログラム |
 
 サイドカーは `out/` を検証して verdict 文字列（+ 短い理由）を `/dev/termination-log` に書く。
 コントローラは `pod.status.containerStatuses[].state.terminated.message` を読むだけ。
 
 - 上限 4KB。verdict + 一行の理由には十分。**レポート本体はここに載せない**（store か Loki）
-- termination message が無い / 読めない / 語彙外 → `indeterminate`
+- termination message が無い / 読めない / 語彙外 → 直接 Escalated
 - store への publish はユーザーのサイドカーの仕事であり、コントローラの関心事ではない
 
 これで**コントローラの外部依存は `batch/v1` と core/v1 だけ**になる。
@@ -642,10 +701,46 @@ workflow レベルの `emptyDir` で判定を渡そうとしていたが、empty
 ### Pod 構成
 
 ```
-initContainer:  in/ を store から取得、out/{pass,rework,escalate}/ を作成 + パーミッション設定
+initContainer:  過去の run を /results/ に用意し、next の宣言から書き込み先を作る
 main:           エージェント（ローカルのボリュームに書くだけ。S3 認証情報も egress も持たない）
-sidecar:        SIGTERM を trap → out/ を検証して store へ publish
+sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し、termination message に名前を返す
+                中身は /results/<runID>/ へ封じる
 ```
+
+### ワークスペースのレイアウト
+
+**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める:
+
+```yaml
+kind: TaskHandler
+spec:
+  workspace:
+    path: /work          # 既定。ここを基点にレイアウトが敷かれる
+```
+
+**エージェントは自分が何周目かを知らない。**
+
+| パス | 権限 | 中身 |
+|---|---|---|
+| `<path>/<宣言されたディレクトリ>` | エージェントが書ける | この run の結果（`/work/ok`, `/work/more` …） |
+| `<path>/results/<runID>/<name>` | 読み取り専用 | 過去の全 run |
+
+**基点を `TaskFlow` ではなく `TaskHandler` に置く。** マウントパスは Pod の形であり
+（§2 の責務表では handler の作者のもの）、handler は複数の flow で使い回せる。
+`/work` を前提に書かれた handler が、flow 側の指定で壊れるのはおかしい。
+同じボリュームを別のパスにマウントするだけなので**フェーズごとに違っても成立する**
+（1 周目が `/work` で書き、2 周目が `/data` でマウントしても中身は同じ）。
+
+書き込み側は平らで runID を含まない。履歴は `<path>/results/` の下に run ごとに積まれる。
+3 周目のエージェントが 1 周目の報告を読むのは `<path>/results/1/ok/report.md` を開くだけで、
+**framework が過去の場所を教える必要も、エージェントが番号を数える必要も無い。**
+
+> **宣言が見えるのはファイルシステムそのもの。** `ok/` と `more/` が存在して、それ以外は無い。
+> 語彙外のトークンを出せないのは、禁じているからではなく**存在しないから**。
+
+backend の違い（S3 prefix / PVC）は、この 2 つのパスをどう用意するかに閉じる
+（PVC なら subPath マウント、S3 なら init が `/results` へ引き落として sidecar が上げる）。
+**framework が知るのはパスの形だけで、中身にも backend にも触らない。**
 
 **権限分離が本命の理由。** エージェントは書ける場所がローカルの 3 ディレクトリだけ。
 サイドカーは store の認証情報を持つが LLM を持たない、固定の小さいプログラム。
@@ -664,14 +759,17 @@ store へ到達するために開けた egress は agent コンテナからも�
 - ネイティブサイドカー（`initContainers` + `restartPolicy: Always`）は main 終了後に SIGTERM で刈られる。
   「後に走る」のではなく「trap して flush する」形になる
 - **ペイロードは小さく保つ**（grace period 内に上げ切る）。ログ本体は publish しない（Loki にある）
-- ノード死亡・OOM なら termination message が書かれない → `indeterminate`。
+- ノード死亡・OOM なら termination message が書かれない → 直接 Escalated。
   **fail-closed が実装努力ゼロで成立する**
 - **ネイティブサイドカーの終了コードは Job の完了判定に影響しない。** publish が失敗しても
-  Job は Complete になる。結果は `indeterminate` なので安全側だが、
+  Job は Complete になる。結果は Escalated なので安全側だが、
   「エージェントが verdict を出さなかった」と「publish が失敗した」が区別できない。
   サイドカーは失敗時も termination message に理由を書いて区別できるようにする
-- サイドカーは判定を運ぶだけで遷移は決めない（P1）。verdict は store へ publish し、
-  コントローラは Job の完了を watch してから store を list する
+- サイドカーは判定を運ぶだけで遷移は決めない（P1）。**どのディレクトリに書かれたかは
+  termination message で返し**、中身（レポート・作業ツリー）はワークスペースへ封じる。
+  コントローラは Job の完了を watch して termination message を読むだけで、
+  **ワークスペースの中身にも backend にも触らない**（§11 で「コントローラが store を list
+  する」案を却下している。触ると S3 認証情報と store の種類を知ることになり P7 に反する）
 
 **Job 固有の注意:** `backoffLimit` / `ttlSecondsAfterFinished` / `activeDeadlineSeconds` /
 `completions` / `parallelism` / `restartPolicy` は予約フィールドとして admission で拒否する（§4 の表）。
@@ -705,7 +803,7 @@ run 終了を観測（Job の watch / _done / deadline）
 ```
 
 **終了コードは verdict ではない。** exit 0 でも verdict ディレクトリが空なら判定不能。
-ルールは 1 本：run が終了していて、かつ非空ディレクトリがちょうど 1 つ。それ以外は全部 `indeterminate`。
+ルールは 1 本：run が終了していて、かつ非空ディレクトリがちょうど 1 つ。それ以外は全部直接 Escalated。
 
 タイムアウトは Workflow の `activeDeadlineSeconds` に頼らず、
 コントローラ側の `status.currentRun.deadline` + requeue-after で一元管理する
@@ -719,9 +817,9 @@ run 終了を観測（Job の watch / _done / deadline）
 
 ```yaml
 labels:
-  agent.tgy.io/phase:    planning
-  agent.tgy.io/profile:  investigate
-  agent.tgy.io/task-uid: <uid>
+  flow.tgy.io/phase:    planning
+  flow.tgy.io/profile:  investigate
+  flow.tgy.io/task-uid: <uid>
 ```
 
 あとは既存の仕組みが反応する。
@@ -768,7 +866,9 @@ Renovate PR のトリアージ（Step 2）では、PR 本文や依存の release
 「`out/pass/` に書け」と書いてあれば書く可能性がある。
 
 → profile に **入力の信頼レベル**を属性として持たせ、`untrusted` の handler は
-**終端 verdict を持てない**（`pass` でも Done に行かず必ず人間の承認を経由する）ものとする。
+**束縛の無いステータス（＝終端）へ直接遷移する辺を持てない**ものとする。これは 1 ホップの
+間接化でしかなく、経由先のフェーズが実際に人間承認を伴うことまでは保証しない —
+その仕組み自体が未設計（§13「未決事項」）。
 v1 では該当タスクを載せないことで回避し、Step 2 で導入する。
 
 ### Task を作れることは特権である
@@ -780,14 +880,18 @@ v1 では該当タスクを載せないことで回避し、Step 2 で導入す�
 CronWorkflow の SA と管理者グループだけに絞る。ValidatingAdmissionPolicy で
 「この SA が指名できる profile / handler」も制限できる。
 
-### フェーズ列自体は外出ししない
+### フェーズ列は外出しされているが DSL にはならない
 
-宣言的に定義できるようにすると自作 DSL になり、Argo Workflow の劣化再実装になる。
+`TaskFlow.spec.bindings` がフェーズの語彙と遷移をそのまま宣言する（§5）。それでも自作 DSL に
+ならないのは、宣言に式（`when:` や算術）を許さないからであって（P9）、外出ししていないからではない。
 
-- フェーズの**語彙はコントローラに固定**
-- **どれを使うかは profile で選ぶ**（`investigate` なら Implementing が存在しない）
+- **固定されているのは遷移の枠組みと失敗系**（`Escalated` / `Failed`）だけ。フェーズ名も、
+  それらをどう辺で結ぶかも利用側が決める
+- **profile はどのフェーズが必須かを検証する**（`investigate` なら特定の 2 フェーズが必須、
+  それ以外の名前や個数は縛らない）
 
-語彙が固定だから CNP も Kyverno ポリシーも書ける。
+CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける。フェーズラベルの値がコントローラの
+語彙から出てくるわけではない。
 
 ---
 
@@ -821,8 +925,12 @@ CronWorkflow の SA と管理者グループだけに絞る。ValidatingAdmissio
 | investigate | **S3 prefix** | 短命・読み取り専用・並列可。PVC の attach サイクルが無駄、掃除も lifecycle に丸投げできる |
 | implement | PVC | git ツリーが要る。rework で生き残る必要がある |
 
-パスに runID を含める：`s3://.../<task-uid>/<runID>/rework/report.md`
-→ 遅れて到着した古い run が書いても別 prefix になり、現在の判定を汚染しない。
+レイアウトに runID を含める：`<path>/results/<runID>/<directory>/report.md`（`<path>` は handler が決める）
+（`<directory>` は宣言した `next` の値が選ぶ、その run のディレクトリ名）
+→ 遅れて到着した古い run が書いても別の場所になり、現在の判定を汚染しない。
+
+**エージェントから見えるのは書き込み側の平らなパス**（`<path>/ok` 等）だけで、runID は現れない
+（§7「ワークスペースのレイアウト」）。
 
 ### 実装はユーザーの pod spec 側（コントローラの機能ではない）
 
@@ -841,9 +949,9 @@ backend の違いは init/publish サイドカーが吸収する（CSI 的な発
 
 全フェーズで報告させると板がノイズで埋まる。人間が判断する必要があるときだけ：
 
-- `PlanReview` に入るとき
-- `Escalated`
-- `Done` / `Failed`
+- **`Escalated` / `Failed`**（framework が認識する失敗系。どのフローでも共通）
+- **flow が定義した終端ステータス**（例の `PlanReview` / `Done` はその一例であって、
+  framework が知っている名前ではない。どこで報告するかは flow の binding が決める）
 
 implement→review のピンポンは `.agent/` の中で完結させ、人間には見せない。
 
@@ -866,7 +974,7 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 - 一方 upstream の [issue #6619](https://github.com/seaweedfs/seaweedfs/issues/6619) が **open のまま**で、
   「prefix に一致する全オブジェクトを、経過日数に関係なく削除する」と報告されている
 - 4.42 が該当するかは 24 時間以上の経過観察なしには確認できない。**確認できないまま設定すると、
-  実行中タスクの成果物が消える**（fail-closed で `indeterminate` にはなるが、原因が分からない）
+  実行中タスクの成果物が消える**（fail-closed で Escalated にはなるが、原因が分からない）
 
 → **S3 の掃除も `task-uid` の sweep に寄せる。** 元々 git ブランチ・Harbor タグ用に sweep が必要なので、
 掃除機構が 1 本に減る。「対応する Task が存在しない `task-uid` の prefix を消す」だけで、
@@ -899,7 +1007,7 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 | API キーをコントローラが管理 | 普通に `envFrom: secretRef`。ユーザーの pod spec の話 |
 | グローバルな遷移表をコントローラが持つ | `(Review, pass)` の行き先が profile 依存になり、遷移関数に profile 引数が要る。辺を束縛側に置けばこの分岐自体が消える |
 | 予算消費を `consumesBudget: true` で宣言 | 付け忘れる。訪問済みフェーズへの遷移を実行時に検出すれば迂回不可能 |
-| `outcomes` に行き先のデフォルトを持たせる | 隠れた挙動。必須にして書かせる（P8） |
+| `next` に行き先のデフォルトを持たせる | 隠れた挙動。必須にして書かせる（P8） |
 | 実行時の構造矛盾を修復する | 曖昧なまま進むより止まる方が安い。`Failed` にして作り直させる |
 | フェーズ内に順序や `stopOnFailure` を持たせる | 安いゲートを前段のフェーズに置けば済む。機構を増やさない |
 | 複数 handler の合成規則を設定可能にする | DSL 化する。「最も不利な verdict が勝つ」で固定 |
@@ -966,6 +1074,17 @@ Implementing / Review の循環を有効化。PVC store、rework 予算、長命
   group は `flow.tgy.io` で確定済み（§4）
 - `Escalated` から戻る辺を定義するか（現状は終端。人間は新規タスクを作り直すことになり履歴が切れる）
 - profile の信頼レベル属性（`trusted` / `untrusted`）の導入時期
+- **開始フェーズの決め方**（§5「厳格検証」の「開始フェーズから到達できないフェーズ」が前提にしている、
+  その開始フェーズ自体の決定手段が未定義）。候補は少なくとも 2 つ、優劣は未検討：
+  - 明示フィールド（`TaskFlow.spec.start` 等）— P8「デフォルト値・暗黙のマージ・推測による修復をしない」
+    と素直に整合するが、API が 1 つ増える
+  - 推論（`next` の値として一度も現れないフェーズを開始とみなす）— 書く量は減るが、開始フェーズ自身が
+    rework の戻り先になっている flow では候補が消える。それが P8 の禁じる「推測」に当たるかも要検討
+- **`untrusted` handler に人間承認を必ず経由させる仕組み**（§8「信頼できない入力を読む handler の制約」）。
+  現状決まっているのは「束縛の無いステータスへの直接の辺を禁じる」ことだけで、経由先のフェーズが
+  実際に人間承認を伴うかは何も保証しない。「このフェーズは人間承認ゲートである」という属性と、
+  `untrusted` からの全経路がそこを通ることを admission で検証する仕組みが要る。v1 では該当タスクを
+  載せないことで回避する（§8）
 
 
 ---
@@ -977,7 +1096,7 @@ home-cluster には同居させない。**新規リポを 1 つ作る。**
 
 | リポ | 中身 |
 |---|---|
-| 新規（`agenttask`?） | コントローラ本体、CRD 定義（`config/crd/`）、遷移表と単体テスト、サイドカー、イメージビルド |
+| 新規（`taskflow`） | コントローラ本体、CRD 定義（`config/crd/`）、遷移表と単体テスト、サイドカー、イメージビルド |
 | home-cluster | `apps/phases.yaml`、`TaskHandler` の箱、phase 別 CNP、Kyverno ポリシー |
 
 **「エージェントが何をできるか」は home-cluster 側（PR レビューを通る）、「どう動くか」は新リポ。**
@@ -1012,14 +1131,12 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
 ### home-cluster 側（箱を先に作る）
 
 ```yaml
-apiVersion: agent.tgy.io/v1alpha1
+apiVersion: flow.tgy.io/v1alpha1
 kind: TaskHandler
 metadata: {name: cnp-planner}
 spec:
-  phase: Planning
+  phase: 調査
   runner: {type: Job}
-  promptConfigMapRef: cnp-planner-prompt
-  contextStores: [s3]
   timeout: 20m
   maxInfraRetries: 2
   jobTemplate:
@@ -1032,10 +1149,12 @@ spec:
           volumes:
             - name: work
               emptyDir: {}
+            - name: prompt
+              configMap: {name: cnp-planner-prompt}   # プロンプトはユーザーの pod spec の話（P7）
           initContainers:
             - name: prepare
               image: registry.infra.tgy.io/tools/agent-sidecar:latest
-              args: ["prepare"]                    # in/ 取得・out/ 3 つ作成・0555
+              args: ["prepare"]                    # in/ 取得・bindings.next の宣言から out/ を作成・0555
               volumeMounts: [{name: work, mountPath: /workspace}]
             - name: publish                        # ネイティブサイドカー
               image: registry.infra.tgy.io/tools/agent-sidecar:latest
@@ -1047,18 +1166,17 @@ spec:
             - name: agent
               image: registry.infra.tgy.io/tools/claude-code:latest
               workingDir: /workspace
-              # S3 認証情報も egress も持たない。書けるのは out/ の 3 つだけ
-              volumeMounts: [{name: work, mountPath: /workspace}]
+              # S3 認証情報も egress も持たない。書けるのは out/ の宣言済みディレクトリだけ
+              volumeMounts:
+                - {name: work, mountPath: /workspace}
+                - {name: prompt, mountPath: /prompt, readOnly: true}
 ---
-apiVersion: agent.tgy.io/v1alpha1
+apiVersion: flow.tgy.io/v1alpha1
 kind: TaskHandler
 metadata: {name: cnp-reviewer}
 spec:
-  phase: Review
+  phase: 報告
   runner: {type: Job}
-  promptConfigMapRef: cnp-reviewer-prompt
-  contextStores: [s3]
-  publishTo: [horenso]                     # 終端なので人間に出す
   timeout: 20m
   maxInfraRetries: 2
   jobTemplate:
@@ -1068,20 +1186,47 @@ spec:
           runtimeClassName: kata
           serviceAccountName: agent-readonly   # 何も書けない
           restartPolicy: Never
-          # 以下 cnp-planner と同形（agent コンテナのみ差分）
+          volumes:
+            - name: work
+              emptyDir: {}
+            - name: prompt
+              configMap: {name: cnp-reviewer-prompt}
+          initContainers:
+            - name: prepare
+              image: registry.infra.tgy.io/tools/agent-sidecar:latest
+              args: ["prepare"]
+              volumeMounts: [{name: work, mountPath: /workspace}]
+            - name: publish
+              image: registry.infra.tgy.io/tools/agent-sidecar:latest
+              args: ["publish", "--also=horenso"]   # 終端なので人間にも出す。宛先はサイドカー側の話（P7）
+              restartPolicy: Always
+              envFrom:
+                - {secretRef: {name: agent-s3-credentials}}
+                - {secretRef: {name: horenso-webhook}}
+              volumeMounts: [{name: work, mountPath: /workspace}]
+          containers:
+            - name: agent
+              image: registry.infra.tgy.io/tools/claude-code:latest
+              workingDir: /workspace
+              volumeMounts:
+                - {name: work, mountPath: /workspace}
+                - {name: prompt, mountPath: /prompt, readOnly: true}
 ```
 
 `prepare` と `publish` は**同一イメージの 2 サブコマンド**。判定を封する側のコードが 1 箇所に集まる。
+プロンプト（ConfigMap volume）も store の認証情報（`envFrom`）も通知先（`publish` の引数）も、
+コントローラの知らないユーザーの pod spec に畳まれている（P7、§11 で却下した
+`promptConfigMapRef` / `contextStores` / `publishTo` はここに畳む）。
 
 対応する CNP（phase ラベルで選択、これも home-cluster）:
 
 ```yaml
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
-metadata: {name: agent-phase-planning, namespace: claude-code}
+metadata: {name: agent-phase-investigate, namespace: claude-code}
 spec:
   endpointSelector:
-    matchLabels: {agent.tgy.io/phase: Planning}
+    matchLabels: {flow.tgy.io/phase: 調査}
   egress:
     - toEntities: [kube-apiserver]
     - toFQDNs: [{matchName: api.anthropic.com}]
@@ -1093,19 +1238,19 @@ spec:
 型（一度だけ書く。home-cluster に置きレビューを通る）:
 
 ```yaml
-apiVersion: agent.tgy.io/v1alpha1
+apiVersion: flow.tgy.io/v1alpha1
 kind: TaskFlow
 metadata: {name: cnp-check}
 spec:
-  profile: investigate            # Planning / Review が必須のスキーマ
+  profile: investigate            # 調査 / 報告 が必須のスキーマ
   bindings:
-    Planning:
+    調査:
       handler: cnp-planner
-      outcomes: {ok: Review}
-    Review:
+      next: {報告: ok}
+    報告:
       handler: cnp-reviewer
-      outcomes: {pass: Done, rework: Planning, escalate: Escalated}
-  reworkBudget: 0                 # investigate に循環は無い
+      next: {おわり: sent}
+  reworkBudget: 0                 # investigate に循環は無い。辺は前進しかしないので影響も受けない
   maxInFlight: 1
   ttl: {succeeded: 1h, failed: 168h}
 ```
@@ -1113,7 +1258,7 @@ spec:
 実体（毎回作られる。cron でもエージェントでも人間でも同じ）:
 
 ```yaml
-apiVersion: agent.tgy.io/v1alpha1
+apiVersion: flow.tgy.io/v1alpha1
 kind: Task
 metadata:
   generateName: cnp-check-
@@ -1141,7 +1286,7 @@ spec:
         resource:
           action: create
           manifest: |
-            apiVersion: agent.tgy.io/v1alpha1
+            apiVersion: flow.tgy.io/v1alpha1
             kind: Task
             metadata: {generateName: cnp-check-}
             spec:
@@ -1152,44 +1297,55 @@ spec:
 スケジュール用の CRD は作らない。CronJob で `kubectl create` しても等価。
 **生成元はグラフを知らない**ので、フローを変えても cron 側は無変更で済む。
 
-### status（Review 実行中）
+### status（報告 実行中）
 
 ```yaml
 status:
-  phase: Review
+  phase: 報告
   runID: 2
   reworkBudget: 0
   currentRun:
-    phase: Review
+    phase: 報告
     runID: 2
-    jobName: cnp-check-x7f2-review-2           # 決定論的な名前 → 冪等
+    jobName: cnp-check-x7f2-run-2           # 決定論的な名前 → 冪等
     deadline: "2026-08-21T12:20:00Z"
   artifacts:
     store: "s3://agent-tasks/cnp-check-x7f2/"
   history:
-    - {phase: Planning, runID: 1, verdict: ok, ref: "s3://.../1/"}
+    - {phase: 調査, runID: 1, directory: ok, outcome: Declared, ref: "s3://.../1/"}
   conditions:
     - {type: PolicyReady, status: "True", reason: HandlerAndCNPResolved}
 ```
 
 ### kubectl から見える形（additionalPrinterColumns）
 
+`Task` の printcolumn は Flow / Phase / Run / Budget / Age（`kubectl get task`、`agenttask` という
+resource 名は存在しない）。`Profile` は `TaskFlow` 側の列であって `Task` には無い。
+
 ```
-NAME             PROFILE       PHASE      VERDICT   RUN   BUDGET   AGE
-cnp-check-x7f2   investigate   Review     -         2     0        4m
-cnp-check-m91k   investigate   Done       pass      2     0        22h
-alert-inv-p03z   investigate   Escalated  timeout   3     0        2h
+NAME             FLOW        PHASE      RUN   BUDGET   AGE
+cnp-check-x7f2   cnp-check   報告        2     0        4m
+cnp-check-m91k   cnp-check   おわり      2     0        22h
+alert-inv-p03z   cnp-check   Escalated  3     0        2h
 ```
 
-### 人間が判定を入れる場合
+`おわり` は `Escalated` と違ってフレームワークの予約語ではない — この flow の作者が終端に選んだ
+ただの名前で、他のどのフェーズとも扱いは同じ（§5「`Done` を特別扱いしない」）。
+
+### 人間が判定を入れる場合（構想。未実装）
+
+`runner.type: External` で人間がレビューする経路はまだコードになっていない。3 CRD とも
+`+kubebuilder:subresource:status` しか持たず、専用の `verdict` サブリソースは存在しない。
+実装するときのイメージ：
 
 ```bash
-kubectl patch agenttask cnp-check-x7f2 --subresource=verdict --type=merge   -p '{"verdict":"pass","runID":2,"reason":"確認済み"}'
+# 将来案。現状の CRD には無いので今は動かない。
+kubectl patch task cnp-check-x7f2 --subresource=verdict --type=merge   -p '{"directory":"ok","runID":2,"reason":"確認済み"}'
 ```
 
 **`runID` を必須にする。** 一致しない patch は拒否する。人間が古い画面を見て承認した場合に、
 既に次の run へ進んだタスクを巻き戻さないため（機械の遅延 verdict と同じ扱い）。
-このサブリソースへの PATCH だけを Kanidm グループに RBAC で許可する。
+このサブリソースへの PATCH だけを Kanidm グループに RBAC で許可する想定。
 
 ---
 
@@ -1492,7 +1648,7 @@ TaskSequence は cross-namespace で Task を create する。これを v1 の�
 #### 純粋に追加である
 
 `Task` / `TaskFlow` / `TaskHandler` は 1 フィールドも変わらない。紐付けはラベル 1 枚
-（`agent.tgy.io/sequence`）。GC も**各 Task が自分の TTL を持つ**ので、
+（`flow.tgy.io/sequence`）。GC も**各 Task が自分の TTL を持つ**ので、
 TaskSequence が cross-ns の掃除をする必要がない（`ownerReference` は namespace を跨げない）。
 
 ### Step の順序への影響
@@ -1586,7 +1742,7 @@ Argo のままにする。
 今日 Step 0 で検証した中身は**すべて Argo 上でそのまま動いている**:
 
 - 判定ディレクトリ + パーミッションによる語彙の強制
-- fail-closed（`indeterminate` → Escalated）
+- fail-closed（答えが 1 つに定まらなければ直接 Escalated）
 - 根拠の併記要求
 - 成功判定の強度（書き込みパスを通す）
 
