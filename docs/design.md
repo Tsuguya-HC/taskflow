@@ -482,7 +482,9 @@ annotation なら「配管だけが読む」が書ける。
 その構成では annotation は使われない。**どちらを採るかは利用側が選ぶ。**
 
 init・サイドカー・RuntimeClass・SA・volume は全部 home-cluster 側の YAML のまま。
-P2 の分離が保たれ、かつ Job / JobTemplateSpec は K8s 標準なので**サードパーティ依存がゼロ**になる。
+P2 の分離が保たれる。Pod 層（`template.spec`）は `corev1.PodSpec` 標準そのもの、Job 層だけが
+自前型（予約フィールドの節を参照）で、どちらも依存は K8s core API のみ —
+**サードパーティ依存はゼロ**のまま。
 
 ### 予約フィールド（担保の実態は 2 種類に分かれる）
 
@@ -501,6 +503,26 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 存在しない。CEL で書けているのは `phase` に `Escalated` / `Failed` を予約するルールだけ
 （`taskflows` 側の CEL validation は 0 件）で、`restartPolicy` を admission で落とす仕組みは無い。
 admission での拒否（`TaskHandler` の作成自体を止める）は #17 の範囲。
+
+書き間違いが何になるかは fieldValidation 次第（envtest 実測 2026-08-24）: Strict（kubectl の
+既定）では `unknown field "spec.jobTemplate.backoffLimit"` の明示エラー。Warn / Ignore では
+**黙って刈られて保存される** — 書いた本人は効いていると思い込める。ただし CronJob の形
+（`jobTemplate.spec.template`）は全モードで弾かれる: `spec` が刈られた結果、必須の `template`
+が欠けて required エラーになる。黙殺が成立するのは「非 strict クライアント + 予約フィールドの
+追記」の組み合わせに限られる。
+
+**JobSpec の残り全フィールドの処遇。** 型除去は「検討して除外した」と「視界から消えて
+考慮漏れした」の区別を消す（実例: `podReplacementPolicy` は K8s 1.28 で増えたが、この表を
+書くまで検討の机に載らなかった）。なので全量を一度ここに書く。**K8s を上げて JobSpec に
+新フィールドが増えたら、この表に 1 行足してから判断する**:
+
+| フィールド | 処遇 |
+|---|---|
+| completionMode / backoffLimitPerIndex / maxFailedIndexes / successPolicy | Indexed Job 系。1 run = 1 verdict に反するので不要 |
+| selector / manualSelector | Job controller の既定に任せる。手動 selector は事故の元でしかない |
+| suspend / managedBy | キューイング・外部管理（Kueue 等）の領分。必要になったら handler にではなくコントローラが焼く |
+| podFailurePolicy | インフラ起因失敗の分類（§5）はコントローラの責務。使うならコントローラが焼く |
+| podReplacementPolicy | **検討中（未対応）**。既定の TerminatingOrFailed は terminating 中に代替 Pod を作るため、同一 runID の Pod が並走しうる（KEP-3939 に明記。JobSet の KEP-467 は同じ理由で Failed を強制）。`restartPolicy: Never` を強制した理由と同型の侵害。コントローラが Failed を焼く案を、実クラスタでの並走再現とタイムアウト経路の確認待ちで保留 |
 
 profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。profile が規定するのは
 **どのフェーズの束縛が必須か**であって、フェーズの語彙そのものではない。それでも YAML で
