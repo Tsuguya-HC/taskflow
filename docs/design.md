@@ -401,12 +401,45 @@ Implementing → Checks(lint, test) → Review(agent, human) → Verifying → D
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
 
 - `ownerReferences`（Task 所有）と決定論的な Job 名
-- ラベル（`flow.tgy.io/{phase,profile,task-uid}`）
-- env: `AGENT_TASK_UID` / `AGENT_RUN_ID` / `AGENT_PHASE` / `AGENT_INPUT`（`spec.input` の JSON）
+- ラベル（`flow.tgy.io/{phase,profile,task-uid}`）— **身元**であってポリシーではない。
+  何を要求するかを決めるのは利用側で、CNP はこのラベルに対して利用側が書く（§16）
+- env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
+- annotation: `flow.tgy.io/run-id`、`flow.tgy.io/prev-run-id`（初回は付けない）
 - `activeDeadlineSeconds`（handler の `timeout` から）
 
-`AGENT_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
+`FLOW_INPUT` は env なのでサイズ上限がある。大きい入力はユーザーが store 経由で取りに行く
 （それも pod spec の話であってコントローラの関知外）。
+
+### run 番号は annotation で渡す（env ではない）
+
+**値は提供するが、どのコンテナに引き込むかは利用側が決める。**
+
+```yaml
+- name: publish
+  env:
+    - name: RUN_ID
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.annotations['flow.tgy.io/run-id']
+```
+
+run 番号が要るのは**配管**であってエージェントではない:
+
+| | 要るか | なぜ |
+|---|---|---|
+| init / publish サイドカー | 要る | S3 のような backend では `results/<runID>/` へ上げる先を知る必要がある |
+| エージェント（main） | **要らない** | `<path>/results/1/ok` を開けば読める。数える必要が無い |
+
+しかもエージェントに渡すのは**避けたい**。実測に基づく理由がある — implement フローで
+レビュアーに**残りの差し戻し回数を伝えない**ようにしたのと同じで、「あと 1 回しかない」を
+知ると判定の基準が動く。run 番号にも「3 周目だからそろそろ通そう」が起こりうる。
+
+**全コンテナに env を注入すると、エージェントに見せない選択肢が利用側から消える。**
+annotation なら「配管だけが読む」が書ける。
+
+なお PVC backend で、書き込み先を `results/<runID>/` への **subPath マウント**にした場合は、
+`<path>/ok` に書いた時点で正しい場所に落ちるので**誰も番号を知らなくてよい**。
+その構成では annotation は使われない。**どちらを採るかは利用側が選ぶ。**
 
 init・サイドカー・RuntimeClass・SA・volume は全部 home-cluster 側の YAML のまま。
 P2 の分離が保たれ、かつ Job / JobTemplateSpec は K8s 標準なので**サードパーティ依存がゼロ**になる。
