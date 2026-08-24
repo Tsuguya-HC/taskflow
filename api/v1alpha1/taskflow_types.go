@@ -72,6 +72,16 @@ type TTLSpec struct {
 type TaskFlowSpec struct {
 	Profile Profile `json:"profile"`
 
+	// Start names the phase a task begins at.
+	//
+	// Stated rather than worked out. It could be inferred — the phase no
+	// binding sends anything to — but P8 refuses to guess, and the inference
+	// is wrong for any flow whose first phase is also where a rework returns:
+	// there, every phase is somebody's destination and the guess finds
+	// nothing.
+	// +kubebuilder:validation:MinLength=1
+	Start Phase `json:"start"`
+
 	// Bindings is keyed by phase name.
 	// +kubebuilder:validation:MinProperties=1
 	Bindings map[Phase]PhaseBinding `json:"bindings"`

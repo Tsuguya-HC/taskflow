@@ -17,6 +17,7 @@ limitations under the License.
 package runner
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -52,18 +53,16 @@ func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 			Phase:   phaseInvestigate,
 			Runner:  flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
 			Timeout: &metav1.Duration{Duration: 1200000000000}, // 20m
-			JobTemplate: &batchv1.JobTemplateSpec{
-				Spec: batchv1.JobSpec{
-					Template: corev1.PodTemplateSpec{
-						// The label a policy selects on, written by whoever
-						// wrote the handler. Nothing here comes from us.
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": handlerName}},
-						Spec: corev1.PodSpec{
-							RestartPolicy:      corev1.RestartPolicyNever,
-							ServiceAccountName: "agent-cnp-reader",
-							InitContainers:     []corev1.Container{{Name: "prepare", Image: "example.invalid/prepare:v0"}},
-							Containers:         []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
-						},
+			JobTemplate: &flowv1alpha1.JobTemplate{
+				Template: flowv1alpha1.PodTemplate{
+					// The label a policy selects on, written by whoever
+					// wrote the handler. Nothing here comes from us.
+					Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
+					Spec: corev1.PodSpec{
+						RestartPolicy:      corev1.RestartPolicyNever,
+						ServiceAccountName: "agent-cnp-reader",
+						InitContainers:     []corev1.Container{{Name: "prepare", Image: "example.invalid/prepare:v0"}},
+						Containers:         []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
 					},
 				},
 			},
@@ -174,7 +173,7 @@ func TestInjectsIdentityIntoEveryContainer(t *testing.T) {
 // describing something other than what ran.
 func TestDoesNotOverwriteTheHandlersEnv(t *testing.T) {
 	h := handler(func(h *flowv1alpha1.TaskHandler) {
-		h.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{
+		h.Spec.JobTemplate.Template.Spec.Containers[0].Env = []corev1.EnvVar{
 			{Name: EnvPhase, Value: "whatever the author wanted"},
 		}
 	})
@@ -191,10 +190,10 @@ func TestLeavesTheHandlerUntouched(t *testing.T) {
 	h := handler()
 	_ = build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
 
-	if h.Spec.JobTemplate.Spec.BackoffLimit != nil {
+	if false {
 		t.Fatal("building a Job edited the handler it was built from")
 	}
-	if got := len(h.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env); got != 0 {
+	if got := len(h.Spec.JobTemplate.Template.Spec.Containers[0].Env); got != 0 {
 		t.Fatalf("handler's container env grew to %d entries", got)
 	}
 }
@@ -251,39 +250,30 @@ func TestNameStaysWithinTheLimit(t *testing.T) {
 	}
 }
 
-func TestRefusesReservedFields(t *testing.T) {
-	cases := []struct {
-		name string
-		mut  func(*flowv1alpha1.TaskHandler)
-	}{
-		{"backoffLimit", func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Spec.BackoffLimit = ptr(int32(3)) }},
-		{"ttlSecondsAfterFinished", func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Spec.TTLSecondsAfterFinished = ptr(int32(60)) }},
-		{"activeDeadlineSeconds", func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Spec.ActiveDeadlineSeconds = ptr(int64(60)) }},
-		{"completions", func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Spec.Completions = ptr(int32(2)) }},
-		{"parallelism", func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Spec.Parallelism = ptr(int32(2)) }},
-		{"restartPolicy", func(h *flowv1alpha1.TaskHandler) {
-			h.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
-		}},
+// Five of the six reserved fields are gone from the type, so only this one
+// can still be set wrong.
+func TestRefusesARestartingPod(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.JobTemplate.Template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+	})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+	if err == nil {
+		t.Fatal("a pod that restarts in place was accepted")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := BuildJob(Input{Task: task(), Handler: handler(tc.mut), Phase: phaseInvestigate, RunID: 1})
-			if err == nil {
-				t.Fatalf("%s was accepted", tc.name)
-			}
-			if !strings.Contains(err.Error(), tc.name) {
-				t.Fatalf("error does not name the field: %v", err)
-			}
-		})
+	if !strings.Contains(err.Error(), "restartPolicy") {
+		t.Fatalf("error does not name the field: %v", err)
 	}
 }
 
-// backoffLimit: 0 is what the controller sets itself, so a handler saying the
-// same thing is agreeing, not conflicting.
-func TestBackoffLimitZeroIsAllowed(t *testing.T) {
-	h := handler(func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Spec.BackoffLimit = ptr(int32(0)) })
-	if _, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1}); err != nil {
-		t.Fatalf("backoffLimit: 0 should be fine: %v", err)
+// The other five cannot be expressed. This is the same move the directories
+// make: not rejected, unwritable.
+func TestTheOtherReservedFieldsDoNotExist(t *testing.T) {
+	var tpl flowv1alpha1.JobTemplate
+	v := reflect.TypeOf(tpl)
+	for _, gone := range []string{"BackoffLimit", "TTLSecondsAfterFinished", "ActiveDeadlineSeconds", "Completions", "Parallelism"} {
+		if _, found := v.FieldByName(gone); found {
+			t.Fatalf("JobTemplate still has %s; it should not be settable at all", gone)
+		}
 	}
 }
 
