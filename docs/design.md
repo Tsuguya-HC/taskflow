@@ -676,18 +676,33 @@ sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し�
 
 ### ワークスペースのレイアウト
 
+**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める:
+
+```yaml
+kind: TaskHandler
+spec:
+  workspace:
+    path: /work          # 既定。ここを基点にレイアウトが敷かれる
+```
+
 **エージェントは自分が何周目かを知らない。**
 
 | パス | 権限 | 中身 |
 |---|---|---|
-| `/<宣言されたディレクトリ>` | エージェントが書ける | この run の結果（`/ok`, `/more` …） |
-| `/results/<runID>/<name>` | 読み取り専用 | 過去の全 run |
+| `<path>/<宣言されたディレクトリ>` | エージェントが書ける | この run の結果（`/work/ok`, `/work/more` …） |
+| `<path>/results/<runID>/<name>` | 読み取り専用 | 過去の全 run |
 
-書き込み側は平らで runID を含まない。履歴は `/results/` の下に run ごとに積まれる。
-3 周目のエージェントが 1 周目の報告を読むのは `/results/1/ok/report.md` を開くだけで、
+**基点を `TaskFlow` ではなく `TaskHandler` に置く。** マウントパスは Pod の形であり
+（§2 の責務表では handler の作者のもの）、handler は複数の flow で使い回せる。
+`/work` を前提に書かれた handler が、flow 側の指定で壊れるのはおかしい。
+同じボリュームを別のパスにマウントするだけなので**フェーズごとに違っても成立する**
+（1 周目が `/work` で書き、2 周目が `/data` でマウントしても中身は同じ）。
+
+書き込み側は平らで runID を含まない。履歴は `<path>/results/` の下に run ごとに積まれる。
+3 周目のエージェントが 1 周目の報告を読むのは `<path>/results/1/ok/report.md` を開くだけで、
 **framework が過去の場所を教える必要も、エージェントが番号を数える必要も無い。**
 
-> **宣言が見えるのはファイルシステムそのもの。** `/ok` と `/more` が存在して、それ以外は無い。
+> **宣言が見えるのはファイルシステムそのもの。** `ok/` と `more/` が存在して、それ以外は無い。
 > 語彙外のトークンを出せないのは、禁じているからではなく**存在しないから**。
 
 backend の違い（S3 prefix / PVC）は、この 2 つのパスをどう用意するかに閉じる
@@ -877,11 +892,11 @@ CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける
 | investigate | **S3 prefix** | 短命・読み取り専用・並列可。PVC の attach サイクルが無駄、掃除も lifecycle に丸投げできる |
 | implement | PVC | git ツリーが要る。rework で生き残る必要がある |
 
-レイアウトに runID を含める：`<workspace>/results/<runID>/<directory>/report.md`
+レイアウトに runID を含める：`<path>/results/<runID>/<directory>/report.md`（`<path>` は handler が決める）
 （`<directory>` は宣言した `next` の値が選ぶ、その run のディレクトリ名）
 → 遅れて到着した古い run が書いても別の場所になり、現在の判定を汚染しない。
 
-**エージェントから見えるのは書き込み側の平らなパス**（`/ok` 等）だけで、runID は現れない
+**エージェントから見えるのは書き込み側の平らなパス**（`<path>/ok` 等）だけで、runID は現れない
 （§7「ワークスペースのレイアウト」）。
 
 ### 実装はユーザーの pod spec 側（コントローラの機能ではない）
