@@ -1,5 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# Image for the in-pod sidecar (prepare / publish). Built from cmd/sidecar.
+SIDECAR_IMG ?= agent-sidecar:latest
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -126,6 +128,10 @@ docker-build: ## Build docker image with the manager.
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-build-sidecar
+docker-build-sidecar: ## Build docker image with the sidecar.
+	$(CONTAINER_TOOL) build -t ${SIDECAR_IMG} -f Dockerfile.sidecar .
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

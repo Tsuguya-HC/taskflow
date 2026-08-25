@@ -33,8 +33,11 @@ package runner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -44,34 +47,28 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
+	"github.com/Tsuguya/taskflow/internal/contract"
 )
 
+// LabelTaskUID, the annotation names and the FLOW_* environment variable
+// names are re-exported from internal/contract, which is the canonical
+// place they are documented — that package is the one a Pod-side binary
+// like cmd/sidecar can depend on without pulling in this one's client-go
+// dependency. They stay defined here too so the controller's own callers
+// and tests keep reading runner.X.
 const (
-	// LabelTaskUID is the only label the controller sets. It exists so the
-	// controller can find its own Jobs, not so anything can select on it —
-	// a UID also happens to be legal as a label value, which a status name
-	// picked by whoever wrote the flow is not.
-	LabelTaskUID = "flow.tgy.io/task-uid"
+	LabelTaskUID = contract.LabelTaskUID
 
-	// AnnotationPhase carries the status name. An annotation rather than a
-	// label because these are free strings: 調査 is not a legal label value
-	// and not a legal object name either.
-	AnnotationPhase = "flow.tgy.io/phase"
-	// AnnotationRunID is read by the plumbing that files results under
-	// results/<runID>/. The agent has no use for it — it opens
-	// results/1/ok and reads — and there is reason to keep it away from
-	// one: a run count suggests how much rope is left, the same way a
-	// remaining-rework count would.
-	AnnotationRunID = "flow.tgy.io/run-id"
-	// AnnotationPrevRunID is absent on the first run.
-	AnnotationPrevRunID = "flow.tgy.io/prev-run-id"
+	AnnotationPhase     = contract.AnnotationPhase
+	AnnotationRunID     = contract.AnnotationRunID
+	AnnotationPrevRunID = contract.AnnotationPrevRunID
 
-	// EnvTaskUID, EnvPhase and EnvInput are set on every container in the
-	// template. Unlike the run number these say what the work is, not how
-	// many attempts it has had.
-	EnvTaskUID = "FLOW_TASK_UID"
-	EnvPhase   = "FLOW_PHASE"
-	EnvInput   = "FLOW_INPUT"
+	EnvTaskUID     = contract.EnvTaskUID
+	EnvPhase       = contract.EnvPhase
+	EnvInput       = contract.EnvInput
+	EnvDirectories = contract.EnvDirectories
+
+	annotationPrefix = contract.AnnotationPrefix
 
 	// maxNameLength is the limit Kubernetes puts on an object name.
 	maxNameLength = 63
@@ -95,6 +92,10 @@ type Input struct {
 	RunID int32
 	// PrevRunID is 0 when this is the first attempt.
 	PrevRunID int32
+	// Directories the flow declares for this phase — the only answers the
+	// run can give. Order is not significant; they are sorted on the way
+	// into the environment so the same declaration always renders the same.
+	Directories []string
 }
 
 // ErrReservedField reports a jobTemplate that sets something the design keeps
@@ -148,11 +149,22 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	// reading it, and the caller would not expect building a Job to edit it.
 	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
 
+	// The framework's annotations go on the pod as well as the Job: a
+	// container reads them through the downward API, and that reads the pod
+	// it is in, never the Job above it. The template's own annotations are
+	// kept, but one under the framework's prefix is refused rather than
+	// overwritten — the alternative is a value that silently differs from
+	// what the YAML says.
+	podAnnotations, err := withFrameworkAnnotations(tpl.Metadata.Annotations, annotations(in))
+	if err != nil {
+		return nil, err
+	}
+
 	spec := batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels:      tpl.Metadata.Labels,
-				Annotations: tpl.Metadata.Annotations,
+				Annotations: podAnnotations,
 			},
 			Spec: tpl.Spec,
 		},
@@ -200,6 +212,22 @@ func OwnedByTask(job *batchv1.Job, taskUID types.UID) bool {
 	return false
 }
 
+// withFrameworkAnnotations lays the framework's annotations over a template's,
+// refusing any the template already claims under the framework's prefix.
+func withFrameworkAnnotations(template, framework map[string]string) (map[string]string, error) {
+	for k := range template {
+		if strings.HasPrefix(k, annotationPrefix) {
+			return nil, fmt.Errorf("%w: annotation %q is the framework's to set", ErrReservedField, k)
+		}
+	}
+	out := maps.Clone(template)
+	if out == nil {
+		out = make(map[string]string, len(framework))
+	}
+	maps.Copy(out, framework)
+	return out, nil
+}
+
 func annotations(in Input) map[string]string {
 	a := map[string]string{
 		AnnotationPhase: string(in.Phase),
@@ -241,6 +269,7 @@ func injectEnv(pod *corev1.PodSpec, in Input) {
 	env := []corev1.EnvVar{
 		{Name: EnvTaskUID, Value: string(in.Task.UID)},
 		{Name: EnvPhase, Value: escapeVarRefs(string(in.Phase))},
+		{Name: EnvDirectories, Value: escapeVarRefs(directoriesJSON(in.Directories))},
 	}
 	if in.Task.Spec.Input != nil {
 		env = append(env, corev1.EnvVar{Name: EnvInput, Value: escapeVarRefs(string(in.Task.Spec.Input.Raw))})
@@ -251,6 +280,25 @@ func injectEnv(pod *corev1.PodSpec, in Input) {
 	for i := range pod.Containers {
 		pod.Containers[i].Env = merge(pod.Containers[i].Env, env)
 	}
+}
+
+// directoriesJSON renders the declared directories as a JSON array, sorted so
+// the value is a function of the declaration and not of map iteration order.
+// JSON rather than a delimiter because the names are free strings: nothing
+// stops a flow declaring a directory with a comma in it, and a format that
+// can carry any name beats one that has to forbid some.
+func directoriesJSON(dirs []string) string {
+	sorted := slices.Clone(dirs)
+	slices.Sort(sorted)
+	if sorted == nil {
+		sorted = []string{}
+	}
+	b, err := json.Marshal(sorted)
+	if err != nil {
+		// A []string cannot fail to marshal.
+		panic(err)
+	}
+	return string(b)
 }
 
 // escapeVarRefs turns $(...) into $$(...) so Kubernetes' env-var expansion
