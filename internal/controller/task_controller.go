@@ -400,11 +400,12 @@ func (r *TaskReconciler) ensureJob(
 	}
 
 	job, err := runner.BuildJob(runner.Input{
-		Task:      task,
-		Handler:   handler,
-		Phase:     run.Phase,
-		RunID:     run.RunID,
-		PrevRunID: previousRun(task),
+		Task:        task,
+		Handler:     handler,
+		Phase:       run.Phase,
+		RunID:       run.RunID,
+		PrevRunID:   previousRun(task),
+		Directories: transition.Directories(flow.Spec.Bindings, run.Phase),
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it

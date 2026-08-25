@@ -463,6 +463,11 @@ handler の secret が `FLOW_INPUT` / `FLOW_PHASE` 越しに漏れることも�
           fieldPath: metadata.annotations['flow.tgy.io/run-id']
 ```
 
+`fieldRef` が読むのは **Pod の** annotation であって Job のではない。なのでコントローラは framework の
+annotation（`flow.tgy.io/*`）を Job と Pod template の両方に付ける（2026-08-25 まで Job にしか
+付いておらず、上の YAML は実は届いていなかった）。template 側が `flow.tgy.io/` を名乗っていたら
+上書きせず拒否する（書いた値と違うものが走る方が悪い）。
+
 run 番号が要るのは**配管**であってエージェントではない:
 
 | | 要るか | なぜ |
@@ -788,21 +793,31 @@ sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し�
                 中身は /results/<runID>/ へ封じる
 ```
 
-### ワークスペースのレイアウト（構想。未実装）
+### ワークスペースのレイアウト
 
-**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める、という
-構想で、こう置く予定:
+**framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める。
 
-```yaml
-kind: TaskHandler
-spec:
-  workspace:
-    path: /work          # こう置く予定。ここを基点にレイアウトが敷かれる
-```
+当初は `TaskHandler.spec.workspace.path` に基点を書かせる構想だったが、**採らなかった**
+（2026-08-25）。コントローラにそのフィールドの消費者が無い — ディレクトリを敷くのも読むのも
+Pod の中のサイドカーで、マウントパスは Pod の形（§2 の責務表では handler の作者のもの）。
+コントローラが値を持ち回るだけのフィールドは P7 に反する。代わりに:
 
-`TaskHandlerSpec` にはまだ `workspace` フィールドが無く、`runner.BuildJob` も参照しない
-（#15 の残り。完了検知 #16 とは切り離した）。以下のレイアウトの規約自体は決まっているが、
-それを敷く仕組みはまだコードになっていない。
+- **コントローラが渡すのは語彙だけ**: `next` の宣言から取ったディレクトリ名を `FLOW_DIRECTORIES`
+  （JSON 配列、ソート済み）として全コンテナに注入する。`FLOW_PHASE` と同じ扱いで、run 番号と違って
+  エージェントが見てよい情報（どのみちファイルシステムに見えている）
+- **基点はサイドカーのフラグ**: `sidecar prepare --out /workspace/out`。handler の作者が volumeMounts と
+  同じ場所に書く。同じボリュームを別のパスにマウントしても成立する
+
+実装は `internal/sidecar`（純粋関数 `Prepare` / `Seal`）と `cmd/sidecar`（`prepare` / `publish` の
+2 サブコマンド、同一イメージ `Dockerfile.sidecar`）。**store への封印（`results/<runID>/` への持ち出し）は
+まだ無い** — investigate profile は循環しないので過去の run を読む必要が無く、S3 クライアントと
+認証情報の扱いは次の段で決める。
+
+**Pod の中で走るバイナリと controller が共有する名前（env / annotation / label）は依存ゼロの
+`internal/contract` にだけ置く。** `cmd/sidecar` は k8s.io 系を一切 import しない
+（`go list -deps ./cmd/sidecar | grep k8s.io` が空）。Pod の中で走るバイナリの依存グラフは
+そのまま攻撃面になるので最小に保つのが理由で、副産物として controller 側の Job 構築の都合で
+sidecar イメージを再ビルドしなくて済む。
 
 **エージェントは自分が何周目かを知らない。**
 
@@ -823,6 +838,33 @@ spec:
 
 > **宣言が見えるのはファイルシステムそのもの。** `ok/` と `more/` が存在して、それ以外は無い。
 > 語彙外のトークンを出せないのは、禁じているからではなく**存在しないから**。
+
+`prepare` が敷くもの（Step 0 の `cnp-check-cwf.yaml` で実証した形をそのまま Go に移した）:
+
+```
+<out>/           prepare の uid   0555   ← 閉じる。宣言に無い mkdir は EACCES
+<out>/ok/        prepare の uid   0775   ← group 書き込み可。エージェントは fsGroup で同じ group
+<out>/more/      prepare の uid   0775
+```
+
+エージェントは prepare と**別の uid**で動かす（例: prepare=65532 / agent=65533、fsGroup=65532）。
+同じ uid なら chmod で開け直せるので、閉じたことにならない。この分離は Pod の securityContext の
+話であり handler の作者が書く（§16 の例）。`prepare` は繰り返し実行しても既存の中身を消さない。
+
+**`out/<name>` が symlink に差し替えられていたら `prepare` は拒否し、`publish` は答え無しにする**
+（両方とも `os.Lstat` で判定し、`os.Chmod` や `os.ReadDir` に symlink を追わせない）。同一 Pod の
+emptyDir ではエージェントは `out/` に書けないので踏まないが、§9 の PVC backend（rework で run を
+跨いで生き残る）では先行 attempt が仕込んだ symlink を後続の `prepare` が chmod で開ける、あるいは
+`publish` がその先を読むことで「非空の宣言ディレクトリがちょうど 1 つ」を偽装できてしまう。
+PVC を実装する前に閉じておく。
+
+`publish` は SIGTERM を受けてから `<out>` を見る（ネイティブサイドカーは main 終了後に SIGTERM で
+刈られる。それが「run が終わった」の唯一の合図）。規則はコントローラ側と同じ 1 本 — **非空の宣言
+ディレクトリがちょうど 1 つ**、それ以外は答え無し。中身は読まない（エントリの存在だけが信号）。
+答えは termination log に「1 行目 = ディレクトリ名、2 行目 = 何を書いたか」で書き、答えが無いときは
+理由をそのまま 1 行目に書く。理由は宣言名と一致しないので、コントローラ側では自動的に「答え無し」
+になる — 失敗を伝える第 2 のプロトコルは要らない（§6）。`prepare` が失敗したときも同じチャネルに
+`prepare failed: ...` と書くので、status には「走らなかった」ではなく「準備で落ちた」と残る。
 
 backend の違い（S3 prefix / PVC）は、この 2 つのパスをどう用意するかに閉じる
 （PVC なら subPath マウント、S3 なら init が `/results` へ引き落として sidecar が上げる）。
@@ -1300,6 +1342,11 @@ spec:
         runtimeClassName: kata
         serviceAccountName: agent-cnp-reader     # CNP と Pod の get/list のみ
         restartPolicy: Never
+        securityContext:
+          runAsUser: 65533                       # エージェント。prepare (65532) と別 uid なので out/ を開け直せない
+          runAsGroup: 65532
+          fsGroup: 65532                         # 宣言ディレクトリは 0775、この group で書ける
+          runAsNonRoot: true
         volumes:
           - name: work
             emptyDir: {}
@@ -1308,13 +1355,13 @@ spec:
         initContainers:
           - name: prepare
             image: registry.infra.tgy.io/tools/agent-sidecar:latest
-            args: ["prepare"]                    # in/ 取得・bindings.next の宣言から out/ を作成・0555
+            args: ["prepare", "--out", "/workspace/out"]   # FLOW_DIRECTORIES（コントローラ注入）から out/ を作成・0555
+            securityContext: {runAsUser: 65532}
             volumeMounts: [{name: work, mountPath: /workspace}]
           - name: publish                        # ネイティブサイドカー
             image: registry.infra.tgy.io/tools/agent-sidecar:latest
-            args: ["publish"]                    # SIGTERM trap → 検証 → store へ
+            args: ["publish", "--out", "/workspace/out"]   # SIGTERM trap → 非空がちょうど 1 つ → termination log
             restartPolicy: Always
-            envFrom: [{secretRef: {name: agent-s3-credentials}}]
             volumeMounts: [{name: work, mountPath: /workspace}]
         containers:
           - name: agent

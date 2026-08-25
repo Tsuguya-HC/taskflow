@@ -17,6 +17,7 @@ limitations under the License.
 package runner
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -388,5 +389,68 @@ func TestRefusesNothing(t *testing.T) {
 	}
 	if _, err := BuildJob(Input{Task: task(), Phase: phaseInvestigate}); err == nil {
 		t.Fatal("a Job was built with no handler")
+	}
+}
+
+// A container reads annotations through the downward API, which shows it the
+// pod it is in — never the Job above it. So the framework's annotations have
+// to be on the pod template too, or the run number the design promises the
+// plumbing (§4) is not actually reachable from inside.
+func TestFrameworkAnnotationsReachThePod(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.JobTemplate.Template.Metadata.Annotations = map[string]string{"note": "keep me"}
+	})
+	job := build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 2, PrevRunID: 1})
+
+	pod := job.Spec.Template.Annotations
+	if pod[AnnotationRunID] != "2" || pod[AnnotationPrevRunID] != "1" || pod[AnnotationPhase] != "調査" {
+		t.Fatalf("pod annotations = %v; the run must be readable from inside the pod", pod)
+	}
+	if pod["note"] != "keep me" {
+		t.Fatalf("pod annotations = %v; the handler's own annotation was lost", pod)
+	}
+	if h.Spec.JobTemplate.Template.Metadata.Annotations[AnnotationRunID] != "" {
+		t.Fatal("the handler's template was edited in place")
+	}
+}
+
+func TestRefusesATemplateClaimingAFrameworkAnnotation(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.JobTemplate.Template.Metadata.Annotations = map[string]string{AnnotationRunID: "7"}
+	})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+	if !errors.Is(err, ErrReservedField) {
+		t.Fatalf("err = %v; a template lying about the run number must be refused, not overwritten", err)
+	}
+}
+
+// The directories are the vocabulary of the run, so every container gets
+// them — the sidecar to create them, the agent because they are what it may
+// answer. Sorted, so the same declaration always renders the same.
+func TestDeclaredDirectoriesTravelAsJSON(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1,
+		Directories: []string{"more", "ok", "a,b"}})
+	pod := job.Spec.Template.Spec
+	for _, group := range [][]corev1.Container{pod.InitContainers, pod.Containers} {
+		for _, c := range group {
+			var got string
+			for _, e := range c.Env {
+				if e.Name == EnvDirectories {
+					got = e.Value
+				}
+			}
+			if got != `["a,b","more","ok"]` {
+				t.Fatalf("container %q %s = %q", c.Name, EnvDirectories, got)
+			}
+		}
+	}
+}
+
+func TestNoDirectoriesIsAnEmptyList(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == EnvDirectories && e.Value != "[]" {
+			t.Fatalf("%s = %q; a terminal phase declares nothing, which is still a list", EnvDirectories, e.Value)
+		}
 	}
 }

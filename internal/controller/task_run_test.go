@@ -86,6 +86,18 @@ var _ = Describe("starting a task", func() {
 			"whatever a policy selects on comes from the handler untouched")
 		Expect(job.OwnerReferences).To(HaveLen(1))
 
+		for _, c := range job.Spec.Template.Spec.Containers {
+			found := false
+			for _, e := range c.Env {
+				if e.Name == runner.EnvDirectories {
+					found = true
+					Expect(e.Value).To(Equal(`["ok"]`),
+						"the directories the flow's binding declares for this phase must reach the container")
+				}
+			}
+			Expect(found).To(BeTrue(), "container %q is missing %s", c.Name, runner.EnvDirectories)
+		}
+
 		Expect(get().Status.CurrentRun.JobName).To(Equal(jobName),
 			"the run in status must name the Job it belongs to, not just its phase and runID")
 	})
