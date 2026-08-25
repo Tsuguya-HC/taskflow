@@ -69,12 +69,25 @@ func Advance(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(res.Outcome),
+		Reason:     res.Detail,
 		Ref:        ref,
 		FinishedAt: &now,
 	})
 
 	status.Phase = res.Next
 	status.ReworkBudget = res.Budget
+
+	// Escalated and Failed are the framework saying it could not go on. The
+	// history entry says so too, but a condition is where kubectl and
+	// anything watching for stuck tasks look first.
+	if res.Next.IsReserved() {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:    ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  string(res.Outcome),
+			Message: res.Detail,
+		})
+	}
 
 	// A stopped task has nothing in flight. Leaving a stale currentRun here
 	// would let a late answer look like it belonged to something, and

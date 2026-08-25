@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,115 +35,23 @@ import (
 	"github.com/Tsuguya/taskflow/internal/runner"
 )
 
-const (
-	phaseInvestigate flowv1alpha1.Phase = "調査"
-	phaseReport      flowv1alpha1.Phase = "報告"
-	handlerName                         = "cnp-reader"
-)
-
-// Every spec gets its own names. Sharing them let one spec's leftover Job —
-// nothing deletes those — decide the next spec's outcome, which is how two of
-// these passed alone and failed together.
-var specCounter int
-
 var _ = Describe("starting a task", func() {
 	ctx := context.Background()
+	var fx *fixture
 	var name string
 	var reconciler *TaskReconciler
-	// Set by makeTask once the Task exists. DeferCleanup unwinds LIFO, so the
-	// Job cleanup below — registered first, here in BeforeEach — runs last,
-	// after the Task itself is already gone. Reading its UID at cleanup time
-	// would find nothing; capturing it here, in a variable the closure reads
-	// when it finally runs, is what lets the cleanup match anything at all.
-	var taskUID types.UID
 
 	BeforeEach(func() {
-		specCounter++
-		name = fmt.Sprintf("run-%d", specCounter)
-		taskUID = ""
-		reconciler = &TaskReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-		DeferCleanup(func() {
-			// The reconciler's Jobs outlive their Task here: envtest has no
-			// garbage collector, so ownerReferences do not remove them.
-			// Background propagation is explicit: the default leaves an
-			// "orphan" finalizer on the Job that, again for lack of a garbage
-			// collector, nothing ever clears, and the Job never actually goes
-			// away.
-			if taskUID == "" {
-				return
-			}
-			_ = k8sClient.DeleteAllOf(ctx, &batchv1.Job{},
-				client.InNamespace(resourceNamespace),
-				client.MatchingLabels{runner.LabelTaskUID: string(taskUID)},
-				client.PropagationPolicy(metav1.DeletePropagationBackground))
-		})
+		fx = newFixture()
+		name = fx.name
+		reconciler = fx.reconciler
 	})
 
-	// Everything here is named after the test so specs cannot collide.
-	makeFlow := func(mut ...func(*flowv1alpha1.TaskFlow)) *flowv1alpha1.TaskFlow {
-		f := &flowv1alpha1.TaskFlow{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace},
-			Spec: flowv1alpha1.TaskFlowSpec{
-				Profile: flowv1alpha1.ProfileInvestigate,
-				Start:   phaseInvestigate,
-				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-					phaseInvestigate: {Handler: name, Next: map[flowv1alpha1.Phase]string{phaseReport: "ok"}},
-				},
-				ReworkBudget: 2,
-			},
-		}
-		for _, m := range mut {
-			m(f)
-		}
-		Expect(k8sClient.Create(ctx, f)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, f) })
-		return f
-	}
-
-	makeHandler := func() {
-		h := &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace},
-			Spec: flowv1alpha1.TaskHandlerSpec{
-				Phase:  phaseInvestigate,
-				Runner: flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
-				JobTemplate: &flowv1alpha1.JobTemplate{
-					Template: flowv1alpha1.PodTemplate{
-						Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
-						Spec: corev1.PodSpec{
-							RestartPolicy: corev1.RestartPolicyNever,
-							Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
-						},
-					},
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, h)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, h) })
-	}
-
-	makeTask := func() *flowv1alpha1.Task {
-		tk := &flowv1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: resourceNamespace},
-			Spec:       flowv1alpha1.TaskSpec{Flow: name},
-		}
-		Expect(k8sClient.Create(ctx, tk)).To(Succeed())
-		taskUID = tk.UID
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, tk) })
-		return tk
-	}
-
-	reconcileOnce := func() {
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: resourceNamespace},
-		})
-		Expect(err).NotTo(HaveOccurred())
-	}
-
-	get := func() *flowv1alpha1.Task {
-		var tk flowv1alpha1.Task
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: resourceNamespace}, &tk)).To(Succeed())
-		return &tk
-	}
+	makeFlow := func(mut ...func(*flowv1alpha1.TaskFlow)) *flowv1alpha1.TaskFlow { return fx.makeFlow(mut...) }
+	makeHandler := func() { fx.makeHandler() }
+	makeTask := func() *flowv1alpha1.Task { return fx.makeTask() }
+	reconcileOnce := func() { fx.reconcile() }
+	get := func() *flowv1alpha1.Task { return fx.get() }
 
 	It("puts a fresh task on the phase the flow starts at", func() {
 		makeFlow()

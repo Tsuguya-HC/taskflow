@@ -522,7 +522,7 @@ admission での拒否（`TaskHandler` の作成自体を止める）は #17 の
 | selector / manualSelector | Job controller の既定に任せる。手動 selector は事故の元でしかない |
 | suspend / managedBy | キューイング・外部管理（Kueue 等）の領分。必要になったら handler にではなくコントローラが焼く |
 | podFailurePolicy | インフラ起因失敗の分類（§5）はコントローラの責務。使うならコントローラが焼く |
-| podReplacementPolicy | **検討中（未対応）**。既定の TerminatingOrFailed は terminating 中に代替 Pod を作るため、同一 runID の Pod が並走しうる（KEP-3939 に明記。JobSet の KEP-467 は同じ理由で Failed を強制）。`restartPolicy: Never` を強制した理由と同型の侵害。コントローラが Failed を焼く案を、実クラスタでの並走再現とタイムアウト経路の確認待ちで保留 |
+| podReplacementPolicy | **検討中（未対応）**。既定の TerminatingOrFailed は terminating 中に代替 Pod を作るため、同一 runID の Pod が並走しうる（KEP-3939 に明記。JobSet の KEP-467 は同じ理由で Failed を強制）。`restartPolicy: Never` を強制した理由と同型の侵害。コントローラが Failed を焼く案を、実クラスタでの並走再現待ちで保留。**並走しても結論は汚れない**ことは回収側で担保済み（§7「完了検知」— 全 Pod を走査し、答えが 2 つなら Escalated）。タイムアウト経路（deadline + 猶予で Escalated）も実装済みで、残る実測は stuck-terminating の実クラスタ再現のみ |
 
 profile は **コントローラ組み込みの enum**（3 つ目の CRD にはしない）。profile が規定するのは
 **どのフェーズの束縛が必須か**であって、フェーズの語彙そのものではない。それでも YAML で
@@ -801,8 +801,8 @@ spec:
 ```
 
 `TaskHandlerSpec` にはまだ `workspace` フィールドが無く、`runner.BuildJob` も参照しない
-（#16 の範囲で入れる）。以下のレイアウトの規約自体は決まっているが、それを敷く仕組みはまだ
-コードになっていない。
+（#15 の残り。完了検知 #16 とは切り離した）。以下のレイアウトの規約自体は決まっているが、
+それを敷く仕組みはまだコードになっていない。
 
 **エージェントは自分が何周目かを知らない。**
 
@@ -894,6 +894,49 @@ run 終了を観測（Job の watch / _done / deadline）
 タイムアウトは Workflow の `activeDeadlineSeconds` に頼らず、
 コントローラ側の `status.currentRun.deadline` + requeue-after で一元管理する
 （handler の種類によらず経路を 1 本にするため）。
+
+**実装（`internal/controller`、2026-08-25）。** Job の終了は `Complete` / `Failed` 条件で見る。
+Pod は `batch.kubernetes.io/controller-uid` ラベルで引く（Job controller が付ける。
+`spec.selector` を読まないのは、手動 selector を許していないので同じものだから）。
+終了した Job の扱いは 3 分岐で、上から順に決まる:
+
+| Job の状態 | 扱い | 理由 |
+|---|---|---|
+| `Failed` / `DeadlineExceeded` | **読まずに** Escalated（`NoAnswer`） | 途中で切られた run がディレクトリを書いていても、それは結論ではない |
+| `Failed` かつ**どのコンテナも Terminated に達していない** | インフラ起因。`maxInfraRetries` まで新 runID で作り直し、尽きたら Escalated | pull 失敗・未スケジュール等、handler が何もしていない失敗だけがコントローラの再試行対象。**走ってから黙った run は再試行しない**（それは handler の沈黙であり人間の仕事） |
+| それ以外（`Complete`、または走ってから `Failed`） | termination message を回収して遷移表へ | 終了コードは verdict ではない。agent が exit 1 でも sidecar が `ok` を封していれば `ok` |
+
+Terminated の判定は init コンテナも含む。init が exit 1 で落ちたなら handler 自身のコードが
+走っているので、インフラ起因ではない。
+
+Pod が 2 つある場合（KEP-3939、terminating 中の代替）は全 Pod の全コンテナを平らに走査し、
+規則は変えない — ちょうど 1 つだけが宣言ディレクトリを名指ししていること。両方が答えたら
+それは「答えが 2 つ」で Escalated になる。**同一 runID の Pod 並走を防いでいるわけではなく、
+並走しても結論が汚れないようにしている**（§4 の `podReplacementPolicy` の行を参照）。
+
+deadline は Job の `creationTimestamp + activeDeadlineSeconds` から読む（時計から計算しない。
+コントローラが再起動しても同じ瞬間に着地する）。Job 自身の deadline と同じ値なので、通常は
+Job controller が先に `DeadlineExceeded` を報告する。コントローラ側の経路は **その報告が来なかった
+とき**のためにあり、deadline + 猶予 1 分（`deadlineGrace`）で requeue して、まだ終わっていなければ
+読まずに Escalated にする。Pod が terminating で固まって Job の `Failed` 条件が付かない
+（1.31 以降、`Failed` は全 Pod 終了後にしか付かない）ケースがこの経路の対象。
+**Job は消さない**（RBAC に delete は無い）。Escalated 後も Job は Task の TTL で一緒に消えるまで残り、
+人間が中を見られる。
+
+同時に分かったこと: apiserver（1.36）は Job の status 遷移を検証する。`Complete=True` には
+`SuccessCriteriaMet=True` と `startTime` / `completionTime` が、`Failed=True` には
+`FailureTarget=True` が先に要る。envtest で Job controller の代わりに status を書くときは
+この順序ごと書かないと 422 になる（`internal/controller/task_finish_test.go` の `finish`）。
+
+termination message の 2 行目以降（`internal/collect` が読む free text）は agent 由来の
+未信頼テキストとして扱う。status に書く前に、制御文字（`\n` `\t` 以外の非印字。Unicode の
+空白分離文字 Zs — 全角スペース等 — は非印字扱いされるが除去せず残す）を取り除き、1024 rune
+に切り詰める（`internal/collect/sanitize.go`）。termination-log がそのまま `kubectl describe`
+に出る経路は CVE-2021-25743 と同じで、agent が制御シーケンスを書けば運用者の端末まで届く。
+`HistoryEntry.Reason` の CRD `maxLength=2048` は rune 単位（apiserver は `utf8.RuneCount` で
+判定する）で、コード側の 1024 rune という上限より大きく取ってあり、`transition.Detail` を
+前置しても検証に落ちない余裕を残す。1 行目（ディレクトリ名）の完全一致判定には一切触れないので、
+§6 の「パーサを持たない」原則とは無関係。
 
 ---
 

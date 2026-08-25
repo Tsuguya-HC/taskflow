@@ -219,6 +219,13 @@ spec:
                         Two names are reserved, because they are the framework's own answers rather
                         than anything in the author's domain — see ReservedPhases.
                       type: string
+                    reason:
+                      description: |-
+                        Reason is the one line a human reads next to Outcome: which edge was
+                        followed, or why no answer counted, or what the handler said after
+                        naming its directory. The transition never reads it.
+                      maxLength: 2048
+                      type: string
                     ref:
                       description: Ref points at the run's output in the store.
                       type: string

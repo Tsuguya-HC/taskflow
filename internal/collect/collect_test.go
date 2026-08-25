@@ -23,7 +23,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-var declared = []string{"ok", "more"}
+const dirMore = "more"
+
+var declared = []string{"ok", dirMore}
 
 func pod(containers ...corev1.ContainerStatus) *corev1.Pod {
 	return &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containers}}
@@ -49,11 +51,66 @@ func TestAnswers(t *testing.T) {
 // The rest of the message is for a human. It never reaches the transition.
 func TestCarriesTheReasonWithoutParsingIt(t *testing.T) {
 	got := FromPod(pod(terminated("publish", "more\n3 件のうち 1 件しか確認できていない")), declared)
-	if got.Directory != "more" {
+	if got.Directory != dirMore {
 		t.Fatalf("directory = %q", got.Directory)
 	}
 	if got.Reason != "3 件のうち 1 件しか確認できていない" {
 		t.Fatalf("reason = %q", got.Reason)
+	}
+}
+
+// The reason travels into status a human reads with kubectl or a dashboard.
+// An agent is not trusted, so control sequences it writes must not survive
+// into that channel.
+func TestReasonStripsControlSequences(t *testing.T) {
+	got := FromPod(pod(terminated("publish", "more\n\x1b[31mred\x1b[0m\x07 alert")), declared)
+	if got.Directory != dirMore {
+		t.Fatalf("directory = %q", got.Directory)
+	}
+	if strings.ContainsAny(got.Reason, "\x1b\x07") {
+		t.Fatalf("reason still carries control characters: %q", got.Reason)
+	}
+	if got.Reason != "[31mred[0m alert" {
+		t.Fatalf("reason = %q", got.Reason)
+	}
+}
+
+// unicode.IsPrint treats every space but ASCII 0x20 as non-printable, so a
+// full-width or other Unicode space separator (category Zs) must be kept
+// explicitly or it silently vanishes and runs the surrounding words together.
+func TestReasonKeepsUnicodeSpaceSeparators(t *testing.T) {
+	got := FromPod(pod(terminated("publish", "more\n設定が　正しくない")), declared)
+	if got.Directory != dirMore {
+		t.Fatalf("directory = %q", got.Directory)
+	}
+	if got.Reason != "設定が　正しくない" {
+		t.Fatalf("reason = %q", got.Reason)
+	}
+}
+
+// A byte sequence that is not valid UTF-8 must not panic Sanitize, and it
+// must not vanish silently either — the replacement character marks that
+// something unreadable was there instead of the text just getting shorter.
+func TestReasonHandlesInvalidUTF8(t *testing.T) {
+	got := FromPod(pod(terminated("publish", "ok\nabc\xffdef")), declared)
+	if got.Directory != "ok" {
+		t.Fatalf("directory = %q", got.Directory)
+	}
+	if !strings.Contains(got.Reason, "�") {
+		t.Fatalf("reason = %q, want the invalid byte kept as U+FFFD rather than dropped", got.Reason)
+	}
+}
+
+// A handler could write arbitrarily much after the directory line; the
+// reason must not carry an unbounded amount of it into status.
+func TestReasonIsTruncated(t *testing.T) {
+	long := strings.Repeat("a", maxReasonRunes+500)
+	got := FromPod(pod(terminated("publish", "more\n"+long)), declared)
+	if got.Directory != dirMore {
+		t.Fatalf("directory = %q", got.Directory)
+	}
+	if len([]rune(got.Reason)) != maxReasonRunes {
+		t.Fatalf("reason has %d runes, want %d", len([]rune(got.Reason)), maxReasonRunes)
 	}
 }
 
@@ -93,7 +150,7 @@ func TestAnUndeclaredMessageIsNotAnAnswer(t *testing.T) {
 }
 
 func TestTwoAnswersAreNoAnswer(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "ok"), terminated("agent", "more")), declared)
+	got := FromPod(pod(terminated("publish", "ok"), terminated("agent", dirMore)), declared)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q, want none", got.Directory)
 	}
@@ -150,5 +207,68 @@ func TestRunningContainersAreNotRead(t *testing.T) {
 	})
 	if got := FromPod(p, declared); got.Directory != "" {
 		t.Fatalf("directory = %q from a container that has not finished", got.Directory)
+	}
+}
+
+// A Job normally has one pod, but a pod replaced while terminating leaves two
+// (KEP-3939). The rule is the same across them: exactly one answer.
+func TestReadsAcrossThePodsOfAJob(t *testing.T) {
+	a := pod(terminated("publish", "ok"))
+	a.Name = "run-a"
+	b := pod(terminated("publish", ""))
+	b.Name = "run-b"
+
+	got := FromPods([]corev1.Pod{*a, *b}, declared)
+	if got.Directory != "ok" {
+		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
+	}
+	if got.Container != "run-a/publish" {
+		t.Fatalf("container = %q; with several pods the answer must say which one", got.Container)
+	}
+}
+
+func TestTwoPodsBothAnsweringIsNoAnswer(t *testing.T) {
+	a := pod(terminated("publish", "ok"))
+	a.Name = "run-a"
+	b := pod(terminated("publish", "ok"))
+	b.Name = "run-b"
+
+	got := FromPods([]corev1.Pod{*a, *b}, declared)
+	if got.Directory != "" {
+		t.Fatalf("directory = %q; two pods agreeing is still two answers", got.Directory)
+	}
+	if !strings.Contains(got.Reason, "run-a/publish") || !strings.Contains(got.Reason, "run-b/publish") {
+		t.Fatalf("reason = %q; it must name both", got.Reason)
+	}
+}
+
+func TestNoPodsIsNoAnswer(t *testing.T) {
+	got := FromPods(nil, declared)
+	if got.Directory != "" || got.Reason == "" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// Ran separates "the handler did something" from "nothing ever started" —
+// the latter being the only failure the controller retries by itself.
+func TestRan(t *testing.T) {
+	waiting := corev1.ContainerStatus{Name: "agent", State: corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}
+
+	if Ran(nil) {
+		t.Fatal("no pods did not run")
+	}
+	if Ran([]corev1.Pod{*pod(waiting)}) {
+		t.Fatal("a container that never left Waiting did not run")
+	}
+	if !Ran([]corev1.Pod{*pod(terminated("agent", ""))}) {
+		t.Fatal("a terminated container ran, whatever it said")
+	}
+	init := &corev1.Pod{Status: corev1.PodStatus{
+		InitContainerStatuses: []corev1.ContainerStatus{terminated("prepare", "")},
+		ContainerStatuses:     []corev1.ContainerStatus{waiting},
+	}}
+	if !Ran([]corev1.Pod{*init}) {
+		t.Fatal("an init container that terminated counts: the handler's own code ran")
 	}
 }
