@@ -137,6 +137,40 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 	}
 }
 
+// A structural failure reached through Advance (not Fail) must set the same
+// Ready=False condition Fail sets directly, or a watcher keying off the
+// condition misses tasks that stopped this way.
+func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      1,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+	}
+	res := transition.Result{
+		Next:    flowv1alpha1.PhaseFailed,
+		Outcome: transition.OutcomeStructural,
+		Detail:  "directory ok selects more than one status",
+	}
+	Advance(s, flow(), dirOK, res, "", at)
+
+	if s.Phase != flowv1alpha1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed", s.Phase)
+	}
+	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
+	if cond == nil {
+		t.Fatal("no Ready condition was set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready condition status = %q, want False", cond.Status)
+	}
+	if cond.Reason != string(transition.OutcomeStructural) {
+		t.Fatalf("Ready condition reason = %q, want %q", cond.Reason, transition.OutcomeStructural)
+	}
+	if cond.Message != res.Detail {
+		t.Fatalf("Ready condition message = %q, want %q", cond.Message, res.Detail)
+	}
+}
+
 func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{}
 	Begin(s, phaseInvestigate, 2)

@@ -47,13 +47,28 @@ type Answer struct {
 }
 
 // FromPod returns the answer a finished pod gave.
+func FromPod(pod *corev1.Pod, declared []string) Answer {
+	if pod == nil {
+		return Answer{Reason: "no pod to read"}
+	}
+	return FromPods([]corev1.Pod{*pod}, declared)
+}
+
+// FromPods returns the answer a finished run gave, read across every pod the
+// run's Job produced.
 //
 // Every container is examined — init containers included, since a native
 // sidecar is one — because nothing tells the framework which container was
 // meant to report. Whoever writes the handler decides that, and the framework
 // finds out by looking at what the declared vocabulary allows.
-func FromPod(pod *corev1.Pod, declared []string) Answer {
-	if pod == nil {
+//
+// A Job is meant to produce one pod, but the Job controller can replace a pod
+// that is still terminating, so there may be two. The rule does not change for
+// that: exactly one container across all of them names a declared directory,
+// or there is no answer. Two pods that both answered is exactly the case a
+// human should look at.
+func FromPods(pods []corev1.Pod, declared []string) Answer {
+	if len(pods) == 0 {
 		return Answer{Reason: "no pod to read"}
 	}
 
@@ -61,22 +76,28 @@ func FromPod(pod *corev1.Pod, declared []string) Answer {
 	var found []candidate
 	looked := 0
 
-	statuses := slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses)
-	for _, cs := range statuses {
-		if cs.State.Terminated == nil {
-			continue
+	for _, pod := range pods {
+		statuses := slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses)
+		for _, cs := range statuses {
+			if cs.State.Terminated == nil {
+				continue
+			}
+			msg := cs.State.Terminated.Message
+			if msg == "" {
+				continue
+			}
+			looked++
+			first, rest, _ := strings.Cut(msg, "\n")
+			first = strings.TrimSpace(first)
+			if !slices.Contains(declared, first) {
+				continue
+			}
+			name := cs.Name
+			if len(pods) > 1 {
+				name = pod.Name + "/" + cs.Name
+			}
+			found = append(found, candidate{name, first, Sanitize(strings.TrimSpace(rest))})
 		}
-		msg := cs.State.Terminated.Message
-		if msg == "" {
-			continue
-		}
-		looked++
-		first, rest, _ := strings.Cut(msg, "\n")
-		first = strings.TrimSpace(first)
-		if !slices.Contains(declared, first) {
-			continue
-		}
-		found = append(found, candidate{cs.Name, first, strings.TrimSpace(rest)})
 	}
 
 	switch len(found) {
@@ -99,4 +120,21 @@ func FromPod(pod *corev1.Pod, declared []string) Answer {
 		}
 		return Answer{Reason: "more than one container answered: " + strings.Join(names, ", ")}
 	}
+}
+
+// Ran reports whether the handler got as far as running: some container, in
+// some pod, reached a terminated state. It separates a run the handler had a
+// hand in from one it never touched — an image that would not pull, a pod that
+// never got scheduled — which is the only kind the controller retries on its
+// own. A run that started and then said nothing is the handler's silence, and
+// silence goes to a human, not back into the queue.
+func Ran(pods []corev1.Pod) bool {
+	for _, pod := range pods {
+		for _, cs := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+			if cs.State.Terminated != nil {
+				return true
+			}
+		}
+	}
+	return false
 }

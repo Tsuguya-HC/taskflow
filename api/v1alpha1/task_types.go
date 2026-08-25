@@ -82,6 +82,12 @@ type HistoryEntry struct {
 	// Outcome is why the task moved: the framework's account of the run,
 	// recorded even when the handler said nothing.
 	Outcome string `json:"outcome"`
+	// Reason is the one line a human reads next to Outcome: which edge was
+	// followed, or why no answer counted, or what the handler said after
+	// naming its directory. The transition never reads it.
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	Reason string `json:"reason,omitempty"`
 	// Ref points at the run's output in the store.
 	// +optional
 	Ref string `json:"ref,omitempty"`

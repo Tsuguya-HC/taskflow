@@ -21,14 +21,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/Tsuguya/taskflow/internal/collect"
 	"github.com/Tsuguya/taskflow/internal/runner"
 	"github.com/Tsuguya/taskflow/internal/taskstate"
+	"github.com/Tsuguya/taskflow/internal/transition"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -49,6 +54,8 @@ func (e brokenFlow) Error() string { return e.reason }
 type TaskReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Now is the clock deadlines are judged against; nil means the wall clock.
+	Now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -123,7 +130,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// writes. Pick it up rather than stalling.
 		run = &flowv1alpha1.RunRef{Phase: task.Status.Phase, RunID: task.Status.RunID}
 	}
-	priorJobName := run.JobName
+	prior := run.DeepCopy()
 
 	job, err := r.ensureJob(ctx, &task, &flow, run)
 	if err != nil {
@@ -134,18 +141,190 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// ensureJob fills in run.JobName; a fresh recovery run had none to begin
-	// with, and even an existing run's status object might predate this field.
-	// Persist it so a stuck run can be found by name without recomputing the
-	// hash.
-	if recovering || run.JobName != priorJobName {
+	// ensureJob fills in run.JobName and run.Deadline; a fresh recovery run
+	// had neither to begin with, and even an existing run's status object
+	// might predate these fields. Persist them so a stuck run can be found by
+	// name, and its deadline read, without recomputing either.
+	if recovering || !equality.Semantic.DeepEqual(run, prior) {
 		task.Status.CurrentRun = run
 		if err := r.Status().Update(ctx, &task); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	log.V(1).Info("run in flight", "phase", run.Phase, "runID", run.RunID, "job", job.Name)
-	return ctrl.Result{}, nil
+
+	finished, failure := jobFinished(job)
+	if !finished {
+		if run.Deadline == nil {
+			log.V(1).Info("run in flight", "phase", run.Phase, "runID", run.RunID, "job", job.Name)
+			return ctrl.Result{}, nil
+		}
+		// The Job carries the same deadline and the kubelet normally enforces
+		// it first, so this path only ever fires when that did not end the
+		// run — a pod stuck terminating, most likely. Waiting a little past
+		// the deadline before stepping in lets the ordinary route report
+		// first, and the answer is the same either way.
+		remaining := run.Deadline.Sub(r.now()) + deadlineGrace
+		if remaining > 0 {
+			log.V(1).Info("run in flight", "phase", run.Phase, "runID", run.RunID, "job", job.Name, "deadlineIn", remaining)
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+		return ctrl.Result{}, r.settle(ctx, &task, &flow, run, nil, timedOut(job))
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(job.Namespace),
+		client.MatchingLabels{batchv1.ControllerUidLabel: string(job.UID)}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	switch {
+	case failure == batchv1.JobReasonDeadlineExceeded:
+		// A run cut short may well have written a directory before it was
+		// killed, but a directory written on the way out is not a conclusion.
+		// Whatever it says, the answer is that it did not finish.
+		return ctrl.Result{}, r.settle(ctx, &task, &flow, run, nil, timedOut(job))
+	case failure != "" && !collect.Ran(pods.Items):
+		// The handler never got to run — nothing pulled, nothing scheduled.
+		// That is the one kind of failure the controller retries on its own,
+		// under a new runID so the retry does not find the last attempt's
+		// directories.
+		return ctrl.Result{}, r.retryInfra(ctx, &task, &flow, run, failure)
+	}
+
+	answer := collect.FromPods(pods.Items, transition.Directories(flow.Spec.Bindings, run.Phase))
+	return ctrl.Result{}, r.settle(ctx, &task, &flow, run, &answer, "")
+}
+
+// deadlineGrace is how long past a run's deadline the controller waits for the
+// Job to report the timeout itself before ruling on it.
+const deadlineGrace = time.Minute
+
+// jobFinished reports whether the Job is done, and the reason when it failed.
+// A Job that finished with neither condition true is still running.
+func jobFinished(job *batchv1.Job) (finished bool, failure string) {
+	for _, c := range job.Status.Conditions {
+		if c.Status != corev1.ConditionTrue {
+			continue
+		}
+		switch c.Type {
+		case batchv1.JobComplete:
+			return true, ""
+		case batchv1.JobFailed:
+			// A failure with no reason is still a failure, and an empty
+			// string would read as "completed" to the caller.
+			if c.Reason == "" {
+				return true, "Failed"
+			}
+			return true, c.Reason
+		}
+	}
+	return false, ""
+}
+
+func timedOut(job *batchv1.Job) string {
+	if job.Spec.ActiveDeadlineSeconds == nil {
+		return "the run timed out"
+	}
+	return fmt.Sprintf("the run timed out after %s", time.Duration(*job.Spec.ActiveDeadlineSeconds)*time.Second)
+}
+
+// settle records a finished run and moves the task on. answer is nil when the
+// run is being ruled on without reading it — a timeout — and noAnswer then
+// says why.
+func (r *TaskReconciler) settle(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	answer *collect.Answer,
+	noAnswer string,
+) error {
+	in := transition.Input{
+		Bindings: flow.Spec.Bindings,
+		Phase:    run.Phase,
+		NoAnswer: noAnswer,
+		Visited:  taskstate.Visited(&task.Status, flow.Spec.Bindings),
+		Budget:   task.Status.ReworkBudget,
+	}
+	if answer != nil {
+		in.Directory = answer.Directory
+		if answer.Directory == "" {
+			in.NoAnswer = answer.Reason
+		}
+	}
+	res := transition.Next(in)
+	if answer != nil && answer.Directory != "" && answer.Reason != "" {
+		// What the handler said after naming its directory is the most
+		// useful line a human will get about this run; keep it next to the
+		// framework's own account rather than losing it.
+		res.Detail += ": " + answer.Reason
+	}
+
+	logf.FromContext(ctx).Info("run finished",
+		"phase", run.Phase, "runID", run.RunID, "directory", in.Directory,
+		"outcome", res.Outcome, "next", res.Next)
+	taskstate.Advance(&task.Status, flow.Spec.Bindings, in.Directory, res, "", metav1.NewTime(r.now()))
+	return r.Status().Update(ctx, task)
+}
+
+// retryInfra re-runs a phase the handler never got to run, or escalates when
+// the handler's retry allowance is spent. The handler is fetched here rather
+// than carried from ensureJob because only this path needs it, and its
+// disappearing in between is the same broken-flow fault it would be anywhere.
+func (r *TaskReconciler) retryInfra(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	failure string,
+) error {
+	binding := flow.Spec.Bindings[run.Phase]
+	handler, err := r.handlerFor(ctx, task, binding, run.Phase)
+	if err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return r.fail(ctx, task, broken.reason)
+		}
+		return err
+	}
+
+	if taskstate.InfraRetriesExhausted(&task.Status, handler.Spec.MaxInfraRetries) {
+		return r.settle(ctx, task, flow, run, nil, fmt.Sprintf(
+			"the run never started (%s) and %d infrastructure retries were spent",
+			failure, run.InfraRetries))
+	}
+
+	logf.FromContext(ctx).Info("retrying a run that never started",
+		"phase", run.Phase, "runID", run.RunID, "failure", failure, "retries", run.InfraRetries)
+	taskstate.RetryInfra(&task.Status)
+	return r.Status().Update(ctx, task)
+}
+
+// handlerFor fetches the handler a binding names. Its disappearing is a
+// broken flow rather than a transient fault, reported through brokenFlow so
+// every caller turns it into a Failed the same way instead of each
+// remembering the NotFound check itself.
+func (r *TaskReconciler) handlerFor(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	binding flowv1alpha1.PhaseBinding,
+	phase flowv1alpha1.Phase,
+) (*flowv1alpha1.TaskHandler, error) {
+	var handler flowv1alpha1.TaskHandler
+	if err := r.Get(ctx, types.NamespacedName{Name: binding.Handler, Namespace: task.Namespace}, &handler); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, brokenFlow{fmt.Sprintf("phase %q names handler %q, which does not exist", phase, binding.Handler)}
+		}
+		return nil, err
+	}
+	return &handler, nil
+}
+
+func (r *TaskReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // begin puts a fresh task on the flow's starting phase. The decision of what
@@ -203,6 +382,7 @@ func (r *TaskReconciler) ensureJob(
 			return nil, fmt.Errorf("job %q exists but is not owned by task %s (uid %s): owners = %s",
 				name, task.Name, task.UID, ownerSummary(existing.OwnerReferences))
 		}
+		run.Deadline = deadlineOf(&existing)
 		return &existing, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -214,17 +394,14 @@ func (r *TaskReconciler) ensureJob(
 	// run in flight, a Failed of its own, and neither reaches here.
 	binding := flow.Spec.Bindings[run.Phase]
 
-	var handler flowv1alpha1.TaskHandler
-	if err := r.Get(ctx, types.NamespacedName{Name: binding.Handler, Namespace: task.Namespace}, &handler); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, brokenFlow{fmt.Sprintf("phase %q names handler %q, which does not exist", run.Phase, binding.Handler)}
-		}
+	handler, err := r.handlerFor(ctx, task, binding, run.Phase)
+	if err != nil {
 		return nil, err
 	}
 
 	job, err := runner.BuildJob(runner.Input{
 		Task:      task,
-		Handler:   &handler,
+		Handler:   handler,
 		Phase:     run.Phase,
 		RunID:     run.RunID,
 		PrevRunID: previousRun(task),
@@ -247,11 +424,25 @@ func (r *TaskReconciler) ensureJob(
 				return nil, fmt.Errorf("job %q exists but is not owned by task %s (uid %s): owners = %s",
 					name, task.Name, task.UID, ownerSummary(got.OwnerReferences))
 			}
+			run.Deadline = deadlineOf(&got)
 			return &got, nil
 		}
 		return nil, err
 	}
+	run.Deadline = deadlineOf(job)
 	return job, nil
+}
+
+// deadlineOf is when the Job's own deadline falls: the timeout the handler
+// declared, counted from when the Job was actually created. Read off the Job
+// rather than computed from the clock so a controller restart lands on the
+// same instant, and nil when the handler declared no timeout.
+func deadlineOf(job *batchv1.Job) *metav1.Time {
+	if job.Spec.ActiveDeadlineSeconds == nil {
+		return nil
+	}
+	t := metav1.NewTime(job.CreationTimestamp.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second))
+	return &t
 }
 
 // ownerSummary renders a Job's actual owners for an error message, so
