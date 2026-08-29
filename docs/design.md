@@ -1177,9 +1177,13 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 - 終端に着いた瞬間に **`status.expiresAt`** を焼く。`Escalated` / `Failed`（フレームワークが止めた）は `ttl.failed`、
   flow が宣言した終端（束縛の無いフェーズ）は `ttl.succeeded`。どちらを使うかは flow ではなくフレームワークが決める
 - 期限を Task 自身に持つので、**Escalated 後に flow が編集・削除されても消える時刻は変わらない**（予約フェーズが
-  flow 無しで終端なのと同じ理由）。flow が存在せず `Failed` になった Task だけは読む TTL が無いので残る（手で消す）
+  flow 無しで終端なのと同じ理由）。flow が存在せず `Failed` になった Task は読む TTL が無い間は残る。これは意図した
+  仕様で、**同名の flow が後から現れれば次の reconcile で backfill され、その TTL で消える**（下記）
 - `ttl` は CRD default（`succeeded: 1h` / `failed: 168h`）で埋まる。「必須」は validation ではなく default で満たす
 - コントローラは `expiresAt` を過ぎた Task を UID 前提条件付きで delete する。Job は ownerReference で追従する
+- この機能より前に終端へ着いた Task（`expiresAt` が無い）は、次の reconcile で早期 return する分岐の直前に
+  flow の TTL から一度だけ焼く（backfill）。この reconcile 時点でも flow が無ければ焼かずに残り、上と同じく
+  flow が後から現れるのを待つ
 
 → **S3 の掃除も `task-uid` の sweep に寄せる。** 元々 git ブランチ・Harbor タグ用に sweep が必要なので、
 掃除機構が 1 本に減る。「対応する Task が存在しない `task-uid` の prefix を消す」だけで、

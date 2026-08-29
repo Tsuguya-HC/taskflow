@@ -97,7 +97,7 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 		CurrentRun:   &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
 	}
 	res := transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 1}
-	Advance(s, flow(), dirMore, res, "s3://bucket/task/2/", at)
+	Advance(s, flow(), dirMore, res, "s3://bucket/task/2/", nil, at)
 
 	if len(s.History) != 1 {
 		t.Fatalf("history has %d entries, want 1", len(s.History))
@@ -129,7 +129,7 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 		RunID:      1,
 		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
 	}
-	Advance(s, flow(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, "", at)
+	Advance(s, flow(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, "", nil, at)
 	if s.CurrentRun != nil {
 		t.Fatal("a finished task has nothing in flight; a stale currentRun would make a late verdict look owned")
 	}
@@ -152,7 +152,7 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 		Outcome: transition.OutcomeStructural,
 		Detail:  "directory ok selects more than one status",
 	}
-	Advance(s, flow(), dirOK, res, "", at)
+	Advance(s, flow(), dirOK, res, "", nil, at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
@@ -196,7 +196,7 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 		RunID:      3,
 		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3},
 	}
-	Fail(s, "flow \"cnp-check\" does not exist in this namespace")
+	Fail(s, "flow \"cnp-check\" does not exist in this namespace", nil, at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
@@ -279,7 +279,7 @@ func TestCountersBoundACycle(t *testing.T) {
 			Visited:   Visited(s, flow()),
 			Budget:    s.ReworkBudget,
 		})
-		Advance(s, flow(), dir, res, "", at)
+		Advance(s, flow(), dir, res, "", nil, at)
 		if transition.IsTerminal(flow(), s.Phase) {
 			if s.Phase != flowv1alpha1.PhaseEscalated {
 				t.Fatalf("ended at %q, want Escalated once the budget was spent", s.Phase)
@@ -339,6 +339,22 @@ func TestExpireLeavesARunningTaskAlone(t *testing.T) {
 
 	if status.ExpiresAt != nil {
 		t.Fatalf("a task with a binding to run is not finished; expiresAt = %v", status.ExpiresAt)
+	}
+}
+
+// A date already stamped is never moved: this is what lets a later
+// reconcile call Expire unconditionally to backfill a task that missed its
+// first chance, without first checking whether it needs to.
+func TestExpireDoesNotMoveADateAlreadyStamped(t *testing.T) {
+	stamped := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	status := &flowv1alpha1.TaskStatus{Phase: phaseDone, ExpiresAt: &stamped}
+
+	// The values here never get read: an already-stamped date makes Expire
+	// return before it looks at ttl at all.
+	Expire(status, flow(), ttl(30*time.Minute, 168*time.Hour), metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)))
+
+	if !status.ExpiresAt.Equal(&stamped) {
+		t.Fatalf("expiresAt = %v, want the original %v untouched", status.ExpiresAt, stamped)
 	}
 }
 

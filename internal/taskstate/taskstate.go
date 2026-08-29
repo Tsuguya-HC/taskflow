@@ -56,12 +56,17 @@ func Visited(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]fl
 // because it names the run's directory and its child objects. reworkBudget
 // only falls, and only when a rework is actually taken; that asymmetry is
 // what bounds a cycle.
+//
+// ttl is the flow's, read the same instant the task lands on a terminal
+// phase: a write that settles the run and one that dates its cleanup must
+// not be two steps a caller could do in either order, or forget to pair.
 func Advance(
 	status *flowv1alpha1.TaskStatus,
 	bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding,
 	directory string,
 	res transition.Result,
 	ref string,
+	ttl *flowv1alpha1.TTLSpec,
 	now metav1.Time,
 ) {
 	status.History = append(status.History, flowv1alpha1.HistoryEntry{
@@ -95,6 +100,7 @@ func Advance(
 	// never happened — "last run" would stop being true.
 	if transition.IsTerminal(bindings, res.Next) {
 		status.CurrentRun = nil
+		Expire(status, bindings, ttl, now)
 		return
 	}
 	status.RunID++
@@ -107,13 +113,19 @@ func Advance(
 // saying it could not go on, so they take ttl.failed; any other terminal
 // phase is one the flow itself declared, and takes ttl.succeeded. A nil ttl
 // or a nil duration leaves the task to be cleaned up by hand.
+//
+// A date already stamped is never moved: Expire is called both the instant
+// a task lands on a terminal phase and, for one that landed there before
+// this existed, on a later reconcile that only means to backfill what that
+// first call missed. Idempotence here is what lets the second kind of call
+// be unconditional rather than needing its own "already has one" guard.
 func Expire(
 	status *flowv1alpha1.TaskStatus,
 	bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding,
 	ttl *flowv1alpha1.TTLSpec,
 	now metav1.Time,
 ) {
-	if ttl == nil || !transition.IsTerminal(bindings, status.Phase) {
+	if status.ExpiresAt != nil || ttl == nil || !transition.IsTerminal(bindings, status.Phase) {
 		return
 	}
 	d := ttl.Succeeded
@@ -138,7 +150,12 @@ func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase, budget int
 // Fail stops a task whose flow is broken. Nothing is retried: the fault is in
 // the definition rather than in the work, and guessing at a repair would hide
 // it.
-func Fail(status *flowv1alpha1.TaskStatus, reason string) {
+//
+// ttl is the flow's, or nil when the fault is that there is no flow to read
+// one from; Expire then leaves the task alone. That is a wait, not a dead
+// end: the controller keeps looking for a flow of that name on every later
+// reconcile and backfills the date once one appears.
+func Fail(status *flowv1alpha1.TaskStatus, reason string, ttl *flowv1alpha1.TTLSpec, now metav1.Time) {
 	status.Phase = flowv1alpha1.PhaseFailed
 	status.CurrentRun = nil
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
@@ -147,6 +164,9 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string) {
 		Reason:  "FlowBroken",
 		Message: reason,
 	})
+	// Failed is reserved, so it is terminal on its own say-so; Expire needs
+	// no binding table to see that (transition.IsTerminal).
+	Expire(status, nil, ttl, now)
 }
 
 // RetryInfra prepares another attempt at the same phase after a failure that

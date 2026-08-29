@@ -26,7 +26,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
 )
@@ -170,6 +169,47 @@ var _ = Describe("expiring a finished task", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the task to be deleted, got %v", err)
 	})
 
+	It("backfills expiresAt on a task that reached Escalated before this field existed", func() {
+		fx.makeFlow(withTTL)
+		tk := fx.makeTask()
+		// A task from before the TTL machinery existed: terminal, with
+		// nothing in flight, but no date — Advance never ran to stamp one.
+		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile()
+
+		got := fx.get()
+		Expect(got.Status.ExpiresAt).NotTo(BeNil())
+		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
+	})
+
+	It("leaves expiresAt unset when backfilling and the flow is gone too", func() {
+		tk := fx.makeTask() // no makeFlow: Spec.Flow names nothing that exists
+		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile()
+
+		Expect(fx.get().Status.ExpiresAt).To(BeNil())
+	})
+
+	It("backfills expiresAt with ttl.succeeded on a flow-declared terminal task", func() {
+		fx.makeFlow(withTTL)
+		tk := fx.makeTask()
+		// phaseReport is unbound in the fixture flow, so it is a status the
+		// flow itself declared terminal — not one of the framework's
+		// reserved phases, so this must take ttl.succeeded, not ttl.failed.
+		tk.Status.Phase = phaseReport
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile()
+
+		got := fx.get()
+		Expect(got.Status.ExpiresAt).NotTo(BeNil())
+		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(succeededTTL)))
+	})
+
 	It("does not delete a task by the same name created after the one that expired", func() {
 		fx.makeFlow(withTTL)
 		fx.makeHandler()
@@ -184,7 +224,10 @@ var _ = Describe("expiring a finished task", func() {
 		Expect(fresh.UID).NotTo(Equal(expired.UID))
 
 		clock = clock.Add(2 * succeededTTL)
-		err := fx.reconciler.Delete(fx.ctx, expired, client.Preconditions{UID: &expired.UID})
+		// Through expire() itself, not a hand-built Delete: that is the only
+		// way this spec would notice if task_controller.go ever dropped the
+		// UID precondition.
+		err := fx.reconciler.expire(fx.ctx, expired)
 		Expect(apierrors.IsConflict(err) || apierrors.IsNotFound(err)).To(BeTrue(),
 			"a UID precondition must refuse the newer object, got %v", err)
 		Expect(fx.get().UID).To(Equal(fresh.UID))
