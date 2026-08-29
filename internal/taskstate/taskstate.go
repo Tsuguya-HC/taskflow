@@ -101,6 +101,32 @@ func Advance(
 	status.CurrentRun = &flowv1alpha1.RunRef{Phase: res.Next, RunID: status.RunID}
 }
 
+// Expire stamps the deletion time of a task that has stopped, and does
+// nothing to one that has not. Which of the two durations applies is the
+// framework's call, not the flow's: Escalated and Failed are the framework
+// saying it could not go on, so they take ttl.failed; any other terminal
+// phase is one the flow itself declared, and takes ttl.succeeded. A nil ttl
+// or a nil duration leaves the task to be cleaned up by hand.
+func Expire(
+	status *flowv1alpha1.TaskStatus,
+	bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding,
+	ttl *flowv1alpha1.TTLSpec,
+	now metav1.Time,
+) {
+	if ttl == nil || !transition.IsTerminal(bindings, status.Phase) {
+		return
+	}
+	d := ttl.Succeeded
+	if status.Phase.IsReserved() {
+		d = ttl.Failed
+	}
+	if d == nil {
+		return
+	}
+	t := metav1.NewTime(now.Add(d.Duration))
+	status.ExpiresAt = &t
+}
+
 // Begin puts a fresh task on the flow's starting phase.
 func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase, budget int32) {
 	status.Phase = start

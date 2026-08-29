@@ -81,6 +81,22 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Get(ctx, req.NamespacedName, &task); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !task.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	// A stopped task has one thing left to do, and its date is already on
+	// it; nothing below needs consulting, least of all the flow. The Jobs go
+	// with it through their ownerReference (§10).
+	if task.Status.ExpiresAt != nil {
+		remaining := task.Status.ExpiresAt.Sub(r.now())
+		if remaining > 0 {
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt)
+		err := r.Delete(ctx, &task, client.Preconditions{UID: &task.UID})
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
 	// The framework's own terminal phases are terminal on their own say-so —
 	// unlike a phase the flow declared terminal, they need no binding table to
@@ -98,7 +114,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			// The flow was deleted or never existed. Nothing to repair.
-			return ctrl.Result{}, r.fail(ctx, &task, fmt.Sprintf("flow %q does not exist in this namespace", task.Spec.Flow))
+			return ctrl.Result{}, r.fail(ctx, &task, nil, fmt.Sprintf("flow %q does not exist in this namespace", task.Spec.Flow))
 		}
 		return ctrl.Result{}, err
 	}
@@ -116,7 +132,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// from success.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
 		if task.Status.CurrentRun != nil {
-			return ctrl.Result{}, r.fail(ctx, &task, fmt.Sprintf(
+			return ctrl.Result{}, r.fail(ctx, &task, flow.Spec.TTL, fmt.Sprintf(
 				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
 		}
 		return ctrl.Result{}, nil
@@ -136,7 +152,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return ctrl.Result{}, r.fail(ctx, &task, broken.reason)
+			return ctrl.Result{}, r.fail(ctx, &task, flow.Spec.TTL, broken.reason)
 		}
 		return ctrl.Result{}, err
 	}
@@ -263,7 +279,9 @@ func (r *TaskReconciler) settle(
 	logf.FromContext(ctx).Info("run finished",
 		"phase", run.Phase, "runID", run.RunID, "directory", in.Directory,
 		"outcome", res.Outcome, "next", res.Next)
-	taskstate.Advance(&task.Status, flow.Spec.Bindings, in.Directory, res, "", metav1.NewTime(r.now()))
+	now := metav1.NewTime(r.now())
+	taskstate.Advance(&task.Status, flow.Spec.Bindings, in.Directory, res, "", now)
+	taskstate.Expire(&task.Status, flow.Spec.Bindings, flow.Spec.TTL, now)
 	return r.Status().Update(ctx, task)
 }
 
@@ -283,7 +301,7 @@ func (r *TaskReconciler) retryInfra(
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return r.fail(ctx, task, broken.reason)
+			return r.fail(ctx, task, flow.Spec.TTL, broken.reason)
 		}
 		return err
 	}
@@ -332,7 +350,7 @@ func (r *TaskReconciler) now() time.Time {
 // around it.
 func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
-		return r.fail(ctx, task, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
+		return r.fail(ctx, task, flow.Spec.TTL, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
 	taskstate.Begin(&task.Status, flow.Spec.Start, flow.Spec.ReworkBudget)
 	return r.Status().Update(ctx, task)
@@ -341,7 +359,11 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 // fail stops a task whose flow is broken. Nothing is retried: the fault is in
 // the definition rather than in the work, and guessing at a repair would hide
 // it.
-func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, reason string) error {
+//
+// ttl is the flow's, or nil when the fault is that there is no flow to read
+// one from; such a task stays until someone deletes it, which is the right
+// outcome for the one kind of failure nothing else will ever look at.
+func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, ttl *flowv1alpha1.TTLSpec, reason string) error {
 	// A dispatched task with nothing in flight has already reached a terminal
 	// phase: Advance clears CurrentRun exactly when it lands one there, whether
 	// that phase is Failed, Escalated, or one the flow itself declared
@@ -352,6 +374,7 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, reas
 		return nil
 	}
 	taskstate.Fail(&task.Status, reason)
+	taskstate.Expire(&task.Status, nil, ttl, metav1.NewTime(r.now()))
 	return r.Status().Update(ctx, task)
 }
 

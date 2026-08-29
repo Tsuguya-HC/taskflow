@@ -60,9 +60,19 @@ type PhaseBinding struct {
 // TTLSpec is how long a finished task sticks around. Cleanup is anchored on
 // the Task and propagates through ownerReferences; Jobs are never given a TTL
 // of their own, because a Job that deletes itself takes the verdict with it.
+//
+// Both fields default rather than stay optional: a task that never goes away
+// is a row in etcd that never goes away, and etcd has been lost here twice
+// (§10 "etcd 保護のため必須"). The defaults are the design's own example.
 type TTLSpec struct {
+	// Succeeded applies to a task that stopped at a phase the flow declared
+	// terminal — one with no binding of its own.
+	// +kubebuilder:default="1h"
 	// +optional
 	Succeeded *metav1.Duration `json:"succeeded,omitempty"`
+	// Failed applies to a task the framework stopped: Escalated or Failed.
+	// A human has to look at those, so they wait longer.
+	// +kubebuilder:default="168h"
 	// +optional
 	Failed *metav1.Duration `json:"failed,omitempty"`
 }
@@ -99,6 +109,7 @@ type TaskFlowSpec struct {
 	// +optional
 	MaxInFlight *int32 `json:"maxInFlight,omitempty"`
 
+	// +kubebuilder:default={}
 	// +optional
 	TTL *TTLSpec `json:"ttl,omitempty"`
 }
