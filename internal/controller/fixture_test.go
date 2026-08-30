@@ -45,8 +45,10 @@ const (
 )
 
 const (
-	handlerName  = "cnp-reader"
-	sidecarImage = "example.invalid/agent-sidecar:v0"
+	handlerName   = "cnp-reader"
+	sidecarImage  = "example.invalid/agent-sidecar:v0"
+	workspaceVol  = "work"
+	workspacePath = "/workspace"
 )
 
 // Every spec gets its own names. Sharing them let one spec's leftover Job —
@@ -161,17 +163,17 @@ func (fx *fixture) makeHandler(mut ...func(*flowv1alpha1.TaskHandler)) {
 		Spec: flowv1alpha1.TaskHandlerSpec{
 			Phase:     phaseInvestigate,
 			Runner:    flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
-			Workspace: &flowv1alpha1.WorkspaceSpec{Volume: "work", MountPath: "/workspace"},
+			Workspace: &flowv1alpha1.WorkspaceSpec{Volume: workspaceVol, MountPath: workspacePath},
 			JobTemplate: &flowv1alpha1.JobTemplate{
 				Template: flowv1alpha1.PodTemplate{
 					Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
 					Spec: corev1.PodSpec{
 						RestartPolicy:   corev1.RestartPolicyNever,
 						SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To(int64(65533))},
-						Volumes:         []corev1.Volume{{Name: "work"}},
+						Volumes:         []corev1.Volume{{Name: workspaceVol}},
 						Containers: []corev1.Container{{
 							Name: agentName, Image: agentImage,
-							VolumeMounts: []corev1.VolumeMount{{Name: "work", MountPath: "/workspace"}},
+							VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: workspacePath}},
 						}},
 					},
 				},
