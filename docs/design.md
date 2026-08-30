@@ -767,7 +767,7 @@ pod の中身が全部ユーザー定義になるため、**コントローラ�
 
 **この判断は実物で裏を取っている（2026-08-22）。** 既存の `adjudicator` WorkflowTemplate は
 workflow レベルの `emptyDir` で判定を渡そうとしていたが、emptyDir は Pod スコープなので
-**別ステップの Pod には一度も届いていなかった**（[#568](https://github.com/Tsuguya/home-cluster/pull/568) で修正）。
+**別ステップの Pod には一度も届いていなかった**（[#568](https://github.com/Tsuguya-HC/home-cluster/pull/568) で修正）。
 「共有ストレージで判定を渡す」は素朴に見えて壊れやすい。オーケストレータ自身のメタデータ
 チャネル（Argo なら output parameter、Job なら termination message）に載せる方が確実。
 

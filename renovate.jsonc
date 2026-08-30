@@ -51,7 +51,7 @@
         "else to notice a poisoned release before we take it; there is no someone",
         "else here — we wrote it, reviewed it and merged it."
       ],
-      "matchPackageNames": ["Tsuguya/**"],
+      "matchPackageNames": ["Tsuguya-HC/**"],
       "minimumReleaseAge": "0"
     },
     {

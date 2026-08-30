@@ -30,17 +30,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/Tsuguya/taskflow/internal/collect"
-	"github.com/Tsuguya/taskflow/internal/runner"
-	"github.com/Tsuguya/taskflow/internal/taskstate"
-	"github.com/Tsuguya/taskflow/internal/transition"
+	"github.com/Tsuguya-HC/taskflow/internal/collect"
+	"github.com/Tsuguya-HC/taskflow/internal/runner"
+	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
+	"github.com/Tsuguya-HC/taskflow/internal/transition"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 )
 
 // brokenFlow says the definition is wrong rather than the work. It is carried

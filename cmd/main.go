@@ -35,8 +35,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
-	"github.com/Tsuguya/taskflow/internal/controller"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

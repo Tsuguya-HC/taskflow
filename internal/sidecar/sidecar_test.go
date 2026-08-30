@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tsuguya/taskflow/internal/collect"
+	"github.com/Tsuguya-HC/taskflow/internal/collect"
 )
 
 var declared = []string{"ok", "more"}

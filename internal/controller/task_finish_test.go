@@ -30,9 +30,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
-	"github.com/Tsuguya/taskflow/internal/taskstate"
-	"github.com/Tsuguya/taskflow/internal/transition"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
+	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
 // envtest runs no Job controller and no kubelet, so what those would write —

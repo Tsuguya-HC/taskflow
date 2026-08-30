@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/Tsuguya/taskflow/test/utils"
+	"github.com/Tsuguya-HC/taskflow/test/utils"
 )
 
 var (
