@@ -1101,6 +1101,10 @@ Renovate PR のトリアージ（Step 2）では、PR 本文や依存の release
 その仕組み自体が未設計（§13「未決事項」）。
 v1 では該当タスクを載せないことで回避し、Step 2 で導入する。
 
+`Escalated` は `next` の行き先として宣言できるようになったが、`untrusted` の handler がそこへ
+直行する辺を持てるかは未決（人間へ渡る終端だから例外として許すのか、untrusted では直行自体を
+禁じるのかは、上記の admission 機構（#17）と合わせて決める）。
+
 ### Task を作れることは特権である
 
 `Task` の create 権限を持つ者は、`spec.input` でプロンプトを操作しつつ任意の handler を
@@ -1208,8 +1212,10 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 
 ### Task の TTL（実装済み）
 
-- 終端に着いた瞬間に **`status.expiresAt`** を焼く。`Escalated` / `Failed`（フレームワークが止めた）は `ttl.failed`、
-  flow が宣言した終端（束縛の無いフェーズ）は `ttl.succeeded`。どちらを使うかは flow ではなくフレームワークが決める
+- 終端に着いた瞬間に **`status.expiresAt`** を焼く。`Escalated` / `Failed` は、フレームワークが行き詰まって
+  着いた場合でも `next` で宣言された辺を通って着いた場合でも `ttl.failed`。flow が宣言した終端
+  （束縛の無いフェーズ）は `ttl.succeeded`。どちらを使うかは誰が宣言したかではなく、人間が見る必要が
+  あるかどうかで決まり、それは flow ではなくフレームワークが決める
 - 期限を Task 自身に持つので、**Escalated 後に flow が編集・削除されても消える時刻は変わらない**（予約フェーズが
   flow 無しで終端なのと同じ理由）。flow が存在せず `Failed` になった Task は読む TTL が無い間は残る。これは意図した
   仕様で、**同名の flow が後から現れれば次の reconcile で backfill され、その TTL で消える**（下記）
