@@ -23,14 +23,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 
 	"github.com/Tsuguya-HC/taskflow/internal/collect"
+	"github.com/Tsuguya-HC/taskflow/internal/metrics"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
@@ -54,6 +57,9 @@ func (e brokenFlow) Error() string { return e.reason }
 type TaskReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder is where a task's ending is announced to whoever is watching
+	// events rather than polling status.
+	Recorder events.EventRecorder
 	// Now is the clock deadlines are judged against; nil means the wall clock.
 	Now func() time.Time
 }
@@ -64,6 +70,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=taskflows;taskhandlers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -116,7 +123,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, r.backfillExpiry(ctx, &task, nil, flow.Spec.TTL)
+		return ctrl.Result{}, r.backfillExpiry(ctx, &task, &flow.Spec)
 	}
 
 	// A flow is always resolved in the task's own namespace. There is no field
@@ -144,13 +151,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// from success.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
 		if task.Status.CurrentRun != nil {
-			return ctrl.Result{}, r.fail(ctx, &task, flow.Spec.TTL, fmt.Sprintf(
+			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
 				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
 		}
 		// Same backfill as the reserved-phase branch above, for a task that
 		// reached a flow-declared terminal phase before expiresAt existed.
 		// The flow is already in hand here, so nothing extra needs fetching.
-		return ctrl.Result{}, r.backfillExpiry(ctx, &task, flow.Spec.Bindings, flow.Spec.TTL)
+		return ctrl.Result{}, r.backfillExpiry(ctx, &task, &flow.Spec)
 	}
 
 	run := task.Status.CurrentRun
@@ -167,7 +174,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return ctrl.Result{}, r.fail(ctx, &task, flow.Spec.TTL, broken.reason)
+			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, broken.reason)
 		}
 		return ctrl.Result{}, err
 	}
@@ -229,6 +236,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // deadlineGrace is how long past a run's deadline the controller waits for the
 // Job to report the timeout itself before ruling on it.
 const deadlineGrace = time.Minute
+
+// actionFinishing is what the controller was doing when it recorded the
+// event: the events API asks for the operation as well as the reason, and
+// every event this controller emits comes from settling a finished run.
+const actionFinishing = "Finishing"
 
 // jobFinished reports whether the Job is done, and the reason when it failed.
 // A Job that finished with neither condition true is still running.
@@ -295,8 +307,73 @@ func (r *TaskReconciler) settle(
 		"phase", run.Phase, "runID", run.RunID, "directory", in.Directory,
 		"outcome", res.Outcome, "next", res.Next)
 	now := metav1.NewTime(r.now())
-	taskstate.Advance(&task.Status, flow.Spec.Bindings, in.Directory, res, "", flow.Spec.TTL, now)
-	return r.Status().Update(ctx, task)
+	taskstate.Advance(&task.Status, &flow.Spec, in.Directory, res, "", now)
+	if err := r.Status().Update(ctx, task); err != nil {
+		return err
+	}
+	r.announce(task, &flow.Spec, res.Next, res.Detail)
+	return nil
+}
+
+// announce says what a task's ending means to the two audiences that do not
+// read its status: whoever is watching metrics, and whoever is watching
+// events. It is the one place every path that lands a task somewhere it stops
+// runs through — a run settling on the flow's own table, or fail() stopping a
+// task the definition itself broke — so a metric asking "how many tasks
+// ended, and how" cannot go quiet just because the ending came from the
+// framework's own fault rather than the flow's answer.
+//
+// It runs after the status write rather than before, so a write that fails
+// and gets retried does not count the same ending twice. The cost of that
+// ordering is a window, not a retry: a crash between the status write
+// succeeding and this running loses that one Event and that one metric
+// sample for good, since the next reconcile finds an already-terminal task
+// and returns before reaching here again. That is accepted rather than
+// closed — status is the record of truth, and Event/metric are signals, not
+// a second copy of it.
+//
+// flow may be nil: fail() reaches Failed with no flow to read at all when the
+// flow was deleted or never existed, and that is exactly the case a metric
+// meant to surface a broken flow must not drop.
+//
+// The metric's flow label is task.Spec.Flow when flow resolved to a real
+// TaskFlow, and metrics.FlowUnresolved when it did not. Only the unresolved
+// case is masked: task.Spec.Flow is free text a task's own author chooses,
+// and using the raw value there would let whoever can create Tasks grow this
+// metric's cardinality without bound simply by naming a different
+// nonexistent flow each time. Which name was missing is not lost by
+// collapsing it — it is still in the task's status and in fail()'s reason —
+// the metric only has to say how many tasks ended on a broken reference, not
+// which one.
+//
+// Only a Failure ending gets an event. The framework's own two already show
+// up as Ready=False with an outcome to read, and a Success or Undeclared
+// ending is not news; a Failure is the one case where a task that finished
+// perfectly normally is carrying bad news that nothing else would say out
+// loud.
+func (r *TaskReconciler) announce(
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlowSpec,
+	phase flowv1alpha1.Phase,
+	detail string,
+) {
+	ending := transition.EndingOf(flow, phase)
+	if ending == transition.EndingRunning {
+		return
+	}
+	flowLabel := metrics.FlowUnresolved
+	if flow != nil {
+		flowLabel = task.Spec.Flow
+	}
+	metrics.TaskOutcomes.With(prometheus.Labels{
+		metrics.LabelFlow: flowLabel, metrics.LabelPhase: string(phase), metrics.LabelSeverity: string(ending),
+	}).Inc()
+
+	if ending != transition.EndingFailure || r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, taskstate.ReasonHandlerFailed, actionFinishing,
+		"Task ended at %s, which flow %s declares a failure: %s", phase, task.Spec.Flow, detail)
 }
 
 // retryInfra re-runs a phase the handler never got to run, or escalates when
@@ -315,7 +392,7 @@ func (r *TaskReconciler) retryInfra(
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return r.fail(ctx, task, flow.Spec.TTL, broken.reason)
+			return r.fail(ctx, task, &flow.Spec, broken.reason)
 		}
 		return err
 	}
@@ -364,7 +441,7 @@ func (r *TaskReconciler) now() time.Time {
 // around it.
 func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
-		return r.fail(ctx, task, flow.Spec.TTL, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
+		return r.fail(ctx, task, &flow.Spec, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
 	taskstate.Begin(&task.Status, flow.Spec.Start, flow.Spec.ReworkBudget)
 	return r.Status().Update(ctx, task)
@@ -380,7 +457,7 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 // from whatever flow the task names on every later reconcile, so a flow
 // created under the same name afterward is enough to make the date appear
 // and the task eventually clear, with no special path needed for that case.
-func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, ttl *flowv1alpha1.TTLSpec, reason string) error {
+func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, reason string) error {
 	// A dispatched task with nothing in flight has already reached a terminal
 	// phase: Advance clears CurrentRun exactly when it lands one there, whether
 	// that phase is Failed, Escalated, or one the flow itself declared
@@ -390,8 +467,12 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, ttl 
 	if task.Status.Phase != "" && task.Status.CurrentRun == nil {
 		return nil
 	}
-	taskstate.Fail(&task.Status, reason, ttl, metav1.NewTime(r.now()))
-	return r.Status().Update(ctx, task)
+	taskstate.Fail(&task.Status, reason, flow, metav1.NewTime(r.now()))
+	if err := r.Status().Update(ctx, task); err != nil {
+		return err
+	}
+	r.announce(task, flow, flowv1alpha1.PhaseFailed, reason)
+	return nil
 }
 
 // backfillExpiry stamps expiresAt on a task that reached a terminal phase
@@ -403,14 +484,17 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, ttl 
 // already has a date, or one that would get none from ttl, it leaves status
 // exactly as it found it, and this returns nil rather than writing back a
 // status equal to what is already stored.
+//
+// It does not call announce. The task ended before this reconcile, possibly
+// long before it; counting it now would tell the metric and whoever reads the
+// Event that a task ended today when it did not.
 func (r *TaskReconciler) backfillExpiry(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
-	bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding,
-	ttl *flowv1alpha1.TTLSpec,
+	flow *flowv1alpha1.TaskFlowSpec,
 ) error {
 	before := task.Status.ExpiresAt
-	taskstate.Expire(&task.Status, bindings, ttl, metav1.NewTime(r.now()))
+	taskstate.Expire(&task.Status, flow, metav1.NewTime(r.now()))
 	if task.Status.ExpiresAt == before {
 		return nil
 	}

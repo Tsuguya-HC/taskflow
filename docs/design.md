@@ -600,6 +600,40 @@ history からは意図的な escalate と区別できなかった。**
 
 **束縛の無いステータスが終端。** `Done` を特別扱いしない — 行き先を持たないなら、そこで止まる。
 
+### 終端の意味は flow が宣言する（`spec.terminals`）
+
+終端が**どこか**は束縛の有無で決まるが、そこに着いたのが**良い知らせかどうか**は framework には分からない。
+`失敗` も `おわり` も利用側が選んだただの名前で、framework の語彙には無い。だから flow が言う:
+
+```yaml
+terminals:
+  完了: Success
+  失敗: Failure
+```
+
+- キーは**束縛の無いフェーズ**でなければならない（束縛があるのに終端と言うのは矛盾。CEL で create 時に拒否）
+- `Escalated` / `Failed` は書けない（framework 自身の終端で、意味は flow のものではない。同じく CEL）
+- **省略可。省略は `Success` ではない。** 宣言の無い flow は terminals が存在しなかった頃と同じ沈黙のままで、
+  終端は `Undeclared` として報告される（P8 — 黙って成功に倒さない）。1 つ宣言しても残りを宣言する義務は無い
+
+終端の種類に応じて framework が声を出す。4 つの出力は同じ条件で出るわけではない:
+
+| 出るもの | いつ | 詳細 |
+|---|---|---|
+| Kubernetes Event | `Failure` のときだけ | `Warning` / reason `HandlerFailed` / メッセージに handler の理由 |
+| 条件 | `Escalated` / `Failed` / `Failure`（人間が見に来る必要がある終端） | `Ready=False`。reason は `Failure` のとき `HandlerFailed`、他の 2 つは `res.Outcome`（`Failure` の outcome は **`Declared` のまま** — 宣言された辺を通っただけで、機構は何も壊れていない。人間が最初に見るべきは「結論が悪い」の方） |
+| TTL | 同じ 3 値で `ttl.failed`、残り（`Success` / `Undeclared`）は `ttl.succeeded`（§10） | |
+| metric | **`EndingRunning`（終端でない）以外は常に** — `Undeclared` も含む | `taskflow_task_outcomes_total{flow, phase, severity}` |
+
+**終端の「意味」は 5 値**（`transition.Ending`）: `Success` / `Failure`（flow の宣言）、
+`Escalated` / `Failed`（framework 自身の 2 つ）、`Undeclared`（宣言が無い）。
+metric の `severity` は 5 値すべてを常に出すので、**「まだ宣言していない flow」がダッシュボードで見つかる**。
+`flow` ラベルは実在する TaskFlow の名前か、参照先が存在しなかったことを表す固定値 `<unresolved>` の
+どちらかを取る。
+
+これが無いと、エージェントが「この対象は壊れている」と**明示**しても framework は素通りする。
+Step 0 の cnp-check は通知サイドカーが自前で判定していたが、それは利用側が毎回書き直す羽目になる。
+
 **循環するのが本質。** Argo Workflow の DAG は非巡回なので差し戻しが表現できない。
 これがコントローラを書く最大の理由。
 
@@ -676,6 +710,8 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | profile に無いフェーズの binding がある | 意図の取り違え。黙って無視しない |
 | `next` の行き先が未束縛でも終端でもない | 実行時の停止を作成時のエラーに変える |
 | `next` のキーに `Failed` が現れる | 予約語。flow の破損は handler の言い分ではない（`Escalated` は行き先としてなら可） |
+| `terminals` のキーが束縛のあるフェーズ | 終端ではないものを終端と言っている（**CEL で実装済み**） |
+| `terminals` のキーが `Escalated` / `Failed` | 予約語。framework 自身の終端の意味は flow のものではない（**CEL で実装済み**） |
 | 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない |
 | ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え |
@@ -810,6 +846,15 @@ workflow レベルの `emptyDir` で判定を渡そうとしていたが、empty
 **別ステップの Pod には一度も届いていなかった**（[#568](https://github.com/Tsuguya-HC/home-cluster/pull/568) で修正）。
 「共有ストレージで判定を渡す」は素朴に見えて壊れやすい。オーケストレータ自身のメタデータ
 チャネル（Argo なら output parameter、Job なら termination message）に載せる方が確実。
+
+### 2 行目が出る先
+
+termination message の 2 行目は 3 箇所に出る: `status.history[].reason`、`Ready` 条件の
+message、そして `Failure` 終端では Warning Event の note（§5）。Event は Task とは別のオブジェクト
+なので、Task を読む権限とは別の権限で読まれる。
+
+`internal/collect/sanitize.go` の制御文字除去と 1024 rune の切り詰めは、端末インジェクションと
+長さ爆弾を防ぐためのもので、中身が何かは見ていない。
 
 ### なぜ最終メッセージをパースしないか
 
@@ -1190,6 +1235,9 @@ backend の違いは init/publish サイドカーが吸収する（CSI 的な発
 全フェーズで報告させると板がノイズで埋まる。人間が判断する必要があるときだけ：
 
 - **`Escalated` / `Failed`**（framework が認識する失敗系。どのフローでも共通）
+- **`terminals` で `Failure` と宣言された終端**（§5）。framework が Warning Event を出し、
+  `Ready=False` になる（metric は終端の種類を問わず常に出るので、この一件に限った話ではない）。
+  **どの名前が `Failure` かは flow が言う**ので、framework は相変わらず語彙を持たない
 - **flow が定義した終端ステータス**（例の `PlanReview` / `Done` はその一例であって、
   framework が知っている名前ではない。どこで報告するかは flow の binding が決める）
 
@@ -1218,10 +1266,12 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 
 ### Task の TTL（実装済み）
 
-- 終端に着いた瞬間に **`status.expiresAt`** を焼く。`Escalated` / `Failed` は、フレームワークが行き詰まって
-  着いた場合でも `next` で宣言された辺を通って着いた場合でも `ttl.failed`。flow が宣言した終端
-  （束縛の無いフェーズ）は `ttl.succeeded`。どちらを使うかは誰が宣言したかではなく、人間が見る必要が
-  あるかどうかで決まり、それは flow ではなくフレームワークが決める
+- 終端に着いた瞬間に **`status.expiresAt`** を焼く。規則は 1 本 — **人間が来て見る必要がある終端は
+  `ttl.failed`、それ以外は `ttl.succeeded`**。該当するのは終端の意味 5 値（§5）のうち 3 つ:
+  `Escalated`（フレームワークが行き詰まって着いた場合でも `next` で宣言された辺を通って着いた場合でも）、
+  `Failed`、そして **`terminals` で `Failure` と宣言された終端**。`Success` と `Undeclared` は `ttl.succeeded`。
+  どちらを使うかは誰が宣言したかではなく、人間が見る必要があるかどうかで決まり、それは flow ではなく
+  フレームワークが決める
 - 期限を Task 自身に持つので、**Escalated 後に flow が編集・削除されても消える時刻は変わらない**（予約フェーズが
   flow 無しで終端なのと同じ理由）。flow が存在せず `Failed` になった Task は読む TTL が無い間は残る。これは意図した
   仕様で、**同名の flow が後から現れれば次の reconcile で backfill され、その TTL で消える**（下記）
@@ -1511,6 +1561,8 @@ spec:
     報告:
       handler: cnp-reviewer
       next: {おわり: sent}
+  terminals:
+    おわり: Success                # 宣言しないと Undeclared のまま（§5）
   reworkBudget: 0                 # investigate に循環は無い。辺は前進しかしないので影響も受けない
   maxInFlight: 1
   ttl: {succeeded: 1h, failed: 168h}

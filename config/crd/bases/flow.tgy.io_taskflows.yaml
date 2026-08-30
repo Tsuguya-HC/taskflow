@@ -131,6 +131,34 @@ spec:
                   nothing.
                 minLength: 1
                 type: string
+              terminals:
+                additionalProperties:
+                  description: |-
+                    TerminalSeverity is what reaching one of a flow's endings means.
+
+                    The framework cannot work this out. A status with no binding is where the
+                    flow stops, and that is all it knows: 失敗 and おわり are equally just names
+                    its author chose, and neither is spelled in a vocabulary the framework
+                    owns. So the flow says which of its endings are bad news, and only then can
+                    the framework raise its voice about one.
+                  enum:
+                  - Success
+                  - Failure
+                  type: string
+                description: |-
+                  Terminals says what this flow's endings mean. It is keyed by a phase
+                  nothing binds — one of the places a task stops — and says whether
+                  stopping there is good news. A Failure ending is the one thing that
+                  makes the framework speak up about a task that finished: a warning
+                  event, Ready=False, and the longer ttl, so the record is still there
+                  when somebody comes to look.
+
+                  Optional, and leaving it out is not the same as saying Success. A flow
+                  that has not declared keeps exactly the silence it had before this
+                  field existed, and its endings are reported as Undeclared rather than
+                  guessed at (P8). Declaring one ending does not oblige the flow to
+                  declare the rest.
+                type: object
               ttl:
                 default: {}
                 description: |-
@@ -162,6 +190,14 @@ spec:
             - profile
             - start
             type: object
+            x-kubernetes-validations:
+            - message: terminals may only name a phase with no binding of its own,
+                since a phase something binds is not where the flow ends
+              rule: '!has(self.terminals) || self.terminals.all(p, !(p in self.bindings))'
+            - message: Escalated and Failed are the framework's own endings and their
+                meaning is not the flow's to declare
+              rule: '!has(self.terminals) || (!(''Escalated'' in self.terminals) &&
+                !(''Failed'' in self.terminals))'
           status:
             description: |-
               TaskFlowStatus reports whether the flow was accepted. Nothing reconciles a

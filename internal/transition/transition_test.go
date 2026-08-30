@@ -30,6 +30,7 @@ const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 	phaseReport      flowv1alpha1.Phase = "報告"
 	phaseDone        flowv1alpha1.Phase = "おわり"
+	phaseGave        flowv1alpha1.Phase = "失敗"
 )
 
 func cnpCheck() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
@@ -195,6 +196,62 @@ func TestTheEscalateDirectoryIsCreated(t *testing.T) {
 	slices.Sort(dirs)
 	if !slices.Equal(dirs, []string{dirEscalate, dirMore, dirOK}) {
 		t.Fatalf("directories = %v, want the escalate directory among them", dirs)
+	}
+}
+
+// What a task's stopping place means is the flow's to say, and the framework
+// asks rather than assumes. The two reserved names answer for themselves.
+func TestEndingOfReportsWhatStoppingThereMeans(t *testing.T) {
+	flow := &flowv1alpha1.TaskFlowSpec{
+		Bindings: cnpCheck(),
+		Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+			phaseDone: flowv1alpha1.TerminalSuccess,
+			phaseGave: flowv1alpha1.TerminalFailure,
+		},
+	}
+	for _, tc := range []struct {
+		name  string
+		phase flowv1alpha1.Phase
+		want  Ending
+	}{
+		{"a phase still bound to a handler", phaseInvestigate, EndingRunning},
+		{"an ending declared a success", phaseDone, EndingSuccess},
+		{"an ending declared a failure", phaseGave, EndingFailure},
+		{"the framework's own escalation", flowv1alpha1.PhaseEscalated, EndingEscalated},
+		{"the framework's own failure", flowv1alpha1.PhaseFailed, EndingFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EndingOf(flow, tc.phase); got != tc.want {
+				t.Fatalf("ending = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A flow written before terminals existed declares nothing, and silence is
+// not consent: reporting it as Undeclared is what keeps "nobody has said"
+// distinguishable from "somebody said this was fine".
+func TestAnUndeclaredEndingIsNotASuccess(t *testing.T) {
+	if got := EndingOf(&flowv1alpha1.TaskFlowSpec{Bindings: cnpCheck()}, phaseDone); got != EndingUndeclared {
+		t.Fatalf("ending = %q, want Undeclared for a flow that never said", got)
+	}
+	partly := &flowv1alpha1.TaskFlowSpec{
+		Bindings:  cnpCheck(),
+		Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalFailure},
+	}
+	if got := EndingOf(partly, phaseDone); got != EndingUndeclared {
+		t.Fatalf("ending = %q; declaring one ending must not speak for the others", got)
+	}
+}
+
+// Escalated answers for itself before the bindings are consulted, which is
+// what lets a task that reached it still be reported after its flow is gone.
+func TestTheReservedEndingsNeedNoFlow(t *testing.T) {
+	if got := EndingOf(nil, flowv1alpha1.PhaseEscalated); got != EndingEscalated {
+		t.Fatalf("ending = %q, want Escalated with no flow to read", got)
+	}
+	if got := EndingOf(nil, flowv1alpha1.PhaseFailed); got != EndingFailed {
+		t.Fatalf("ending = %q, want Failed with no flow to read", got)
 	}
 }
 

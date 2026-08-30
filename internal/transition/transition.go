@@ -228,6 +228,62 @@ func Directories(bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding, phas
 	return dirs
 }
 
+// Ending is what a task's stopping place means to whoever is watching. It is
+// a different question from which phase it stopped at, and one the framework
+// cannot answer alone: 失敗 and おわり are both just names, and only the flow
+// knows which of them is bad news.
+type Ending string
+
+const (
+	// EndingRunning is what a phase that has not stopped returns. Not an
+	// ending at all; the zero value, so a caller that forgets to check
+	// gets nothing rather than a wrong answer.
+	EndingRunning Ending = ""
+
+	// EndingEscalated and EndingFailed are the framework's own two, and are
+	// not the flow's to redefine.
+	EndingEscalated Ending = Ending(flowv1alpha1.PhaseEscalated)
+	EndingFailed    Ending = Ending(flowv1alpha1.PhaseFailed)
+
+	// EndingSuccess and EndingFailure are what the flow declared in
+	// terminals.
+	EndingSuccess Ending = Ending(flowv1alpha1.TerminalSuccess)
+	EndingFailure Ending = Ending(flowv1alpha1.TerminalFailure)
+
+	// EndingUndeclared is an ending the flow reached without ever saying
+	// what it means. It is neither an error nor a synonym for success: a
+	// flow written before terminals existed says nothing, and the framework
+	// reports the silence rather than filling it in (P8). It also gives
+	// whoever is reading the metric a way to find the flows still owing a
+	// declaration.
+	EndingUndeclared Ending = "Undeclared"
+)
+
+// EndingOf reports what reaching phase means, or EndingRunning when it is not
+// somewhere a task stops.
+//
+// The framework's two reserved names answer for themselves and are checked
+// first: what Escalated means does not depend on a flow, which is what lets a
+// task that reached it be reported even after the flow is gone — flow may be
+// nil for exactly that reason, and still get the right answer for those two.
+func EndingOf(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) Ending {
+	switch {
+	case phase == flowv1alpha1.PhaseEscalated:
+		return EndingEscalated
+	case phase == flowv1alpha1.PhaseFailed:
+		return EndingFailed
+	case flow == nil, !IsTerminal(flow.Bindings, phase):
+		return EndingRunning
+	}
+	switch flow.Terminals[phase] {
+	case flowv1alpha1.TerminalSuccess:
+		return EndingSuccess
+	case flowv1alpha1.TerminalFailure:
+		return EndingFailure
+	}
+	return EndingUndeclared
+}
+
 // IsTerminal reports whether a task that reached phase has stopped: a status
 // with no binding is where the flow ends, and the framework's own two answers
 // always end it.

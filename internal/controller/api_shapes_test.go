@@ -48,6 +48,9 @@ const dirSent = "sent"
 // framework reserved one (see design.md §5).
 const phaseDone flowv1alpha1.Phase = "おわり"
 
+// The ending these examples use when they need one the flow calls bad news.
+const phaseGave flowv1alpha1.Phase = "失敗"
+
 // These do not reproduce design.md §16 verbatim — names, handlers and budget
 // differ. What they check is the shape the design requires: a declaration
 // decides its own vocabulary, the two reserved names cannot be bound, and the
@@ -221,6 +224,77 @@ var _ = Describe("the API refuses what the design forbids", func() {
 				Spec:       flowv1alpha1.TaskHandlerSpec{Phase: reserved},
 			}
 			invalid(k8sClient.Create(ctx, h), "a handler cannot fill them")
+		},
+		Entry("Escalated", flowv1alpha1.PhaseEscalated),
+		Entry("Failed", flowv1alpha1.PhaseFailed),
+	)
+
+	It("accepts a flow that says what its endings mean", func() {
+		flow := &flowv1alpha1.TaskFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: "declared-endings", Namespace: resourceNamespace},
+			Spec: flowv1alpha1.TaskFlowSpec{
+				Profile: flowv1alpha1.ProfileInvestigate,
+				Start:   "報告",
+				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+					"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{
+						phaseDone: dirSent,
+						phaseGave: "error",
+					}},
+				},
+				// Both endings are the flow author's own words, and so is
+				// which of them counts as bad news.
+				Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+					phaseDone: flowv1alpha1.TerminalSuccess,
+					phaseGave: flowv1alpha1.TerminalFailure,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, flow)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, flow) })
+	})
+
+	It("refuses a severity that is not one of the two", func() {
+		flow := &flowv1alpha1.TaskFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: "bad-severity", Namespace: resourceNamespace},
+			Spec: flowv1alpha1.TaskFlowSpec{
+				Profile:   flowv1alpha1.ProfileInvestigate,
+				Start:     "報告",
+				Bindings:  map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}}},
+				Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseDone: "たぶん"},
+			},
+		}
+		invalid(k8sClient.Create(ctx, flow), "spec.terminals")
+	})
+
+	// A phase something binds is not where the flow ends, so saying what
+	// ending there means is a contradiction rather than a harmless extra
+	// line. P8: refuse it at creation instead of deciding at runtime which
+	// of the two statements to believe.
+	It("refuses terminals naming a phase that is bound", func() {
+		flow := &flowv1alpha1.TaskFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: "bound-terminal", Namespace: resourceNamespace},
+			Spec: flowv1alpha1.TaskFlowSpec{
+				Profile:   flowv1alpha1.ProfileInvestigate,
+				Start:     "報告",
+				Bindings:  map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}}},
+				Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{"報告": flowv1alpha1.TerminalSuccess},
+			},
+		}
+		invalid(k8sClient.Create(ctx, flow), "no binding of its own")
+	})
+
+	DescribeTable("refuses a flow declaring what a name the framework owns means",
+		func(reserved flowv1alpha1.Phase) {
+			flow := &flowv1alpha1.TaskFlow{
+				ObjectMeta: metav1.ObjectMeta{Name: "terminal-" + strings.ToLower(string(reserved)), Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskFlowSpec{
+					Profile:   flowv1alpha1.ProfileInvestigate,
+					Start:     "報告",
+					Bindings:  map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}}},
+					Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{reserved: flowv1alpha1.TerminalSuccess},
+				},
+			}
+			invalid(k8sClient.Create(ctx, flow), "not the flow's to declare")
 		},
 		Entry("Escalated", flowv1alpha1.PhaseEscalated),
 		Entry("Failed", flowv1alpha1.PhaseFailed),

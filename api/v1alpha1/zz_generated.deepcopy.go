@@ -299,6 +299,13 @@ func (in *TaskFlowSpec) DeepCopyInto(out *TaskFlowSpec) {
 			(*out)[key] = *val.DeepCopy()
 		}
 	}
+	if in.Terminals != nil {
+		in, out := &in.Terminals, &out.Terminals
+		*out = make(map[Phase]TerminalSeverity, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.MaxInFlight != nil {
 		in, out := &in.MaxInFlight, &out.MaxInFlight
 		*out = new(int32)
