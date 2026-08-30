@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -37,8 +38,12 @@ import (
 const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 	phaseReport      flowv1alpha1.Phase = "報告"
-	handlerName                         = "cnp-reader"
+	// phaseBroken is an ending a flow can declare to be a failure — an
+	// ordinary name its author chose, like every other phase here.
+	phaseBroken flowv1alpha1.Phase = "失敗"
 )
+
+const handlerName = "cnp-reader"
 
 // Every spec gets its own names. Sharing them let one spec's leftover Job —
 // nothing deletes those — decide the next spec's outcome, which is how two of
@@ -51,6 +56,11 @@ type fixture struct {
 	ctx        context.Context
 	name       string
 	reconciler *TaskReconciler
+	// events is where the reconciler's own event recorder writes. envtest
+	// runs no event sink worth reading back, and a spec wants to assert what
+	// was announced rather than that something was; a fake recorder is the
+	// only way to see it.
+	events *events.FakeRecorder
 	// taskUID is set by makeTask once the Task exists. DeferCleanup unwinds
 	// LIFO, so the Job cleanup registered in newFixture runs last, after the
 	// Task itself is already gone. Reading its UID at cleanup time would find
@@ -65,7 +75,11 @@ func newFixture() *fixture {
 		ctx:  context.Background(),
 		name: fmt.Sprintf("run-%d", specCounter),
 	}
-	fx.reconciler = &TaskReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	// Buffered well past what any one spec produces: a FakeRecorder drops
+	// events once its channel is full, which would turn "nothing was
+	// announced" into a passing assertion for the wrong reason.
+	fx.events = events.NewFakeRecorder(16)
+	fx.reconciler = &TaskReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: fx.events}
 	DeferCleanup(func() {
 		// The reconciler's Jobs outlive their Task here: envtest has no
 		// garbage collector, so ownerReferences do not remove them.
@@ -101,6 +115,21 @@ func (fx *fixture) makeFlow(mut ...func(*flowv1alpha1.TaskFlow)) *flowv1alpha1.T
 	Expect(k8sClient.Create(fx.ctx, f)).To(Succeed())
 	DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, f) })
 	return f
+}
+
+// announced drains whatever the reconciler recorded, so a spec can say what
+// was said rather than only that something was. Reading a channel that is
+// empty must not block, so it stops as soon as nothing more is waiting.
+func (fx *fixture) announced() []string {
+	var out []string
+	for {
+		select {
+		case e := <-fx.events.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
 }
 
 // directoriesOf is the vocabulary the controller injected into the Job: the

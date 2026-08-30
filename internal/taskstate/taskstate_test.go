@@ -33,6 +33,7 @@ const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 	phaseReport      flowv1alpha1.Phase = "報告"
 	phaseDone        flowv1alpha1.Phase = "おわり"
+	phaseGave        flowv1alpha1.Phase = "失敗"
 )
 
 // The directories the example flow declares.
@@ -40,14 +41,31 @@ const (
 	dirOK   = "ok"
 	dirMore = "more"
 	dirSent = "sent"
+
+	// The handler the example flow binds to its second phase.
+	handlerDiscord = "discord"
 )
 
 func flow() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	return map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 		phaseInvestigate: {Handler: "cnp-reader", Next: map[flowv1alpha1.Phase]string{phaseReport: dirOK, phaseInvestigate: dirMore}},
-		phaseReport:      {Handler: "discord", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
+		phaseReport:      {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
 	}
 }
+
+// specOf is the flow as this package now reads it: the edges, what its
+// endings mean, and how long a finished task sticks around, in one value.
+func specOf(
+	bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding,
+	terminals map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity,
+	t *flowv1alpha1.TTLSpec,
+) *flowv1alpha1.TaskFlowSpec {
+	return &flowv1alpha1.TaskFlowSpec{Bindings: bindings, Terminals: terminals, TTL: t}
+}
+
+// spec is the example flow with nothing declared about its endings and no
+// ttl — the shape every flow had before either existed.
+func spec() *flowv1alpha1.TaskFlowSpec { return specOf(flow(), nil, nil) }
 
 func TestVisitedComesFromHistory(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
@@ -97,7 +115,7 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 		CurrentRun:   &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
 	}
 	res := transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 1}
-	Advance(s, flow(), dirMore, res, "s3://bucket/task/2/", nil, at)
+	Advance(s, spec(), dirMore, res, "s3://bucket/task/2/", at)
 
 	if len(s.History) != 1 {
 		t.Fatalf("history has %d entries, want 1", len(s.History))
@@ -129,7 +147,7 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 		RunID:      1,
 		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
 	}
-	Advance(s, flow(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, "", nil, at)
+	Advance(s, spec(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, "", at)
 	if s.CurrentRun != nil {
 		t.Fatal("a finished task has nothing in flight; a stale currentRun would make a late verdict look owned")
 	}
@@ -152,7 +170,7 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 		Outcome: transition.OutcomeStructural,
 		Detail:  "directory ok selects more than one status",
 	}
-	Advance(s, flow(), dirOK, res, "", nil, at)
+	Advance(s, spec(), dirOK, res, "", at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
@@ -178,7 +196,7 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 // the edge.
 func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-		phaseReport: {Handler: "discord", Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
+		phaseReport: {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
 	}
 	s := &flowv1alpha1.TaskStatus{
 		Phase:      phaseReport,
@@ -187,7 +205,7 @@ func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	res := transition.Result{Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeDeclined, Detail: "handler declined"}
-	Advance(s, bindings, dirSent, res, "", ttl(time.Hour, 168*time.Hour), now)
+	Advance(s, specOf(bindings, nil, ttl(time.Hour, 168*time.Hour)), dirSent, res, "", now)
 
 	if s.CurrentRun != nil {
 		t.Fatal("a task that landed on Escalated has nothing in flight")
@@ -215,6 +233,73 @@ func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
 	}
 	if s.CurrentRun == nil || s.CurrentRun.Phase != phaseInvestigate || s.CurrentRun.RunID != 1 {
 		t.Fatalf("currentRun = %+v, want %q at run 1", s.CurrentRun, phaseInvestigate)
+	}
+}
+
+// A task that ran to an ending its flow calls a failure has finished
+// normally — the handler concluded, the edge was declared, the outcome is
+// Declared — and none of that is what somebody needs to see first. The
+// condition says the news is bad, and the ttl keeps the evidence around long
+// enough for them to come and read it.
+func TestAdvanceToADeclaredFailureNeedsAHuman(t *testing.T) {
+	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+		phaseReport: {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{phaseGave: dirSent}},
+	}
+	terminals := map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalFailure}
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      1,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+	}
+	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
+	res := transition.Result{Next: phaseGave, Outcome: transition.OutcomeDeclared, Detail: "the policy does not cover 3 namespaces"}
+	Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, "", now)
+
+	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready condition = %+v, want False — nothing else says this ended badly", cond)
+	}
+	if cond.Reason != ReasonHandlerFailed {
+		t.Fatalf("reason = %q, want %q; the outcome here is Declared, which is true and not the point",
+			cond.Reason, ReasonHandlerFailed)
+	}
+	if cond.Message != res.Detail {
+		t.Fatalf("message = %q, want the detail carried through", cond.Message)
+	}
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: now.Add(168 * time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+168h — a failure swept away in an hour is a failure nobody reads", s.ExpiresAt)
+	}
+	if s.CurrentRun != nil {
+		t.Fatal("a task at one of its flow's endings has nothing in flight")
+	}
+}
+
+// The same phase, the same edge, the same outcome — only the flow's word for
+// it differs. Declaring an ending a success must leave every one of those
+// three behaviours exactly where it was before terminals existed.
+func TestAdvanceToADeclaredSuccessSaysNothing(t *testing.T) {
+	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+		phaseReport: {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
+	}
+	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
+	for name, terminals := range map[string]map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+		"declared a success": {phaseDone: flowv1alpha1.TerminalSuccess},
+		"never declared":     nil,
+	} {
+		s := &flowv1alpha1.TaskStatus{
+			Phase:      phaseReport,
+			RunID:      1,
+			CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+		}
+		res := transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}
+		Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, "", now)
+
+		if cond := meta.FindStatusCondition(s.Conditions, ConditionReady); cond != nil {
+			t.Fatalf("%s: Ready condition = %+v, want none — nobody has to look at this", name, cond)
+		}
+		if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: now.Add(time.Hour)}) {
+			t.Fatalf("%s: expiresAt = %v, want now+1h (ttl.succeeded)", name, s.ExpiresAt)
+		}
 	}
 }
 
@@ -307,7 +392,7 @@ func TestCountersBoundACycle(t *testing.T) {
 			Visited:   Visited(s, flow()),
 			Budget:    s.ReworkBudget,
 		})
-		Advance(s, flow(), dir, res, "", nil, at)
+		Advance(s, spec(), dir, res, "", at)
 		if transition.IsTerminal(flow(), s.Phase) {
 			if s.Phase != flowv1alpha1.PhaseEscalated {
 				t.Fatalf("ended at %q, want Escalated once the budget was spent", s.Phase)
@@ -340,7 +425,7 @@ func TestExpireStampsADeclaredTerminalWithSucceeded(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	status := &flowv1alpha1.TaskStatus{Phase: phaseDone}
 
-	Expire(status, flow(), ttl(time.Hour, 168*time.Hour), now)
+	Expire(status, specOf(flow(), nil, ttl(time.Hour, 168*time.Hour)), now)
 
 	if status.ExpiresAt == nil || !status.ExpiresAt.Equal(&metav1.Time{Time: now.Add(time.Hour)}) {
 		t.Fatalf("expiresAt = %v, want now+1h", status.ExpiresAt)
@@ -352,7 +437,7 @@ func TestExpireStampsReservedPhasesWithFailed(t *testing.T) {
 	for _, phase := range flowv1alpha1.ReservedPhases {
 		status := &flowv1alpha1.TaskStatus{Phase: phase}
 
-		Expire(status, flow(), ttl(time.Hour, 168*time.Hour), now)
+		Expire(status, specOf(flow(), nil, ttl(time.Hour, 168*time.Hour)), now)
 
 		if status.ExpiresAt == nil || !status.ExpiresAt.Equal(&metav1.Time{Time: now.Add(168 * time.Hour)}) {
 			t.Fatalf("%s: expiresAt = %v, want now+168h", phase, status.ExpiresAt)
@@ -363,7 +448,7 @@ func TestExpireStampsReservedPhasesWithFailed(t *testing.T) {
 func TestExpireLeavesARunningTaskAlone(t *testing.T) {
 	status := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2}}
 
-	Expire(status, flow(), ttl(time.Hour, time.Hour), at)
+	Expire(status, specOf(flow(), nil, ttl(time.Hour, time.Hour)), at)
 
 	if status.ExpiresAt != nil {
 		t.Fatalf("a task with a binding to run is not finished; expiresAt = %v", status.ExpiresAt)
@@ -379,7 +464,7 @@ func TestExpireDoesNotMoveADateAlreadyStamped(t *testing.T) {
 
 	// The values here never get read: an already-stamped date makes Expire
 	// return before it looks at ttl at all.
-	Expire(status, flow(), ttl(30*time.Minute, 168*time.Hour), metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)))
+	Expire(status, specOf(flow(), nil, ttl(30*time.Minute, 168*time.Hour)), metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)))
 
 	if !status.ExpiresAt.Equal(&stamped) {
 		t.Fatalf("expiresAt = %v, want the original %v untouched", status.ExpiresAt, stamped)
@@ -387,13 +472,13 @@ func TestExpireDoesNotMoveADateAlreadyStamped(t *testing.T) {
 }
 
 func TestExpireWithoutATTLKeepsTheTask(t *testing.T) {
-	for name, spec := range map[string]*flowv1alpha1.TTLSpec{
+	for name, unusable := range map[string]*flowv1alpha1.TTLSpec{
 		"nil ttl":      nil,
 		"nil duration": {},
 	} {
 		status := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseFailed}
 
-		Expire(status, nil, spec, at)
+		Expire(status, specOf(flow(), nil, unusable), at)
 
 		if status.ExpiresAt != nil {
 			t.Fatalf("%s: expiresAt = %v, want none", name, status.ExpiresAt)

@@ -30,7 +30,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/metrics"
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
@@ -163,6 +166,80 @@ var _ = Describe("finishing a run", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(string(transition.OutcomeDeclined)))
+	})
+
+	// A task can finish perfectly normally and still be carrying bad news:
+	// the run completed, the handler concluded, and the edge it took was one
+	// the flow declared. Nothing about that is visible unless the flow says
+	// which of its endings mean trouble — so when it does, the framework
+	// speaks up in the two places somebody would actually be watching.
+	It("announces an ending the flow declared to be a failure", func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Bindings[phaseInvestigate].Next[phaseBroken] = "error"
+			f.Spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+				phaseReport: flowv1alpha1.TerminalSuccess,
+				phaseBroken: flowv1alpha1.TerminalFailure,
+			}
+		})
+		fx.makeHandler()
+		fx.makeTask()
+		job := start()
+
+		podOf(job, "", terminated(agentName, "error\n3 namespaces have no policy at all"))
+		finish(job, "")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseBroken))
+		Expect(tk.Status.CurrentRun).To(BeNil(), "失敗 has no binding, so the task is done")
+		Expect(tk.Status.History).To(HaveLen(1))
+		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeDeclared)),
+			"the move itself was an ordinary declared edge; what makes it news is the flow calling it a failure")
+
+		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(taskstate.ReasonHandlerFailed))
+
+		Expect(fx.announced()).To(ContainElement(And(
+			HavePrefix("Warning "+taskstate.ReasonHandlerFailed),
+			ContainSubstring("3 namespaces have no policy at all"),
+		)), "the reason the handler gave has to reach whoever is watching events")
+
+		// Each spec gets its own flow name, so this counter starts at zero
+		// and one ending is the whole of what it should have seen.
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.WithLabelValues(
+			fx.name, string(phaseBroken), string(transition.EndingFailure)),
+		)).To(BeNumerically("==", 1), "an alert rule has nothing else to fire on")
+	})
+
+	// The same run, the same edge — only the flow's word for the ending
+	// differs. A success is not news, and the framework has nothing to add.
+	It("says nothing about an ending the flow declared to be a success", func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+				phaseReport: flowv1alpha1.TerminalSuccess,
+			}
+		})
+		fx.makeHandler()
+		fx.makeTask()
+		job := start()
+
+		podOf(job, "", terminated(agentName, "ok\nnothing to report"))
+		finish(job, "")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseReport))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(BeNil(),
+			"nobody has to look at a task that ended the way its flow wanted")
+		Expect(fx.announced()).To(BeEmpty())
+
+		// Counted all the same: the metric is how many tasks ended and how,
+		// not how many went wrong.
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.WithLabelValues(
+			fx.name, string(phaseReport), string(transition.EndingSuccess)),
+		)).To(BeNumerically("==", 1))
 	})
 
 	// A CRD's maxLength validates by rune count (utf8.RuneCountInString), not

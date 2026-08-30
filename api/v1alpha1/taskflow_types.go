@@ -32,6 +32,26 @@ const (
 	ProfileInvestigate Profile = "investigate"
 )
 
+// TerminalSeverity is what reaching one of a flow's endings means.
+//
+// The framework cannot work this out. A status with no binding is where the
+// flow stops, and that is all it knows: 失敗 and おわり are equally just names
+// its author chose, and neither is spelled in a vocabulary the framework
+// owns. So the flow says which of its endings are bad news, and only then can
+// the framework raise its voice about one.
+// +kubebuilder:validation:Enum=Success;Failure
+type TerminalSeverity string
+
+const (
+	// TerminalSuccess is an ending that needs nobody.
+	TerminalSuccess TerminalSeverity = "Success"
+	// TerminalFailure is an ending somebody has to see. The run finished and
+	// the handler concluded; what it concluded is that something is wrong.
+	// This is not Escalated — nothing is undecided — and not Failed, which
+	// is a defect in the flow rather than a finding about the work.
+	TerminalFailure TerminalSeverity = "Failure"
+)
+
 // PhaseBinding says who fills a phase and where each of their answers leads.
 //
 // Next is keyed by the status to move to, and its value is the directory a
@@ -81,6 +101,9 @@ type TTLSpec struct {
 
 // TaskFlowSpec is the topology. It is validated once, when the TaskFlow is
 // created, and not re-derived per task.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.terminals) || self.terminals.all(p, !(p in self.bindings))",message="terminals may only name a phase with no binding of its own, since a phase something binds is not where the flow ends"
+// +kubebuilder:validation:XValidation:rule="!has(self.terminals) || (!('Escalated' in self.terminals) && !('Failed' in self.terminals))",message="Escalated and Failed are the framework's own endings and their meaning is not the flow's to declare"
 type TaskFlowSpec struct {
 	Profile Profile `json:"profile"`
 
@@ -97,6 +120,21 @@ type TaskFlowSpec struct {
 	// Bindings is keyed by phase name.
 	// +kubebuilder:validation:MinProperties=1
 	Bindings map[Phase]PhaseBinding `json:"bindings"`
+
+	// Terminals says what this flow's endings mean. It is keyed by a phase
+	// nothing binds — one of the places a task stops — and says whether
+	// stopping there is good news. A Failure ending is the one thing that
+	// makes the framework speak up about a task that finished: a warning
+	// event, Ready=False, and the longer ttl, so the record is still there
+	// when somebody comes to look.
+	//
+	// Optional, and leaving it out is not the same as saying Success. A flow
+	// that has not declared keeps exactly the silence it had before this
+	// field existed, and its endings are reported as Undeclared rather than
+	// guessed at (P8). Declaring one ending does not oblige the flow to
+	// declare the rest.
+	// +optional
+	Terminals map[Phase]TerminalSeverity `json:"terminals,omitempty"`
 
 	// ReworkBudget caps how many times this flow may send work back. It is
 	// spent at runtime by the controller, never declared per edge — an edge
