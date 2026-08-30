@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -43,7 +44,12 @@ const (
 	phaseBroken flowv1alpha1.Phase = "失敗"
 )
 
-const handlerName = "cnp-reader"
+const (
+	handlerName   = "cnp-reader"
+	sidecarImage  = "example.invalid/agent-sidecar:v0"
+	workspaceVol  = "work"
+	workspacePath = "/workspace"
+)
 
 // Every spec gets its own names. Sharing them let one spec's leftover Job —
 // nothing deletes those — decide the next spec's outcome, which is how two of
@@ -79,7 +85,7 @@ func newFixture() *fixture {
 	// events once its channel is full, which would turn "nothing was
 	// announced" into a passing assertion for the wrong reason.
 	fx.events = events.NewFakeRecorder(16)
-	fx.reconciler = &TaskReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: fx.events}
+	fx.reconciler = &TaskReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: fx.events, SidecarImage: sidecarImage}
 	DeferCleanup(func() {
 		// The reconciler's Jobs outlive their Task here: envtest has no
 		// garbage collector, so ownerReferences do not remove them.
@@ -155,14 +161,20 @@ func (fx *fixture) makeHandler(mut ...func(*flowv1alpha1.TaskHandler)) {
 	h := &flowv1alpha1.TaskHandler{
 		ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
 		Spec: flowv1alpha1.TaskHandlerSpec{
-			Phase:  phaseInvestigate,
-			Runner: flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
+			Phase:     phaseInvestigate,
+			Runner:    flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
+			Workspace: &flowv1alpha1.WorkspaceSpec{Volume: workspaceVol, MountPath: workspacePath},
 			JobTemplate: &flowv1alpha1.JobTemplate{
 				Template: flowv1alpha1.PodTemplate{
 					Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
 					Spec: corev1.PodSpec{
-						RestartPolicy: corev1.RestartPolicyNever,
-						Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+						RestartPolicy:   corev1.RestartPolicyNever,
+						SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To(int64(65533))},
+						Volumes:         []corev1.Volume{{Name: workspaceVol}},
+						Containers: []corev1.Container{{
+							Name: agentName, Image: agentImage,
+							VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: workspacePath}},
+						}},
 					},
 				},
 			},

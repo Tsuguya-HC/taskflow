@@ -77,6 +77,31 @@ type RunnerSpec struct {
 	Type RunnerType `json:"type"`
 }
 
+// WorkspaceSpec says where in the pod the workspace is, which is all the
+// controller needs to put its own containers at both ends of a run: the one
+// that lays the declared directories down before the handler's containers
+// start, and the one that reads back which of them was written into after
+// they finish. Both mount this volume at this path and work under out/ below
+// it. What the volume is backed by, and where the handler's own containers
+// mount it, stay the handler's business — but at least one of the handler's
+// containers has to mount it writably, or the run could only ever come back
+// with nothing to say, and the build is refused rather than let that happen
+// silently.
+type WorkspaceSpec struct {
+	// Volume is the name of an entry in jobTemplate.template.spec.volumes.
+	// +kubebuilder:validation:MinLength=1
+	Volume string `json:"volume"`
+
+	// MountPath is where the injected containers mount that volume, and lay
+	// the declared directories down under <mountPath>/out. The handler's own
+	// containers are free to mount the same volume at any path — it is the
+	// same underlying volume either way — as long as at least one of them
+	// mounts it writably; the directory names under out/ are what the
+	// contract shares, not the path they are reached through.
+	// +kubebuilder:validation:Pattern=`^/`
+	MountPath string `json:"mountPath"`
+}
+
 // TaskHandlerSpec is the box that fills one phase.
 //
 // There is no field here for a prompt, a model, an API key, a store or a
@@ -109,6 +134,16 @@ type TaskHandlerSpec struct {
 	// Required when runner.type is Job; ignored when it is External.
 	// +optional
 	JobTemplate *JobTemplate `json:"jobTemplate,omitempty"`
+
+	// Workspace is where the controller's own containers find the run's
+	// directories. The template does not name those containers — they are
+	// added when the Job is built, with the framework's image, and a
+	// template that carries a container under one of their names is
+	// refused rather than merged.
+	//
+	// Required when runner.type is Job; ignored when it is External.
+	// +optional
+	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
 
 	// Timeout is the single source of truth for how long a run may take. The
 	// controller writes it into the Job as well, so the kubelet enforces it

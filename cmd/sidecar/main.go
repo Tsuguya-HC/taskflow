@@ -47,11 +47,12 @@ func main() {
 	}
 }
 
-// cmdPrepare and cmdPublish name the two subcommands. Constants rather than
-// literals repeated at each switch and error site.
+// cmdPrepare and cmdPublish name the two subcommands. They are the
+// contract's own names — internal/contract is what the controller's side
+// (runner.BuildJob) reads too, so the two ends cannot drift over a spelling.
 const (
-	cmdPrepare = "prepare"
-	cmdPublish = "publish"
+	cmdPrepare = contract.SubcommandPrepare
+	cmdPublish = contract.SubcommandPublish
 )
 
 func run(args []string) error {
@@ -64,7 +65,7 @@ func run(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("sidecar "+cmd, flag.ContinueOnError)
-	out := fs.String("out", "/workspace/out", "directory the declared directories are created under")
+	out := fs.String(contract.FlagOut, "/workspace/out", "directory the declared directories are created under")
 	termLog := fs.String("termination-log", "/dev/termination-log", "where the answer is written for the controller")
 	if err := fs.Parse(args); err != nil {
 		return err

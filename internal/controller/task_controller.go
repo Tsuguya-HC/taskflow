@@ -62,6 +62,8 @@ type TaskReconciler struct {
 	Recorder events.EventRecorder
 	// Now is the clock deadlines are judged against; nil means the wall clock.
 	Now func() time.Time
+	// SidecarImage is what runs prepare and publish in every Job.
+	SidecarImage string
 }
 
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -554,12 +556,13 @@ func (r *TaskReconciler) ensureJob(
 	}
 
 	job, err := runner.BuildJob(runner.Input{
-		Task:        task,
-		Handler:     handler,
-		Phase:       run.Phase,
-		RunID:       run.RunID,
-		PrevRunID:   previousRun(task),
-		Directories: transition.Directories(flow.Spec.Bindings, run.Phase),
+		Task:         task,
+		Handler:      handler,
+		Phase:        run.Phase,
+		RunID:        run.RunID,
+		PrevRunID:    previousRun(task),
+		Directories:  transition.Directories(flow.Spec.Bindings, run.Phase),
+		SidecarImage: r.SidecarImage,
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it

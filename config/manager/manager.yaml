@@ -63,6 +63,12 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --sidecar-image=$(SIDECAR_IMAGE)
+        # The image the controller puts into every Job. An env var rather
+        # than a literal in args so an overlay can replace it by name.
+        env:
+          - name: SIDECAR_IMAGE
+            value: agent-sidecar:latest
         image: controller:latest
         name: manager
         ports:

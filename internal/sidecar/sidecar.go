@@ -41,9 +41,13 @@ const (
 	// uid, can then neither add a directory the flow did not declare nor
 	// remove one it did. The kernel enforces the vocabulary.
 	modeOut fs.FileMode = 0o555
-	// modeDir is what each declared directory gets. Group-writable, because
-	// the agent is a different user in the same group — the pod's fsGroup.
-	modeDir fs.FileMode = 0o775
+	// modeDir is what each declared directory gets. Writable by anyone,
+	// because the agent runs as whatever uid and gid the handler chose and
+	// nothing here should oblige it to line up with prepare's. "Anyone" is
+	// the containers sharing this pod's volume, which is the same set a
+	// group-writable mode would admit once the pod's fsGroup is applied —
+	// it just no longer asks the handler to know what group that is.
+	modeDir fs.FileMode = 0o777
 	// modeOpen is what out is temporarily at while its children are made.
 	modeOpen fs.FileMode = 0o755
 
