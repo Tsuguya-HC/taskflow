@@ -29,7 +29,9 @@ type Phase string
 const (
 	// PhaseEscalated is where a task goes when no single answer came back:
 	// nothing was written, several things were, the run timed out, or the flow
-	// no longer explains what did arrive. A human takes it from here.
+	// no longer explains what did arrive. A flow may also send work here on
+	// purpose, by naming it in a phase's next. A human takes it from here
+	// either way; the outcome recorded says which of the two happened.
 	PhaseEscalated Phase = "Escalated"
 
 	// PhaseFailed is where a task goes when the flow itself is broken —
@@ -38,10 +40,17 @@ const (
 	PhaseFailed Phase = "Failed"
 )
 
-// ReservedPhases may not be used as a binding key or declared as a
-// destination. They are the two outcomes the framework owns, and a flow that
-// could bind them could route "no answer" onto its own success path — which
-// is the one thing this design will not allow to be one line away.
+// ReservedPhases may not be used as a binding key. They are the two outcomes
+// the framework owns, and a flow that could bind them could route "no answer"
+// onto its own success path — which is the one thing this design will not
+// allow to be one line away.
+//
+// As destinations the two part company. A phase's next may name Escalated,
+// and doing so is what gives the run a directory for "I will not decide
+// this" — a conclusion, reached and reported, rather than the silence of a
+// run that died. Failed may not be named: it says the definition is broken,
+// and a definition does not get to conclude that about itself. Both rules
+// live in transition.Next.
 //
 // The CEL rule on TaskHandlerSpec.Phase (taskhandler_types.go) re-encodes
 // these two names as a literal, since CEL cannot reference a Go const —

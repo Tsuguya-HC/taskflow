@@ -18,6 +18,7 @@ package transition
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
@@ -49,10 +50,20 @@ func cnpCheck() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 
 // The directories the example flow declares.
 const (
-	dirOK   = "ok"
-	dirMore = "more"
-	dirSent = "sent"
+	dirOK       = "ok"
+	dirMore     = "more"
+	dirSent     = "sent"
+	dirEscalate = "escalate"
 )
+
+// withEscalate is the same flow with an escalate directory on 調査: somewhere
+// for a run that will not conclude to say so, rather than only being able to
+// write nothing.
+func withEscalate() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
+	b := cnpCheck()
+	b[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = dirEscalate
+	return b
+}
 
 func visited(phases ...flowv1alpha1.Phase) map[flowv1alpha1.Phase]bool {
 	v := map[flowv1alpha1.Phase]bool{}
@@ -138,6 +149,55 @@ func TestUndeclaredDirectoryEscalates(t *testing.T) {
 	}
 }
 
+// Writing into the declared escalate directory and writing nothing at all
+// both stop the task at Escalated, and that is the point of separating them:
+// the outcome is what tells a human whether there is a report to read or a
+// run that died. Run 1 of the first real task escalated on max-turns and was
+// indistinguishable in the history from a deliberate hand-off.
+func TestDeclaredEscalationIsNotSilence(t *testing.T) {
+	got := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, Directory: dirEscalate,
+		Visited: visited(phaseInvestigate), Budget: 2})
+	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeDeclined {
+		t.Fatalf("got %q/%q, want Escalated/Declined (%s)", got.Next, got.Outcome, got.Detail)
+	}
+	if got.Budget != 2 {
+		t.Fatalf("budget = %d, want it untouched — nothing runs after Escalated", got.Budget)
+	}
+	if !strings.Contains(got.Detail, dirEscalate) {
+		t.Fatalf("detail = %q, want the directory named in it", got.Detail)
+	}
+
+	silent := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, NoAnswer: "the run ran out of turns",
+		Visited: visited(phaseInvestigate), Budget: 2})
+	if silent.Next != got.Next {
+		t.Fatalf("silence went to %q and a declared escalation to %q; both stop the task", silent.Next, got.Next)
+	}
+	if silent.Outcome == got.Outcome {
+		t.Fatalf("both outcomes are %q; the history cannot tell a report from a run that died", got.Outcome)
+	}
+}
+
+// An exhausted budget is what turns a rework into an escalation, and a
+// declared escalation must not be mistaken for one: it is where the flow says
+// to go, not the last resort after the flow ran out of room.
+func TestDeclaredEscalationDoesNotConsultTheBudget(t *testing.T) {
+	got := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, Directory: dirEscalate,
+		Visited: visited(phaseInvestigate, flowv1alpha1.PhaseEscalated), Budget: 0})
+	if got.Outcome != OutcomeDeclined {
+		t.Fatalf("outcome = %q, want Declined even with no budget and Escalated marked visited", got.Outcome)
+	}
+}
+
+// The declaration is also what gets created on disk, so declaring the edge is
+// the whole of what gives the run somewhere to write.
+func TestTheEscalateDirectoryIsCreated(t *testing.T) {
+	dirs := Directories(withEscalate(), phaseInvestigate)
+	slices.Sort(dirs)
+	if !slices.Equal(dirs, []string{dirEscalate, dirMore, dirOK}) {
+		t.Fatalf("directories = %v, want the escalate directory among them", dirs)
+	}
+}
+
 func TestBrokenFlowFails(t *testing.T) {
 	t.Run("a phase with no binding", func(t *testing.T) {
 		got := Next(Input{Bindings: cnpCheck(), Phase: "存在しない", Directory: dirOK, Budget: 2})
@@ -152,6 +212,19 @@ func TestBrokenFlowFails(t *testing.T) {
 		b := cnpCheck()
 		b[phaseInvestigate].Next["中止"] = dirOK
 		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 2})
+		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
+			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
+		}
+	})
+
+	// Escalated may be declared as a destination; Failed may not. It says the
+	// definition is broken, and a definition does not get to conclude that
+	// about itself — so naming it is the break, and the outcome says so
+	// rather than reading like an edge the flow was entitled to declare.
+	t.Run("Failed declared as a destination", func(t *testing.T) {
+		b := cnpCheck()
+		b[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
+		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: "broken", Visited: visited(phaseInvestigate), Budget: 2})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
 			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
 		}

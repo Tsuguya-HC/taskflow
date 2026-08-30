@@ -128,6 +128,43 @@ var _ = Describe("finishing a run", func() {
 		Expect(h.FinishedAt).NotTo(BeNil())
 	})
 
+	// The one reserved name a flow may send work to. Declaring it is what
+	// puts an escalate directory in front of the run, so "I will not decide
+	// this" becomes something the handler writes and explains rather than
+	// something inferred from its silence. Running it against a real
+	// apiserver also shows that nothing in the CRD refuses Escalated as a
+	// key of next — the reservation is on binding it, not on reaching it.
+	It("records a declared escalation as the handler's own conclusion", func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = "escalate"
+		})
+		fx.makeHandler()
+		fx.makeTask()
+		job := start()
+
+		Expect(directoriesOf(job)).To(ConsistOf("escalate", "ok"),
+			"the run cannot write into a directory the flow never declared")
+
+		podOf(job, "", terminated(agentName, "escalate\nthe policy is ambiguous; a human should decide"))
+		finish(job, "")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(tk.Status.History).To(HaveLen(1))
+		h := tk.Status.History[0]
+		Expect(h.Directory).To(Equal("escalate"))
+		Expect(h.Outcome).To(Equal(string(transition.OutcomeDeclined)),
+			"a run that chose to escalate is not the same event as one that said nothing")
+		Expect(h.Reason).To(ContainSubstring("a human should decide"))
+
+		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(string(transition.OutcomeDeclined)))
+	})
+
 	// A CRD's maxLength validates by rune count (utf8.RuneCountInString), not
 	// byte count — three-byte characters make that distinction visible: 1200
 	// of them is 3600 bytes but only 1200 runes, so a byte-counted cap would

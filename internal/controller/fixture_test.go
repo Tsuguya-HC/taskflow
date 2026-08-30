@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -100,6 +101,25 @@ func (fx *fixture) makeFlow(mut ...func(*flowv1alpha1.TaskFlow)) *flowv1alpha1.T
 	Expect(k8sClient.Create(fx.ctx, f)).To(Succeed())
 	DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, f) })
 	return f
+}
+
+// directoriesOf is the vocabulary the controller injected into the Job: the
+// directories the run will find in front of it, and so the only answers it
+// can give. Reading it back from the Job is how a spec checks what the flow's
+// declaration actually reaches the pod as.
+func directoriesOf(job *batchv1.Job) []string {
+	for _, c := range job.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.Name != runner.EnvDirectories {
+				continue
+			}
+			var dirs []string
+			Expect(json.Unmarshal([]byte(e.Value), &dirs)).To(Succeed())
+			return dirs
+		}
+	}
+	Fail("the Job carries no " + runner.EnvDirectories)
+	return nil
 }
 
 func (fx *fixture) makeHandler(mut ...func(*flowv1alpha1.TaskHandler)) {
