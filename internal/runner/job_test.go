@@ -95,8 +95,8 @@ func TestCarriesTheTemplateThrough(t *testing.T) {
 	if got := job.Spec.Template.Labels["role"]; got != handlerName {
 		t.Fatalf("pod label role = %q; a policy selects on this and we must not touch it", got)
 	}
-	if len(job.Spec.Template.Labels) != 1 {
-		t.Fatalf("pod labels = %v; the controller adds none", job.Spec.Template.Labels)
+	if len(job.Spec.Template.Labels) != 2 {
+		t.Fatalf("pod labels = %v; the controller adds one, its own bookkeeping", job.Spec.Template.Labels)
 	}
 }
 
@@ -112,6 +112,28 @@ func TestSetsOnlyItsOwnLabel(t *testing.T) {
 		if strings.ContainsAny(v, "調査報告") {
 			t.Fatalf("label %s carries a status name (%q), which Kubernetes rejects", k, v)
 		}
+	}
+}
+
+// The Job carries the UID so the controller can find its own work; the pod
+// carries it so anyone else can find the pods of one task without first
+// working out what the Job was called. Without it the only route is
+// batch.kubernetes.io/job-name, which means knowing the run number.
+func TestTaskUIDReachesThePod(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+
+	if got := job.Spec.Template.Labels[LabelTaskUID]; got != taskUID {
+		t.Fatalf("pod label %s = %q, want the task's UID", LabelTaskUID, got)
+	}
+}
+
+func TestRefusesATemplateClaimingAFrameworkLabel(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.JobTemplate.Template.Metadata.Labels[LabelTaskUID] = "someone-elses-uid"
+	})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+	if !errors.Is(err, ErrReservedField) {
+		t.Fatalf("err = %v; a template claiming the task UID must be refused, not overwritten", err)
 	}
 }
 
@@ -411,6 +433,9 @@ func TestFrameworkAnnotationsReachThePod(t *testing.T) {
 	}
 	if h.Spec.JobTemplate.Template.Metadata.Annotations[AnnotationRunID] != "" {
 		t.Fatal("the handler's template was edited in place")
+	}
+	if _, claimed := h.Spec.JobTemplate.Template.Metadata.Labels[LabelTaskUID]; claimed {
+		t.Fatal("the handler's template labels were edited in place")
 	}
 }
 

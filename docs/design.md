@@ -409,8 +409,13 @@ properties 無しで出力し、structural schema がそこにぶら下がる po
 **コントローラは Pod の中身を組み立てない。** 注入するのは以下だけ:
 
 - `ownerReferences`（Task 所有）と決定論的な Job 名
-- ラベル `flow.tgy.io/task-uid`（**自分の Job を見つけるための帳簿**。値は UID なので
-  ラベル値の文字種制約に収まる）
+- ラベル `flow.tgy.io/task-uid`（**帳簿**。値は UID なのでラベル値の文字種制約に収まる）。
+  **Job と Pod テンプレートの両方に付ける** — Job 側はコントローラが自分の Job を見つけるため、
+  Pod 側は Task 単位で Pod を引くため。2026-08-26 まで Job にしか付いておらず、
+  `kubectl get pods` や hubble で 1 つの Task の Pod をまとめて見るには
+  `batch.kubernetes.io/job-name` 経由（= 先に run 番号を知る）しかなかった。
+  完了検知が Pod を引くのはこのラベルではなく `batch.kubernetes.io/controller-uid`
+  （その run の Job の Pod だけが要る）で、そこは変わらない
 
 - env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
 - annotation: `flow.tgy.io/phase`（UTF-8 のまま）、`flow.tgy.io/run-id`、
@@ -465,8 +470,9 @@ handler の secret が `FLOW_INPUT` / `FLOW_PHASE` 越しに漏れることも�
 
 `fieldRef` が読むのは **Pod の** annotation であって Job のではない。なのでコントローラは framework の
 annotation（`flow.tgy.io/*`）を Job と Pod template の両方に付ける（2026-08-25 まで Job にしか
-付いておらず、上の YAML は実は届いていなかった）。template 側が `flow.tgy.io/` を名乗っていたら
-上書きせず拒否する（書いた値と違うものが走る方が悪い）。
+付いておらず、上の YAML は実は届いていなかった）。ラベル `flow.tgy.io/task-uid` も同じく両方に付く。
+template 側が `flow.tgy.io/` を名乗っていたら**ラベルも annotation も**上書きせず拒否する
+（書いた値と違うものが走る方が悪い）。
 
 run 番号が要るのは**配管**であってエージェントではない:
 
@@ -984,7 +990,7 @@ termination message の 2 行目以降（`internal/collect` が読む free text�
 
 ## 8. 権限・ポリシーの外出し
 
-コントローラが書き込むラベルは**自分の Job を見つけるための 1 枚だけ**。
+コントローラが書き込むラベルは**1 種類だけ**（Job と Pod の両方に付くが、名前は 1 つ）。
 
 ```yaml
 labels:
