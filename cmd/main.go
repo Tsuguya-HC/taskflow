@@ -89,12 +89,12 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
 	if sidecarImage == "" {
 		setupLog.Error(errors.New("--sidecar-image is required"), "No sidecar image to put into Jobs")
 		os.Exit(1)
 	}
-
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will

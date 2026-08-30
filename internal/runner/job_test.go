@@ -69,8 +69,14 @@ func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 						ServiceAccountName: "agent-cnp-reader",
 						SecurityContext:    &corev1.PodSecurityContext{RunAsUser: ptr(agentUID)},
 						Volumes:            []corev1.Volume{{Name: workspaceVol}},
-						InitContainers:     []corev1.Container{{Name: "fetch", Image: "example.invalid/fetch:v0"}},
-						Containers:         []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
+						InitContainers: []corev1.Container{{
+							Name: "fetch", Image: "example.invalid/fetch:v0",
+							VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: workspaceAt}},
+						}},
+						Containers: []corev1.Container{{
+							Name: "agent", Image: "example.invalid/agent:v0",
+							VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: workspaceAt}},
+						}},
 					},
 				},
 			},
@@ -524,6 +530,18 @@ func TestInjectsPrepareAndPublish(t *testing.T) {
 		if !*c.SecurityContext.ReadOnlyRootFilesystem || !*c.SecurityContext.RunAsNonRoot {
 			t.Fatalf("%s is not locked down: %+v", c.Name, c.SecurityContext)
 		}
+		if got := c.Resources.Requests.Cpu().String(); got != "10m" {
+			t.Fatalf("%s requests.cpu = %s, want 10m", c.Name, got)
+		}
+		if got := c.Resources.Requests.Memory().String(); got != "16Mi" {
+			t.Fatalf("%s requests.memory = %s, want 16Mi", c.Name, got)
+		}
+		if got := c.Resources.Limits.Memory().String(); got != "64Mi" {
+			t.Fatalf("%s limits.memory = %s, want 64Mi", c.Name, got)
+		}
+		if _, capped := c.Resources.Limits[corev1.ResourceCPU]; capped {
+			t.Fatalf("%s sets a cpu limit; a throttled sidecar could stall the run it is meant to seal", c.Name)
+		}
 	}
 	if prepare.Args[0] != "prepare" || publish.Args[0] != "publish" {
 		t.Fatalf("subcommands = %q / %q", prepare.Args[0], publish.Args[0])
@@ -581,10 +599,20 @@ func TestSidecarUIDStepsPastTheHandlers(t *testing.T) {
 // with, which the sidecar cannot be sure to differ from. Refused rather
 // than guessed: the closing of out/ is the whole enforcement.
 func TestRefusesAPodWithNoUID(t *testing.T) {
-	h := handler(func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Template.Spec.SecurityContext = nil })
-	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
-	if !errors.Is(err, ErrWorkspace) {
-		t.Fatalf("err = %v; want a refusal to close out/ against an unknown uid", err)
+	cases := map[string]func(*flowv1alpha1.TaskHandler){
+		"no securityContext at all": func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Template.Spec.SecurityContext = nil },
+		"securityContext with no runAsUser": func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.JobTemplate.Template.Spec.SecurityContext = &corev1.PodSecurityContext{}
+		},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := handler(mut)
+			_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+			if !errors.Is(err, ErrWorkspace) {
+				t.Fatalf("err = %v; want a refusal to close out/ against an unknown uid", err)
+			}
+		})
 	}
 }
 
@@ -601,6 +629,53 @@ func TestRefusesAWorkspaceVolumeTheTemplateLacks(t *testing.T) {
 	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
 	if !errors.Is(err, ErrWorkspace) {
 		t.Fatalf("err = %v; a mount of a volume that is not there fails at the kubelet, too late and too quietly", err)
+	}
+}
+
+// A workspace that no handler container mounts is refused even though
+// prepare and publish still work fine off the volume named in the spec:
+// none of the handler's own containers could read what prepare laid down or
+// write an answer into it, so the run could only ever come back silent.
+// Where it is mounted does not matter — only that some container does.
+func TestRefusesAWorkspaceNoContainerMounts(t *testing.T) {
+	cases := map[string]func(*flowv1alpha1.TaskHandler){
+		"no mount at all": func(h *flowv1alpha1.TaskHandler) {
+			spec := &h.Spec.JobTemplate.Template.Spec
+			spec.InitContainers[0].VolumeMounts = nil
+			spec.Containers[0].VolumeMounts = nil
+		},
+		// A read-only mount ends the same way an absent one does: prepare's
+		// declared directories exist, but nothing of the handler's can write
+		// an answer into them.
+		"only a read-only mount": func(h *flowv1alpha1.TaskHandler) {
+			spec := &h.Spec.JobTemplate.Template.Spec
+			spec.InitContainers[0].VolumeMounts[0].ReadOnly = true
+			spec.Containers[0].VolumeMounts[0].ReadOnly = true
+		},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := handler(mut)
+			_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+			if !errors.Is(err, ErrWorkspace) {
+				t.Fatalf("err = %v; a handler whose containers never mount the workspace writably can never answer", err)
+			}
+		})
+	}
+}
+
+// The mount path is the handler's own choice, not something checkWorkspace
+// verifies: prepare and publish always mount at ws.MountPath, but a handler
+// container is free to mount the same volume anywhere else and still see the
+// directories prepare lays down, because it is the same underlying volume.
+func TestAcceptsAWorkspaceMountedAtADifferentPath(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		spec := &h.Spec.JobTemplate.Template.Spec
+		spec.InitContainers[0].VolumeMounts[0].MountPath = "/elsewhere"
+		spec.Containers[0].VolumeMounts[0].MountPath = "/elsewhere"
+	})
+	if _, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage}); err != nil {
+		t.Fatalf("BuildJob: %v; mounting the workspace at a different path from the injected containers' must still be accepted", err)
 	}
 }
 

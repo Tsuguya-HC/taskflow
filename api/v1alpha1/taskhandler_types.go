@@ -83,16 +83,21 @@ type RunnerSpec struct {
 // start, and the one that reads back which of them was written into after
 // they finish. Both mount this volume at this path and work under out/ below
 // it. What the volume is backed by, and where the handler's own containers
-// mount it, stay the handler's business.
+// mount it, stay the handler's business — but at least one of the handler's
+// containers has to mount it writably, or the run could only ever come back
+// with nothing to say, and the build is refused rather than let that happen
+// silently.
 type WorkspaceSpec struct {
 	// Volume is the name of an entry in jobTemplate.template.spec.volumes.
 	// +kubebuilder:validation:MinLength=1
 	Volume string `json:"volume"`
 
-	// MountPath is where the injected containers mount that volume. The
-	// declared directories are created under <mountPath>/out, so the
-	// handler's containers must see the same volume at the same path if
-	// they want to write there under the same names.
+	// MountPath is where the injected containers mount that volume, and lay
+	// the declared directories down under <mountPath>/out. The handler's own
+	// containers are free to mount the same volume at any path — it is the
+	// same underlying volume either way — as long as at least one of them
+	// mounts it writably; the directory names under out/ are what the
+	// contract shares, not the path they are reached through.
 	// +kubebuilder:validation:Pattern=`^/`
 	MountPath string `json:"mountPath"`
 }

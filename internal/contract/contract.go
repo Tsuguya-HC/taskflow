@@ -69,4 +69,16 @@ const (
 	// has — the sidecar creates exactly these, and the agent can see them
 	// on disk anyway.
 	EnvDirectories = "FLOW_DIRECTORIES"
+
+	// SubcommandPrepare and SubcommandPublish name the sidecar binary's two
+	// subcommands. The Job template the controller builds (runner.BuildJob)
+	// and the sidecar's own argument parsing (cmd/sidecar) both read these,
+	// so the two ends of the verdict protocol cannot drift over a spelling.
+	SubcommandPrepare = "prepare"
+	SubcommandPublish = "publish"
+
+	// FlagOut is the name of the flag both the injected Args and the
+	// sidecar's flag set use for the directory the declared directories are
+	// created under.
+	FlagOut = "out"
 )

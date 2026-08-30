@@ -958,11 +958,23 @@ handler の作者に「65532 を使うな」と覚えさせない。宣言ディ
 0777 にしたのも同じ理由 — fsGroup を prepare の group に合わせる規則を消すため。emptyDir は Pod で
 閉じているので、「誰でも」が指す範囲は group 方式と変わらない。
 
-**handler に残る条件は 1 つ、Pod の `securityContext.runAsUser` を書くこと。** 未設定だと uid は
-各イメージの USER で決まり、コントローラからは見えない。distroless nonroot のような普通の base が
-sidecar と同じ 65532 で走るので、「たまたま同じ」が handler のどこにも現れずに起きる。P8 に従い
-推測せず拒否する（Vault Agent Injector が container レベルだけ見て拒否し #261 で不評を買ったのと
-違い、Pod レベルの宣言で足りる）。
+**handler に残る条件は 2 つ**、どちらも欠けると runner は BuildJob を拒否する（P8 に従い推測せず拒否
+する — Vault Agent Injector が container レベルだけ見て拒否し #261 で不評を買ったのと違い、Pod
+レベルの宣言で足りる）:
+
+1. **Pod の `securityContext.runAsUser` を書くこと。** 未設定だと uid は各イメージの USER で決まり、
+   コントローラからは見えない。distroless nonroot のような普通の base が sidecar と同じ 65532 で
+   走るので、「たまたま同じ」が handler のどこにも現れずに起きる。
+2. **handler のコンテナのうち少なくとも 1 つが workspace の volume を書き込み可でマウントしていること。**
+   （どのパスにマウントするかは handler の自由 — 同じ volume なら別パスでも成立する。）マウントが
+   無ければ宣言ディレクトリを読むことも答えを書くこともできず、run は最初から沈黙が確定している。
+   それが分かるのが Job が終わって `publish` が「答え無し」を報告したときでは遅すぎるので、
+   BuildJob の時点で拒否する。
+
+root で走る handler を runner が拒否することはない — それは Pod のセキュリティポリシー（PSA /
+Kyverno）の層の仕事で、コントローラはポリシーを持たない（§2 P2）。uid 分離が守っているのは
+エージェント（操られうる側）が prepare の閉じた out/ を開け直せないことであって、handler の
+作者が root を選ばないことではない。
 
 `prepare` は繰り返し実行しても既存の中身を消さない。
 

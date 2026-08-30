@@ -86,6 +86,13 @@ var _ = Describe("starting a task", func() {
 			"whatever a policy selects on comes from the handler untouched")
 		Expect(job.OwnerReferences).To(HaveLen(1))
 
+		inits := job.Spec.Template.Spec.InitContainers
+		Expect(inits).To(HaveLen(2), "the controller's own containers, injected ahead of the handler's")
+		Expect(inits[0].Name).To(Equal(runner.PrepareContainer))
+		Expect(inits[1].Name).To(Equal(runner.PublishContainer))
+		Expect(inits[1].Image).To(Equal(sidecarImage),
+			"the injected containers must run the image the reconciler was wired with, not one made up in the test")
+
 		for _, c := range job.Spec.Template.Spec.Containers {
 			found := false
 			for _, e := range c.Env {
@@ -362,7 +369,7 @@ var _ = Describe("starting a task", func() {
 			},
 		})
 
-		racer := &TaskReconciler{Client: intercepted, Scheme: k8sClient.Scheme()}
+		racer := &TaskReconciler{Client: intercepted, Scheme: k8sClient.Scheme(), SidecarImage: sidecarImage}
 		_, err = racer.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: resourceNamespace}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(forcedNotFound).To(BeTrue(), "the race this test drives at was never exercised")

@@ -8685,10 +8685,12 @@ spec:
                 properties:
                   mountPath:
                     description: |-
-                      MountPath is where the injected containers mount that volume. The
-                      declared directories are created under <mountPath>/out, so the
-                      handler's containers must see the same volume at the same path if
-                      they want to write there under the same names.
+                      MountPath is where the injected containers mount that volume, and lay
+                      the declared directories down under <mountPath>/out. The handler's own
+                      containers are free to mount the same volume at any path — it is the
+                      same underlying volume either way — as long as at least one of them
+                      mounts it writably; the directory names under out/ are what the
+                      contract shares, not the path they are reached through.
                     pattern: ^/
                     type: string
                   volume:

@@ -169,7 +169,10 @@ func (fx *fixture) makeHandler(mut ...func(*flowv1alpha1.TaskHandler)) {
 						RestartPolicy:   corev1.RestartPolicyNever,
 						SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To(int64(65533))},
 						Volumes:         []corev1.Volume{{Name: "work"}},
-						Containers:      []corev1.Container{{Name: agentName, Image: agentImage}},
+						Containers: []corev1.Container{{
+							Name: agentName, Image: agentImage,
+							VolumeMounts: []corev1.VolumeMount{{Name: "work", MountPath: "/workspace"}},
+						}},
 					},
 				},
 			},

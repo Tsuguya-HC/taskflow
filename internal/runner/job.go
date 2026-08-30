@@ -311,8 +311,9 @@ func checkReserved(t *flowv1alpha1.JobTemplate) error {
 
 // checkWorkspace refuses a handler the injected containers could not be
 // fitted into: no workspace, a workspace naming a volume the template does
-// not have, a container already wearing an injected name, or a uid
-// arrangement under which prepare's closing of out/ would not hold.
+// not have, a handler container that never mounts it writably, a container
+// already wearing an injected name, or a uid arrangement under which
+// prepare's closing of out/ would not hold.
 func checkWorkspace(h *flowv1alpha1.TaskHandler) error {
 	ws := h.Spec.Workspace
 	if ws == nil {
@@ -322,10 +323,26 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler) error {
 	if !slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == ws.Volume }) {
 		return fmt.Errorf("%w: workspace volume %q is not among the template's volumes", ErrWorkspace, ws.Volume)
 	}
+	mounted := false
 	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
 		if c.Name == PrepareContainer || c.Name == PublishContainer {
 			return fmt.Errorf("%w: container %q is the framework's to add", ErrReservedField, c.Name)
 		}
+		if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == ws.Volume && !m.ReadOnly }) {
+			mounted = true
+		}
+	}
+	// Only whether it's mounted matters, not where — a handler container can
+	// mount the workspace at any path. What is refused is none of the
+	// handler's own containers mounting it writably: a read-only mount ends
+	// the same way an absent one does, since prepare's declared directories
+	// exist but nothing of the handler's can write an answer into them; and
+	// with no writable mount at all, prepare would still lay out/ down and
+	// publish would still seal it, but no container of the handler's could
+	// read the declared directories or write an answer into them either — so
+	// either way the run could only ever come back with nothing to say.
+	if !mounted {
+		return fmt.Errorf("%w: no container in handler %q's template mounts workspace volume %q writably", ErrWorkspace, h.Name, ws.Volume)
 	}
 	return checkUID(pod)
 }
@@ -377,8 +394,8 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 // written to is the kubelet's, not the volume's.
 func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image string, uid int64) {
 	out := path.Join(ws.MountPath, outDir)
-	prepare := sidecarContainer(PrepareContainer, image, "prepare", out, ws, uid, false)
-	publish := sidecarContainer(PublishContainer, image, "publish", out, ws, uid, true)
+	prepare := sidecarContainer(PrepareContainer, image, contract.SubcommandPrepare, out, ws, uid, false)
+	publish := sidecarContainer(PublishContainer, image, contract.SubcommandPublish, out, ws, uid, true)
 	publish.RestartPolicy = ptr(corev1.ContainerRestartPolicyAlways)
 	pod.InitContainers = append([]corev1.Container{prepare, publish}, pod.InitContainers...)
 }
@@ -391,7 +408,7 @@ func sidecarContainer(name, image, subcommand, out string, ws flowv1alpha1.Works
 	return corev1.Container{
 		Name:  name,
 		Image: image,
-		Args:  []string{subcommand, "--out", out},
+		Args:  []string{subcommand, "--" + contract.FlagOut, out},
 		SecurityContext: &corev1.SecurityContext{
 			RunAsUser:                ptr(uid),
 			RunAsNonRoot:             ptr(true),
