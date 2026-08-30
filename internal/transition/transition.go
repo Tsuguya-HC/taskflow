@@ -41,6 +41,13 @@ const (
 	// OutcomeNoAnswer is a run that produced no single directory — none, or
 	// several, or it ran out of time. Not an approval; a human looks at it.
 	OutcomeNoAnswer Outcome = "NoAnswer"
+	// OutcomeDeclined followed a declared edge to Escalated: the flow gave
+	// this phase a directory meaning "I will not decide this", and the run
+	// wrote into it. It ends the same way NoAnswer does — a human takes it
+	// from here — but it is the opposite kind of event. Silence is what a
+	// run that crashed, ran out of turns or said nothing leaves behind;
+	// this is a run that finished, chose, and left a report saying why.
+	OutcomeDeclined Outcome = "Declined"
 	// OutcomeStructural is a broken flow rather than a bad judgement. It is
 	// not repaired and not handed to a human as work — it is a spec defect.
 	OutcomeStructural Outcome = "Structural"
@@ -82,13 +89,16 @@ type Result struct {
 //
 // The framework's own answers are built in and cannot be declared away:
 //
-//	a phase with no binding      -> Failed     (the flow is broken)
-//	two statuses, one directory  -> Failed     (likewise; undecidable)
-//	no single directory written  -> Escalated  (nothing was decided)
-//	a directory the flow omits   -> Escalated  (it cannot explain what arrived)
-//	a rework with no budget left -> Escalated
+//	a phase with no binding        -> Failed     (the flow is broken)
+//	two statuses, one directory    -> Failed     (likewise; undecidable)
+//	Failed named as a destination  -> Failed     (likewise; not an answer)
+//	no single directory written    -> Escalated  (nothing was decided)
+//	a directory the flow omits     -> Escalated  (it cannot explain what arrived)
+//	a rework with no budget left   -> Escalated
 //
-// Every other move follows the flow's own table.
+// Every other move follows the flow's own table — including an edge the flow
+// declared to Escalated, which is the one reserved name it may name as a
+// destination.
 func Next(in Input) Result {
 	binding, bound := in.Bindings[in.Phase]
 	if !bound {
@@ -141,6 +151,40 @@ func Next(in Input) Result {
 			Outcome: OutcomeNoAnswer,
 			Budget:  in.Budget,
 			Detail:  "no status is declared for directory " + in.Directory,
+		}
+	}
+
+	// Escalated is the one reserved name a flow may send work to. Declaring
+	// it gives the phase a directory for "I will not decide this", so a run
+	// that cannot conclude has somewhere to say so — and to leave a report —
+	// instead of only being able to fall silent. What it cannot do is bind
+	// Escalated to a handler, which is the thing the reservation is actually
+	// protecting: no answer must never be one line away from the success
+	// path (§5). This is a destination, so that concern does not arise.
+	//
+	// It skips the visited and budget questions below because Escalated is
+	// terminal on its own say-so: there is no run after it to spend on.
+	if dest == flowv1alpha1.PhaseEscalated {
+		return Result{
+			Next:    flowv1alpha1.PhaseEscalated,
+			Outcome: OutcomeDeclined,
+			Budget:  in.Budget,
+			Detail:  "escalated on purpose, by writing into " + in.Directory,
+		}
+	}
+
+	// Failed is not. It means the definition is broken, which is never
+	// something the work gets to conclude, so a flow naming it as a
+	// destination is itself the defect. Admission is meant to refuse that
+	// flow at creation (#17); until it does — and for a flow edited after a
+	// task started — the task stops here rather than reaching Failed under
+	// an outcome that would read like a declared edge.
+	if dest == flowv1alpha1.PhaseFailed {
+		return Result{
+			Next:    flowv1alpha1.PhaseFailed,
+			Outcome: OutcomeStructural,
+			Budget:  in.Budget,
+			Detail:  "directory " + in.Directory + " is declared to reach Failed, which is the framework's own",
 		}
 	}
 

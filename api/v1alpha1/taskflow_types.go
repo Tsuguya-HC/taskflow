@@ -70,8 +70,10 @@ type TTLSpec struct {
 	// +kubebuilder:default="1h"
 	// +optional
 	Succeeded *metav1.Duration `json:"succeeded,omitempty"`
-	// Failed applies to a task the framework stopped: Escalated or Failed.
-	// A human has to look at those, so they wait longer.
+	// Failed applies to a task that stopped at Escalated or Failed, however
+	// it got there — the framework forcing a stop or the flow itself
+	// declaring the edge with next. A human has to look at those, so they
+	// wait longer.
 	// +kubebuilder:default="168h"
 	// +optional
 	Failed *metav1.Duration `json:"failed,omitempty"`

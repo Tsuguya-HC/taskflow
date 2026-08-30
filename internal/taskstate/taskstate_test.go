@@ -172,6 +172,34 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 	}
 }
 
+// An Escalated edge the flow itself declared with next is still a status a
+// human has to look at: TTL must land on ttl.failed, not ttl.succeeded.
+// What decides the TTL is whether a human needs to look, not who declared
+// the edge.
+func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
+	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+		phaseReport: {Handler: "discord", Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
+	}
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      1,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+	}
+	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
+	res := transition.Result{Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeDeclined, Detail: "handler declined"}
+	Advance(s, bindings, dirSent, res, "", ttl(time.Hour, 168*time.Hour), now)
+
+	if s.CurrentRun != nil {
+		t.Fatal("a task that landed on Escalated has nothing in flight")
+	}
+	if len(s.History) != 1 || s.History[0].Outcome != string(transition.OutcomeDeclined) {
+		t.Fatalf("history = %+v, want one entry recording Declined", s.History)
+	}
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: now.Add(168 * time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+168h (ttl.failed) even though the flow declared this edge itself", s.ExpiresAt)
+	}
+}
+
 func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{}
 	Begin(s, phaseInvestigate, 2)

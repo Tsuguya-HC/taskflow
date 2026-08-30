@@ -145,8 +145,10 @@ spec:
                   failed:
                     default: 168h
                     description: |-
-                      Failed applies to a task the framework stopped: Escalated or Failed.
-                      A human has to look at those, so they wait longer.
+                      Failed applies to a task that stopped at Escalated or Failed, however
+                      it got there — the framework forcing a stop or the flow itself
+                      declaring the edge with next. A human has to look at those, so they
+                      wait longer.
                     type: string
                   succeeded:
                     default: 1h

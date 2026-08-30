@@ -82,9 +82,12 @@ func Advance(
 	status.Phase = res.Next
 	status.ReworkBudget = res.Budget
 
-	// Escalated and Failed are the framework saying it could not go on. The
-	// history entry says so too, but a condition is where kubectl and
-	// anything watching for stuck tasks look first.
+	// Whether the task landed on Escalated/Failed because the framework
+	// could not go on, or because the flow itself declared that edge with
+	// next, nothing moves forward until a human looks. The history entry
+	// says so too, but a condition is where kubectl and anything watching
+	// for stuck tasks look first; res.Outcome as the reason is what tells
+	// the two paths apart.
 	if res.Next.IsReserved() {
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type:    ConditionReady,
@@ -109,9 +112,10 @@ func Advance(
 
 // Expire stamps the deletion time of a task that has stopped, and does
 // nothing to one that has not. Which of the two durations applies is the
-// framework's call, not the flow's: Escalated and Failed are the framework
-// saying it could not go on, so they take ttl.failed; any other terminal
-// phase is one the flow itself declared, and takes ttl.succeeded. A nil ttl
+// framework's call, not the flow's: Escalated and Failed take ttl.failed —
+// even when the flow itself declared the edge with next — because both mean
+// a human has to look before the task can move again; every other terminal
+// phase needs no such review and takes ttl.succeeded. A nil ttl
 // or a nil duration leaves the task to be cleaned up by hand.
 //
 // A date already stamped is never moved: Expire is called both the instant
