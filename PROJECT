@@ -7,7 +7,7 @@ domain: tgy.io
 layout:
 - go.kubebuilder.io/v4
 projectName: taskflow
-repo: github.com/Tsuguya/taskflow
+repo: github.com/Tsuguya-HC/taskflow
 resources:
 - api:
     crdVersion: v1
@@ -15,7 +15,7 @@ resources:
   domain: tgy.io
   group: flow
   kind: TaskFlow
-  path: github.com/Tsuguya/taskflow/api/v1alpha1
+  path: github.com/Tsuguya-HC/taskflow/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -23,7 +23,7 @@ resources:
   domain: tgy.io
   group: flow
   kind: TaskHandler
-  path: github.com/Tsuguya/taskflow/api/v1alpha1
+  path: github.com/Tsuguya-HC/taskflow/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -32,6 +32,6 @@ resources:
   domain: tgy.io
   group: flow
   kind: Task
-  path: github.com/Tsuguya/taskflow/api/v1alpha1
+  path: github.com/Tsuguya-HC/taskflow/api/v1alpha1
   version: v1alpha1
 version: "3"

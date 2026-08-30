@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Tsuguya/taskflow/internal/contract"
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
 // termLog returns the path to a termination-log file that already exists,

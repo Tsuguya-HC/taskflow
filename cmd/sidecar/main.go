@@ -36,8 +36,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Tsuguya/taskflow/internal/contract"
-	"github.com/Tsuguya/taskflow/internal/sidecar"
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
+	"github.com/Tsuguya-HC/taskflow/internal/sidecar"
 )
 
 func main() {

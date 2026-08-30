@@ -23,8 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
-	"github.com/Tsuguya/taskflow/internal/transition"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
 var at = metav1.Time{}

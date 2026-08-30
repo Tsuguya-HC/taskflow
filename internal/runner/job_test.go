@@ -27,7 +27,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 )
 
 const (

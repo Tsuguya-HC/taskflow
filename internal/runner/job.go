@@ -46,8 +46,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
-	"github.com/Tsuguya/taskflow/internal/contract"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
 // LabelTaskUID, the annotation names and the FLOW_* environment variable

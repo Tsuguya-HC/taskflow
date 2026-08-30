@@ -1,4 +1,4 @@
-module github.com/Tsuguya/taskflow
+module github.com/Tsuguya-HC/taskflow
 
 go 1.26.0
 

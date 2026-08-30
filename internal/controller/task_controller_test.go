@@ -29,8 +29,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	flowv1alpha1 "github.com/Tsuguya/taskflow/api/v1alpha1"
-	"github.com/Tsuguya/taskflow/internal/runner"
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/runner"
 )
 
 // Shared by the tests in this package.
