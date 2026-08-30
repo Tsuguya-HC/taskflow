@@ -8673,6 +8673,32 @@ spec:
                   controller writes it into the Job as well, so the kubelet enforces it
                   too; setting activeDeadlineSeconds yourself is rejected.
                 type: string
+              workspace:
+                description: |-
+                  Workspace is where the controller's own containers find the run's
+                  directories. The template does not name those containers — they are
+                  added when the Job is built, with the framework's image, and a
+                  template that carries a container under one of their names is
+                  refused rather than merged.
+
+                  Required when runner.type is Job; ignored when it is External.
+                properties:
+                  mountPath:
+                    description: |-
+                      MountPath is where the injected containers mount that volume. The
+                      declared directories are created under <mountPath>/out, so the
+                      handler's containers must see the same volume at the same path if
+                      they want to write there under the same names.
+                    pattern: ^/
+                    type: string
+                  volume:
+                    description: Volume is the name of an entry in jobTemplate.template.spec.volumes.
+                    minLength: 1
+                    type: string
+                required:
+                - mountPath
+                - volume
+                type: object
             required:
             - phase
             type: object

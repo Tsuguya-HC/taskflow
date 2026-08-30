@@ -345,7 +345,7 @@ var _ = Describe("starting a task", func() {
 
 		var handler flowv1alpha1.TaskHandler
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: resourceNamespace}, &handler)).To(Succeed())
-		job, err := runner.BuildJob(runner.Input{Task: tk, Handler: &handler, Phase: phaseInvestigate, RunID: 1})
+		job, err := runner.BuildJob(runner.Input{Task: tk, Handler: &handler, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Create(ctx, job)).To(Succeed())
 

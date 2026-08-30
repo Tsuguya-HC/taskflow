@@ -33,8 +33,12 @@ import (
 const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 
-	taskUID     = "7f2a-uid"
-	handlerName = "cnp-reader"
+	taskUID      = "7f2a-uid"
+	handlerName  = "cnp-reader"
+	sidecarImage = "example.invalid/agent-sidecar:v0"
+	workspaceVol = "work"
+	workspaceAt  = "/workspace"
+	agentUID     = int64(65533)
 )
 
 func task() *flowv1alpha1.Task {
@@ -51,9 +55,10 @@ func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 	h := &flowv1alpha1.TaskHandler{
 		ObjectMeta: metav1.ObjectMeta{Name: handlerName, Namespace: "claude-code"},
 		Spec: flowv1alpha1.TaskHandlerSpec{
-			Phase:   phaseInvestigate,
-			Runner:  flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
-			Timeout: &metav1.Duration{Duration: 1200000000000}, // 20m
+			Phase:     phaseInvestigate,
+			Runner:    flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
+			Timeout:   &metav1.Duration{Duration: 1200000000000}, // 20m
+			Workspace: &flowv1alpha1.WorkspaceSpec{Volume: workspaceVol, MountPath: workspaceAt},
 			JobTemplate: &flowv1alpha1.JobTemplate{
 				Template: flowv1alpha1.PodTemplate{
 					// The label a policy selects on, written by whoever
@@ -62,7 +67,9 @@ func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyNever,
 						ServiceAccountName: "agent-cnp-reader",
-						InitContainers:     []corev1.Container{{Name: "prepare", Image: "example.invalid/prepare:v0"}},
+						SecurityContext:    &corev1.PodSecurityContext{RunAsUser: ptr(agentUID)},
+						Volumes:            []corev1.Volume{{Name: workspaceVol}},
+						InitContainers:     []corev1.Container{{Name: "fetch", Image: "example.invalid/fetch:v0"}},
 						Containers:         []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
 					},
 				},
@@ -77,6 +84,9 @@ func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 
 func build(t *testing.T, in Input) *batchv1.Job {
 	t.Helper()
+	if in.SidecarImage == "" {
+		in.SidecarImage = sidecarImage
+	}
 	job, err := BuildJob(in)
 	if err != nil {
 		t.Fatalf("BuildJob: %v", err)
@@ -131,7 +141,7 @@ func TestRefusesATemplateClaimingAFrameworkLabel(t *testing.T) {
 	h := handler(func(h *flowv1alpha1.TaskHandler) {
 		h.Spec.JobTemplate.Template.Metadata.Labels[LabelTaskUID] = "someone-elses-uid"
 	})
-	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
 	if !errors.Is(err, ErrReservedField) {
 		t.Fatalf("err = %v; a template claiming the task UID must be refused, not overwritten", err)
 	}
@@ -443,7 +453,7 @@ func TestRefusesATemplateClaimingAFrameworkAnnotation(t *testing.T) {
 	h := handler(func(h *flowv1alpha1.TaskHandler) {
 		h.Spec.JobTemplate.Template.Metadata.Annotations = map[string]string{AnnotationRunID: "7"}
 	})
-	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
 	if !errors.Is(err, ErrReservedField) {
 		t.Fatalf("err = %v; a template lying about the run number must be refused, not overwritten", err)
 	}
@@ -477,5 +487,141 @@ func TestNoDirectoriesIsAnEmptyList(t *testing.T) {
 		if e.Name == EnvDirectories && e.Value != "[]" {
 			t.Fatalf("%s = %q; a terminal phase declares nothing, which is still a list", EnvDirectories, e.Value)
 		}
+	}
+}
+
+// The two ends of the verdict protocol are one program, and the end inside
+// the pod is put there by the end that reads it back — not copied into
+// every handler. prepare goes first so out/ exists before anything of the
+// handler's runs; publish is a native sidecar so it is stopped, and answers,
+// once the main containers are done.
+func TestInjectsPrepareAndPublish(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	inits := job.Spec.Template.Spec.InitContainers
+
+	if len(inits) != 3 || inits[0].Name != PrepareContainer || inits[1].Name != PublishContainer || inits[2].Name != "fetch" {
+		names := make([]string, 0, len(inits))
+		for _, c := range inits {
+			names = append(names, c.Name)
+		}
+		t.Fatalf("initContainers = %v; want prepare, publish, then the handler's own", names)
+	}
+	prepare, publish := inits[0], inits[1]
+
+	for _, c := range []corev1.Container{prepare, publish} {
+		if c.Image != sidecarImage {
+			t.Fatalf("%s image = %q, want the controller's", c.Name, c.Image)
+		}
+		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != workspaceVol || c.VolumeMounts[0].MountPath != workspaceAt {
+			t.Fatalf("%s mounts = %v; want only the workspace at its declared path", c.Name, c.VolumeMounts)
+		}
+		if got := c.Args[len(c.Args)-1]; got != workspaceAt+"/out" {
+			t.Fatalf("%s --out = %q; the layout is the framework's, under the handler's path", c.Name, got)
+		}
+		if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != preferredSidecarUID {
+			t.Fatalf("%s runs as %v, want %d", c.Name, c.SecurityContext, preferredSidecarUID)
+		}
+		if !*c.SecurityContext.ReadOnlyRootFilesystem || !*c.SecurityContext.RunAsNonRoot {
+			t.Fatalf("%s is not locked down: %+v", c.Name, c.SecurityContext)
+		}
+	}
+	if prepare.Args[0] != "prepare" || publish.Args[0] != "publish" {
+		t.Fatalf("subcommands = %q / %q", prepare.Args[0], publish.Args[0])
+	}
+	if prepare.RestartPolicy != nil {
+		t.Fatal("prepare must run to completion, not restart")
+	}
+	if publish.RestartPolicy == nil || *publish.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatal("publish must be a native sidecar, or it would never be stopped and never answer")
+	}
+	if prepare.VolumeMounts[0].ReadOnly {
+		t.Fatal("prepare has to write the directories")
+	}
+	if !publish.VolumeMounts[0].ReadOnly {
+		t.Fatal("publish only reads; give it no more")
+	}
+}
+
+// The sidecars read the vocabulary from the same environment as everyone
+// else, so injecting them must happen before the environment is laid on.
+func TestInjectedContainersGetTheVocabulary(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1, Directories: []string{"ok"}})
+	for _, c := range job.Spec.Template.Spec.InitContainers[:2] {
+		found := false
+		for _, e := range c.Env {
+			if e.Name == EnvDirectories && e.Value == `["ok"]` {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s env = %v; without %s it cannot lay the directories down", c.Name, c.Env, EnvDirectories)
+		}
+	}
+}
+
+// out/ is closed by uid: prepare owns it and leaves it 0555, and only a
+// container running as that same uid could chmod it open again. So the uid
+// is picked around whatever the handler uses, rather than being a number
+// the handler's author has to know to avoid.
+func TestSidecarUIDStepsPastTheHandlers(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		spec := &h.Spec.JobTemplate.Template.Spec
+		spec.SecurityContext.RunAsUser = ptr(preferredSidecarUID)
+		spec.Containers[0].SecurityContext = &corev1.SecurityContext{RunAsUser: ptr(preferredSidecarUID - 1)}
+	})
+	job := build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
+	for _, c := range job.Spec.Template.Spec.InitContainers[:2] {
+		if got := *c.SecurityContext.RunAsUser; got != preferredSidecarUID-2 {
+			t.Fatalf("%s runs as %d; the pod and a container already use %d and %d", c.Name, got, preferredSidecarUID, preferredSidecarUID-1)
+		}
+	}
+}
+
+// A pod that does not say its uid runs as whatever each image was built
+// with, which the sidecar cannot be sure to differ from. Refused rather
+// than guessed: the closing of out/ is the whole enforcement.
+func TestRefusesAPodWithNoUID(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Template.Spec.SecurityContext = nil })
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+	if !errors.Is(err, ErrWorkspace) {
+		t.Fatalf("err = %v; want a refusal to close out/ against an unknown uid", err)
+	}
+}
+
+func TestRefusesAHandlerWithNoWorkspace(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) { h.Spec.Workspace = nil })
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+	if !errors.Is(err, ErrWorkspace) {
+		t.Fatalf("err = %v; a run with nowhere for its directories can never answer", err)
+	}
+}
+
+func TestRefusesAWorkspaceVolumeTheTemplateLacks(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) { h.Spec.Workspace.Volume = "elsewhere" })
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+	if !errors.Is(err, ErrWorkspace) {
+		t.Fatalf("err = %v; a mount of a volume that is not there fails at the kubelet, too late and too quietly", err)
+	}
+}
+
+// A template that already has a container under an injected name is
+// refused, like a template claiming a framework label: merging would run
+// something other than what the YAML says.
+func TestRefusesATemplateUsingAnInjectedName(t *testing.T) {
+	for _, name := range []string{PrepareContainer, PublishContainer} {
+		h := handler(func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.JobTemplate.Template.Spec.Containers = append(h.Spec.JobTemplate.Template.Spec.Containers,
+				corev1.Container{Name: name, Image: "example.invalid/mine:v0"})
+		})
+		_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+		if !errors.Is(err, ErrReservedField) {
+			t.Fatalf("container %q: err = %v; want a refusal", name, err)
+		}
+	}
+}
+
+func TestRefusesToBuildWithoutASidecarImage(t *testing.T) {
+	if _, err := BuildJob(Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1}); err == nil {
+		t.Fatal("a Job with no publish container can never answer; building one must fail")
 	}
 }

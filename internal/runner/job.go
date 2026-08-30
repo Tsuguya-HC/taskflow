@@ -24,10 +24,12 @@ limitations under the License.
 // selects on, service accounts, images, commands — none of that is decided
 // here: what a pod must carry to run in a given cluster is that cluster's
 // business, and this package has no opinion about which policy engine is
-// listening. What it adds is the little that execution itself requires:
-// somewhere to hang ownership, a name that repeats, the deadline, and enough
-// context for the handler's own containers to know which task and phase they
-// are serving.
+// listening. What it adds is what execution itself requires: somewhere to
+// hang ownership, a name that repeats, the deadline, enough context for the
+// handler's own containers to know which task and phase they are serving —
+// and the two containers that lay the run's vocabulary down and read the
+// answer back, which are the controller's end of the verdict protocol and
+// so are put there by the controller rather than copied into every handler.
 package runner
 
 import (
@@ -37,12 +39,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -78,6 +82,28 @@ const (
 	// truncation, so the part that gets cut is not the only thing telling
 	// two task names apart.
 	taskHashLength = 8
+
+	// PrepareContainer and PublishContainer name the two containers the
+	// controller puts into every Job. The prefix keeps them out of the way
+	// of whatever the handler calls its own, the same way FLOW_ does for
+	// the environment; a template that uses one of these names anyway is
+	// refused rather than merged.
+	PrepareContainer = "flow-prepare"
+	PublishContainer = "flow-publish"
+
+	// outDir is where the declared directories go, under the workspace's
+	// mount path. The layout is the framework's; the place is the handler's.
+	outDir = "out"
+
+	// preferredSidecarUID is the uid the injected containers run as when
+	// nothing of the handler's does: distroless' nonroot, which is also the
+	// image's own USER. prepare creates out/ under its uid and closes it to
+	// 0555, and that is a closed door only if no other container in the pod
+	// can chmod it back open — which is to say, only if none shares the
+	// uid. So the uid is chosen per Job, stepping down from here past any
+	// the template names, rather than being a number the handler's author
+	// has to know to avoid.
+	preferredSidecarUID int64 = 65532
 )
 
 // Input is everything the Job is built from.
@@ -96,11 +122,20 @@ type Input struct {
 	// run can give. Order is not significant; they are sorted on the way
 	// into the environment so the same declaration always renders the same.
 	Directories []string
+	// SidecarImage runs prepare and publish. It is the controller's to pick,
+	// not the handler's: the two ends of the verdict protocol are one
+	// program, and the end inside the pod has to be the version the end in
+	// the controller was written against.
+	SidecarImage string
 }
 
 // ErrReservedField reports a jobTemplate that sets something the design keeps
 // for itself.
 var ErrReservedField = errors.New("jobTemplate sets a reserved field")
+
+// ErrWorkspace reports a handler whose workspace the injected containers
+// could not use as written.
+var ErrWorkspace = errors.New("workspace is not usable")
 
 // JobName is the name the Job for this attempt will always have. It is
 // deterministic so that creating it twice is a conflict rather than a second
@@ -144,10 +179,17 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	if err := checkReserved(in.Handler.Spec.JobTemplate); err != nil {
 		return nil, err
 	}
+	if in.SidecarImage == "" {
+		return nil, errors.New("runner: no sidecar image to inject")
+	}
+	if err := checkWorkspace(in.Handler); err != nil {
+		return nil, err
+	}
 
 	// A deep copy: the handler is a cached object shared with everything else
 	// reading it, and the caller would not expect building a Job to edit it.
 	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
+	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec))
 
 	// The framework's annotations go on the pod as well as the Job: a
 	// container reads them through the downward API, and that reads the pod
@@ -265,6 +307,110 @@ func checkReserved(t *flowv1alpha1.JobTemplate) error {
 		return fmt.Errorf("%w: restartPolicy must be Never — a restarted pod would find the last attempt's directories", ErrReservedField)
 	}
 	return nil
+}
+
+// checkWorkspace refuses a handler the injected containers could not be
+// fitted into: no workspace, a workspace naming a volume the template does
+// not have, a container already wearing an injected name, or a uid
+// arrangement under which prepare's closing of out/ would not hold.
+func checkWorkspace(h *flowv1alpha1.TaskHandler) error {
+	ws := h.Spec.Workspace
+	if ws == nil {
+		return fmt.Errorf("%w: handler %q declares no workspace, and the run's directories have nowhere to go", ErrWorkspace, h.Name)
+	}
+	pod := &h.Spec.JobTemplate.Template.Spec
+	if !slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == ws.Volume }) {
+		return fmt.Errorf("%w: workspace volume %q is not among the template's volumes", ErrWorkspace, ws.Volume)
+	}
+	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+		if c.Name == PrepareContainer || c.Name == PublishContainer {
+			return fmt.Errorf("%w: container %q is the framework's to add", ErrReservedField, c.Name)
+		}
+	}
+	return checkUID(pod)
+}
+
+// checkUID makes sure the pod says what uid its containers run as. The
+// injected containers close out/ against that uid by running as a different
+// one, and a uid left to each image is not one they can be sure to differ
+// from — an image built on the same base as the sidecar's runs as the same
+// nonroot user, and the handler would not show it anywhere. Measured, not
+// assumed (2026-08-30): at the same uid, chmod and mkdir under out/ both
+// succeed.
+func checkUID(pod *corev1.PodSpec) error {
+	if pod.SecurityContext == nil || pod.SecurityContext.RunAsUser == nil {
+		return fmt.Errorf("%w: securityContext.runAsUser is not set on the pod; the run's directories are closed against the uid the handler runs as, and unset means whatever each image was built with", ErrWorkspace)
+	}
+	return nil
+}
+
+// sidecarUID picks a uid none of the template's containers run as, so what
+// prepare closes stays closed. It starts at the image's own user and steps
+// down past every uid the template names, at the pod level or on a
+// container. checkUID has already made sure the pod level is set, so
+// stepping past what is named is stepping past what will run.
+func sidecarUID(pod *corev1.PodSpec) int64 {
+	used := map[int64]bool{}
+	if pod.SecurityContext != nil && pod.SecurityContext.RunAsUser != nil {
+		used[*pod.SecurityContext.RunAsUser] = true
+	}
+	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+		if c.SecurityContext != nil && c.SecurityContext.RunAsUser != nil {
+			used[*c.SecurityContext.RunAsUser] = true
+		}
+	}
+	uid := preferredSidecarUID
+	for used[uid] {
+		uid--
+	}
+	return uid
+}
+
+// injectSidecars puts prepare and publish in front of the template's own
+// init containers, so out/ is laid down before anything of the handler's
+// runs, and so publish — a native sidecar, kept alive until the main
+// containers are done and then stopped — is already waiting when they start.
+//
+// Both mount only the workspace, and publish mounts it read-only: sealing
+// reads which directories are non-empty and touches nothing (measured
+// 2026-08-30 with the mount read-only). The termination log the answer is
+// written to is the kubelet's, not the volume's.
+func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image string, uid int64) {
+	out := path.Join(ws.MountPath, outDir)
+	prepare := sidecarContainer(PrepareContainer, image, "prepare", out, ws, uid, false)
+	publish := sidecarContainer(PublishContainer, image, "publish", out, ws, uid, true)
+	publish.RestartPolicy = ptr(corev1.ContainerRestartPolicyAlways)
+	pod.InitContainers = append([]corev1.Container{prepare, publish}, pod.InitContainers...)
+}
+
+// sidecarContainer is one of the two, differing only in subcommand and in
+// whether it may write. The security context is the whole restricted set,
+// spelled out rather than inherited: the pod's is the handler's choice for
+// its own containers, and the uid in it is exactly what these must not share.
+func sidecarContainer(name, image, subcommand, out string, ws flowv1alpha1.WorkspaceSpec, uid int64, readOnly bool) corev1.Container {
+	return corev1.Container{
+		Name:  name,
+		Image: image,
+		Args:  []string{subcommand, "--out", out},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr(uid),
+			RunAsNonRoot:             ptr(true),
+			AllowPrivilegeEscalation: ptr(false),
+			ReadOnlyRootFilesystem:   ptr(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		},
+		VolumeMounts: []corev1.VolumeMount{{Name: ws.Volume, MountPath: ws.MountPath, ReadOnly: readOnly}},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("10m"),
+				corev1.ResourceMemory: resource.MustParse("16Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+		},
+	}
 }
 
 // injectEnv adds the task's identity to every container. Existing entries are

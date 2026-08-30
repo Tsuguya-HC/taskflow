@@ -270,26 +270,29 @@ spec:
   phase: Review
   runner:
     type: Job                         # 組み込み。将来 Sandbox を足す口
+  workspace:                          # 判定の回収に使うボリュームの所在（§7）
+    volume: work
+    mountPath: /workspace
   jobTemplate:                        # ← 自前の最小型（§4「自前型の理由」）
     template:
       spec:
         runtimeClassName: kata
         serviceAccountName: agent-readonly   # 既存 SA を参照するだけ（生成しない）
         restartPolicy: Never
-        initContainers:
-          - name: prepare           # in/ 取得 + bindings.next の宣言から out/{ok,more,...}/ 作成 + パーミッション
-            ...
-          - name: publish           # ネイティブサイドカー（restartPolicy: Always）
-            restartPolicy: Always
-            ...
+        securityContext: {runAsUser: 65533}  # 必須。out/ はこの uid に対して閉じられる
+        volumes:
+          - {name: work, emptyDir: {}}
         containers:
           - name: agent
+            volumeMounts: [{name: work, mountPath: /workspace}]
             ...
   timeout: 30m
   maxInfraRetries: 2
 ```
 
 **フィールドはこれで全部。** プロンプト・モデル・API キー・store・通知先は 1 つも無い。
+`out/` を敷く init コンテナと判定を読み戻すサイドカーは**コントローラが Job 生成時に足す**ので、
+handler の作者はその存在を知らなくてよい（§7）。
 
 ### handler は AI 専用ではない（P7 の見返り）
 
@@ -492,8 +495,8 @@ annotation なら「配管だけが読む」が書ける。
 `<path>/ok` に書いた時点で正しい場所に落ちるので**誰も番号を知らなくてよい**。
 その構成では annotation は使われない。**どちらを採るかは利用側が選ぶ。**
 
-init・サイドカー・RuntimeClass・SA・volume は全部 home-cluster 側の YAML のまま。
-P2 の分離が保たれる。Pod 層（`template.spec`）は `corev1.PodSpec` 標準そのもの、Job 層だけが
+RuntimeClass・SA・volume・エージェントのコンテナは全部 home-cluster 側の YAML のまま。
+P2 の分離が保たれる（prepare / publish はコントローラの側に移った — §7）。Pod 層（`template.spec`）は `corev1.PodSpec` 標準そのもの、Job 層だけが
 自前型（予約フィールドの節を参照）で、どちらも依存は K8s core API のみ —
 **サードパーティ依存はゼロ**のまま。
 
@@ -882,21 +885,36 @@ sidecar:        SIGTERM を trap → 書かれたディレクトリを検証し�
 
 **framework が持つのはレイアウトであって場所ではない。** 基点は handler が決める。
 
-当初は `TaskHandler.spec.workspace.path` に基点を書かせる構想だったが、**採らなかった**
-（2026-08-25）。コントローラにそのフィールドの消費者が無い — ディレクトリを敷くのも読むのも
-Pod の中のサイドカーで、マウントパスは Pod の形（§2 の責務表では handler の作者のもの）。
-コントローラが値を持ち回るだけのフィールドは P7 に反する。代わりに:
+handler が書くのは `spec.workspace: {volume, mountPath}` — 判定の回収に使うボリュームの名前と、
+それをどこに見せるか。**prepare / publish のコンテナはコントローラが Job 生成時に注入する**
+（2026-08-30、#73）。利用側の pod spec には現れず、handler の作者はサイドカーの存在を知らなくてよい:
 
-- **コントローラが渡すのは語彙だけ**: `next` の宣言から取ったディレクトリ名を `FLOW_DIRECTORIES`
+- **コントローラが渡すのは語彙**: `next` の宣言から取ったディレクトリ名を `FLOW_DIRECTORIES`
   （JSON 配列、ソート済み）として全コンテナに注入する。`FLOW_PHASE` と同じ扱いで、run 番号と違って
   エージェントが見てよい情報（どのみちファイルシステムに見えている）
-- **基点はサイドカーのフラグ**: `sidecar prepare --out /workspace/out`。handler の作者が volumeMounts と
-  同じ場所に書く。同じボリュームを別のパスにマウントしても成立する
+- **コントローラが足すのは両端**: `flow-prepare`（init、`<mountPath>/out` を敷く）と `flow-publish`
+  （ネイティブサイドカー、読み取り専用マウント、SIGTERM で封じて termination log に書く）を
+  initContainers の先頭に置く。イメージは controller のフラグ `--sidecar-image`。template が同名の
+  コンテナを持っていたら framework ラベルと同じく**上書きせず拒否**する
+
+2026-08-25 の時点では `spec.workspace.path` を「コントローラにそのフィールドの消費者が無い」として
+却下し、片端の配線だけ利用側の pod spec に書かせていた。これは取り違えだった: §2 の責務表で
+**判定の回収はコントローラの持ち物**であり、P7 が排除するのはプロンプト・モデル・API キー・store。
+サイドカーは LLM を知らない固定の小さいプログラムで、P7 の対象ではない。両端とも taskflow の
+コード（`internal/runner` と `cmd/sidecar`、`internal/contract` を共有）なのに片端だけ利用側に
+30 行複製させるのは、handler を増やすたびに同じものを書かせることになる。今はコントローラが
+消費者なので、フィールドを持つ理由が立つ。線引きは「**タスクに関することか**」— 何を実行するか・
+どの権限で・どのプロンプトで、はタスクの話で利用者が決める。判定をどう回収するかはタスクの中身では
+なく framework の配管で、利用者に見せる理由が無い。
+
+**注入コンテナへ渡す動線。** SA は Pod 単位なので注入コンテナにも自動で届く。store の認証情報
+（`envFrom`）は封印を実装する段で足す — 消費者の無いフィールドを先に置かない、という 08-25 の
+判断そのものは正しかった。
 
 実装は `internal/sidecar`（純粋関数 `Prepare` / `Seal`）と `cmd/sidecar`（`prepare` / `publish` の
-2 サブコマンド、同一イメージ `Dockerfile.sidecar`）。**store への封印（`results/<runID>/` への持ち出し）は
-まだ無い** — investigate profile は循環しないので過去の run を読む必要が無く、S3 クライアントと
-認証情報の扱いは次の段で決める。
+2 サブコマンド、同一イメージ `Dockerfile.sidecar`）、注入は `internal/runner`。**store への封印
+（`results/<runID>/` への持ち出し）はまだ無い** — investigate profile は循環しないので過去の run を
+読む必要が無く、S3 クライアントと認証情報の扱いは次の段で決める。
 
 **Pod の中で走るバイナリと controller が共有する名前（env / annotation / label）は依存ゼロの
 `internal/contract` にだけ置く。** `cmd/sidecar` は k8s.io 系を一切 import しない
@@ -928,13 +946,25 @@ sidecar イメージを再ビルドしなくて済む。
 
 ```
 <out>/           prepare の uid   0555   ← 閉じる。宣言に無い mkdir は EACCES
-<out>/ok/        prepare の uid   0775   ← group 書き込み可。エージェントは fsGroup で同じ group
-<out>/more/      prepare の uid   0775
+<out>/ok/        prepare の uid   0777   ← 誰でも書ける。「誰でも」= 同じ Pod のコンテナ
+<out>/more/      prepare の uid   0777
 ```
 
-エージェントは prepare と**別の uid**で動かす（例: prepare=65532 / agent=65533、fsGroup=65532）。
-同じ uid なら chmod で開け直せるので、閉じたことにならない。この分離は Pod の securityContext の
-話であり handler の作者が書く（§16 の例）。`prepare` は繰り返し実行しても既存の中身を消さない。
+閉じるのは uid で、**prepare の uid はコントローラが選ぶ**。同じ uid なら chmod で開け直せるので
+閉じたことにならない（2026-08-30 実測: agent を prepare と同じ 65532 で走らせると `chmod 0775 out/`
+も `mkdir out/evil` も通り、65533 なら EPERM / EACCES）。だから runner は template が名乗る uid
+（Pod レベルと各コンテナ）を全部避けて 65532 から下へ探し、注入コンテナの `runAsUser` に書く。
+handler の作者に「65532 を使うな」と覚えさせない。宣言ディレクトリを group 書き込みではなく
+0777 にしたのも同じ理由 — fsGroup を prepare の group に合わせる規則を消すため。emptyDir は Pod で
+閉じているので、「誰でも」が指す範囲は group 方式と変わらない。
+
+**handler に残る条件は 1 つ、Pod の `securityContext.runAsUser` を書くこと。** 未設定だと uid は
+各イメージの USER で決まり、コントローラからは見えない。distroless nonroot のような普通の base が
+sidecar と同じ 65532 で走るので、「たまたま同じ」が handler のどこにも現れずに起きる。P8 に従い
+推測せず拒否する（Vault Agent Injector が container レベルだけ見て拒否し #261 で不評を買ったのと
+違い、Pod レベルの宣言で足りる）。
+
+`prepare` は繰り返し実行しても既存の中身を消さない。
 
 **`out/<name>` が symlink に差し替えられていたら `prepare` は拒否し、`publish` は答え無しにする**
 （両方とも `os.Lstat` で判定し、`os.Chmod` や `os.ReadDir` に symlink を追わせない）。同一 Pod の
@@ -1319,6 +1349,8 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 | flow の起動可否を ValidatingAdmissionPolicy で縛る | `TaskFlow` を namespaced にして同一 namespace 解決に限れば、素の RBAC で足りる。CEL も webhook も不要 |
 | 同一 handler の複数フェーズ束縛を禁止（自己レビュー禁止） | 権限は handler 作者の責務で、束縛も git のレビューを通る。正当な再利用（lint を Checks と Verifying に）も塞ぐ |
 | プロンプトから事実の説明を外し、モデルの知識に委ねる | **実測で 3 回中 1 回しか正解しない**（§17）。導出できるという仮定が誤り |
+| prepare / publish サイドカーを利用側の pod spec に書かせる | 判定の回収はコントローラの責務（§2）で、両端とも taskflow のコード。片端だけ handler ごとに 30 行複製させていた。P7 が排除するのは LLM 固有の語彙であってサイドカーではない（#73、§7） |
+| 注入コンテナの uid を固定して「その uid を使うな」と handler に課す | Istio 1337 / Linkerd 2102 はそうしていて、同 uid で迂回した事故（linkerd2 #14796）を誰も検出していない。コントローラが template の uid を避けて選べば規則自体が消える |
 
 ---
 
@@ -1443,6 +1475,7 @@ spec:
   runner: {type: Job}
   timeout: 20m
   maxInfraRetries: 2
+  workspace: {volume: work, mountPath: /workspace}   # コントローラが prepare / publish をここに付ける（§7）
   jobTemplate:
     template:
       metadata:
@@ -1452,26 +1485,13 @@ spec:
         serviceAccountName: agent-cnp-reader     # CNP と Pod の get/list のみ
         restartPolicy: Never
         securityContext:
-          runAsUser: 65533                       # エージェント。prepare (65532) と別 uid なので out/ を開け直せない
-          runAsGroup: 65532
-          fsGroup: 65532                         # 宣言ディレクトリは 0775、この group で書ける
+          runAsUser: 65533                       # 必須。コントローラはこれと違う uid で out/ を閉じる
           runAsNonRoot: true
         volumes:
           - name: work
             emptyDir: {}
           - name: prompt
             configMap: {name: cnp-planner-prompt}   # プロンプトはユーザーの pod spec の話（P7）
-        initContainers:
-          - name: prepare
-            image: registry.infra.tgy.io/tools/agent-sidecar:latest
-            args: ["prepare", "--out", "/workspace/out"]   # FLOW_DIRECTORIES（コントローラ注入）から out/ を作成・0555
-            securityContext: {runAsUser: 65532}
-            volumeMounts: [{name: work, mountPath: /workspace}]
-          - name: publish                        # ネイティブサイドカー
-            image: registry.infra.tgy.io/tools/agent-sidecar:latest
-            args: ["publish", "--out", "/workspace/out"]   # SIGTERM trap → 非空がちょうど 1 つ → termination log
-            restartPolicy: Always
-            volumeMounts: [{name: work, mountPath: /workspace}]
         containers:
           - name: agent
             image: registry.infra.tgy.io/tools/claude-code:latest
@@ -1489,30 +1509,25 @@ spec:
   runner: {type: Job}
   timeout: 20m
   maxInfraRetries: 2
+  workspace: {volume: work, mountPath: /workspace}
   jobTemplate:
     template:
       spec:
         runtimeClassName: kata
         serviceAccountName: agent-readonly   # 何も書けない
         restartPolicy: Never
+        securityContext: {runAsUser: 65533, runAsNonRoot: true}
         volumes:
           - name: work
             emptyDir: {}
           - name: prompt
             configMap: {name: cnp-reviewer-prompt}
         initContainers:
-          - name: prepare
-            image: registry.infra.tgy.io/tools/agent-sidecar:latest
-            args: ["prepare"]
-            volumeMounts: [{name: work, mountPath: /workspace}]
-          - name: publish
-            image: registry.infra.tgy.io/tools/agent-sidecar:latest
-            args: ["publish", "--also=horenso"]   # 終端なので人間にも出す。宛先はサイドカー側の話（P7）
+          - name: notify                       # 終端なので人間にも出す。宛先は利用側の話（P7、§9）
             restartPolicy: Always
             envFrom:
-              - {secretRef: {name: agent-s3-credentials}}
               - {secretRef: {name: horenso-webhook}}
-            volumeMounts: [{name: work, mountPath: /workspace}]
+            volumeMounts: [{name: work, mountPath: /workspace, readOnly: true}]
         containers:
           - name: agent
             image: registry.infra.tgy.io/tools/claude-code:latest
@@ -1522,10 +1537,10 @@ spec:
               - {name: prompt, mountPath: /prompt, readOnly: true}
 ```
 
-`prepare` と `publish` は**同一イメージの 2 サブコマンド**。判定を封する側のコードが 1 箇所に集まる。
-プロンプト（ConfigMap volume）も store の認証情報（`envFrom`）も通知先（`publish` の引数）も、
-コントローラの知らないユーザーの pod spec に畳まれている（P7、§11 で却下した
-`promptConfigMapRef` / `contextStores` / `publishTo` はここに畳む）。
+`prepare` と `publish` は**同一イメージの 2 サブコマンド**で、コントローラが Job 生成時に足す（§7）。
+判定を封する側のコードが 1 箇所に集まり、handler には現れない。プロンプト（ConfigMap volume）も
+人間への通知（`notify` サイドカー）も、コントローラの知らないユーザーの pod spec に畳まれている
+（P7、§11 で却下した `promptConfigMapRef` / `contextStores` / `publishTo` はここに畳む）。
 
 対応する CNP（**handler が `jobTemplate` に書いたラベル**で選択。これも home-cluster 側であり、
 framework はこの存在を知らない）:
