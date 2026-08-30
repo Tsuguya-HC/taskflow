@@ -28,10 +28,16 @@ limitations under the License.
 package contract
 
 const (
-	// LabelTaskUID is the only label the controller sets. It exists so the
-	// controller can find its own Jobs, not so anything can select on it —
-	// a UID also happens to be legal as a label value, which a status name
-	// picked by whoever wrote the flow is not.
+	// LabelTaskUID is the only label the controller sets, and it sets it on
+	// the Job and on the pods that Job makes. The controller needs it on the
+	// Job to find its own work; it is on the pod so that one task's pods can
+	// be pulled up directly — kubectl -l, hubble --label — rather than
+	// through whatever name the Job happened to get. It is bookkeeping, not
+	// something a policy is meant to select on: what a pod must carry to be
+	// allowed to run is the handler's to write.
+	//
+	// A UID also happens to be legal as a label value, which a status name
+	// picked by whoever wrote the flow is not — hence the phase below.
 	LabelTaskUID = "flow.tgy.io/task-uid"
 
 	// AnnotationPhase carries the status name. An annotation rather than a
@@ -47,9 +53,9 @@ const (
 	// AnnotationPrevRunID is absent on the first run.
 	AnnotationPrevRunID = "flow.tgy.io/prev-run-id"
 
-	// AnnotationPrefix is what marks an annotation as the framework's. A
+	// Prefix is what marks a label or an annotation as the framework's. A
 	// template that sets one of these is refused rather than overwritten.
-	AnnotationPrefix = "flow.tgy.io/"
+	Prefix = "flow.tgy.io/"
 
 	// EnvTaskUID, EnvPhase and EnvInput are set on every container in the
 	// template. Unlike the run number these say what the work is, not how

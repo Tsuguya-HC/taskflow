@@ -68,7 +68,7 @@ const (
 	EnvInput       = contract.EnvInput
 	EnvDirectories = contract.EnvDirectories
 
-	annotationPrefix = contract.AnnotationPrefix
+	frameworkPrefix = contract.Prefix
 
 	// maxNameLength is the limit Kubernetes puts on an object name.
 	maxNameLength = 63
@@ -151,11 +151,17 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 
 	// The framework's annotations go on the pod as well as the Job: a
 	// container reads them through the downward API, and that reads the pod
-	// it is in, never the Job above it. The template's own annotations are
-	// kept, but one under the framework's prefix is refused rather than
-	// overwritten — the alternative is a value that silently differs from
-	// what the YAML says.
-	podAnnotations, err := withFrameworkAnnotations(tpl.Metadata.Annotations, annotations(in))
+	// it is in, never the Job above it. The task's UID goes on the pod for a
+	// different reason — so that one task's pods can be selected without
+	// going through the Job's name. The template's own labels and
+	// annotations are kept, but one under the framework's prefix is refused
+	// rather than overwritten — the alternative is a value that silently
+	// differs from what the YAML says.
+	podLabels, err := withFrameworkMeta("label", tpl.Metadata.Labels, labels(in))
+	if err != nil {
+		return nil, err
+	}
+	podAnnotations, err := withFrameworkMeta("annotation", tpl.Metadata.Annotations, annotations(in))
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +169,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	spec := batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Labels:      tpl.Metadata.Labels,
+				Labels:      podLabels,
 				Annotations: podAnnotations,
 			},
 			Spec: tpl.Spec,
@@ -183,7 +189,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        JobName(in.Task.Name, in.Phase, in.RunID),
 			Namespace:   in.Task.Namespace,
-			Labels:      map[string]string{LabelTaskUID: string(in.Task.UID)},
+			Labels:      labels(in),
 			Annotations: annotations(in),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
@@ -212,12 +218,13 @@ func OwnedByTask(job *batchv1.Job, taskUID types.UID) bool {
 	return false
 }
 
-// withFrameworkAnnotations lays the framework's annotations over a template's,
-// refusing any the template already claims under the framework's prefix.
-func withFrameworkAnnotations(template, framework map[string]string) (map[string]string, error) {
+// withFrameworkMeta lays the framework's entries over a template's, refusing
+// any the template already claims under the framework's prefix. kind names
+// what is being merged, for the error a handler's author reads.
+func withFrameworkMeta(kind string, template, framework map[string]string) (map[string]string, error) {
 	for k := range template {
-		if strings.HasPrefix(k, annotationPrefix) {
-			return nil, fmt.Errorf("%w: annotation %q is the framework's to set", ErrReservedField, k)
+		if strings.HasPrefix(k, frameworkPrefix) {
+			return nil, fmt.Errorf("%w: %s %q is the framework's to set", ErrReservedField, kind, k)
 		}
 	}
 	out := maps.Clone(template)
@@ -226,6 +233,13 @@ func withFrameworkAnnotations(template, framework map[string]string) (map[string
 	}
 	maps.Copy(out, framework)
 	return out, nil
+}
+
+// labels is the framework's whole label vocabulary: one entry, on the Job so
+// the controller can find it and on the pod so a human can. Policies select
+// on what the handler's own template says, never on this.
+func labels(in Input) map[string]string {
+	return map[string]string{LabelTaskUID: string(in.Task.UID)}
 }
 
 func annotations(in Input) map[string]string {
