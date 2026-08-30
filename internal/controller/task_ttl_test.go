@@ -21,6 +21,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/metrics"
+	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
 // The TTL is the one thing a stopped task still owes the cluster (§10). These
@@ -128,12 +132,28 @@ var _ = Describe("expiring a finished task", func() {
 	})
 
 	It("keeps a task whose flow does not exist, having no ttl to read", func() {
+		// FlowUnresolved is a fixed label, unlike fx.name, so another spec
+		// reaching the same broken-reference ending shares this counter; the
+		// assertion below is a delta rather than an absolute count for that
+		// reason.
+		labels := prometheus.Labels{
+			metrics.LabelFlow: metrics.FlowUnresolved, metrics.LabelPhase: string(flowv1alpha1.PhaseFailed), metrics.LabelSeverity: string(transition.EndingFailed),
+		}
+		before := testutil.ToFloat64(metrics.TaskOutcomes.With(labels))
+
 		fx.makeTask()
 		fx.reconcile()
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.ExpiresAt).To(BeNil())
+
+		// The flow does not exist, so the metric's flow label must be the
+		// fixed FlowUnresolved value, never the raw task.Spec.Flow — that is
+		// free text a task's own author chooses, and using it as a label
+		// would let cardinality grow at runtime by whoever can create Tasks.
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(labels))).To(Equal(before+1),
+			"a task whose flow does not exist must still be counted, under the fixed label")
 	})
 
 	It("uses the CRD's defaults when the flow says nothing about ttl", func() {
@@ -177,11 +197,23 @@ var _ = Describe("expiring a finished task", func() {
 		tk.Status.Phase = flowv1alpha1.PhaseEscalated
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
+		labels := prometheus.Labels{
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseEscalated), metrics.LabelSeverity: string(transition.EndingEscalated),
+		}
+		before := testutil.ToFloat64(metrics.TaskOutcomes.With(labels))
+
 		fx.reconcile()
 
 		got := fx.get()
 		Expect(got.Status.ExpiresAt).NotTo(BeNil())
 		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
+
+		// backfillExpiry must not call announce: this task ended before this
+		// reconcile, possibly long before it, and counting it now would make
+		// a controller restart look like a burst of endings that never
+		// happened today.
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(labels))).To(Equal(before),
+			"backfilling expiresAt must not also count the ending — that already happened, unobserved, before this field existed")
 	})
 
 	It("leaves expiresAt unset when backfilling and the flow is gone too", func() {

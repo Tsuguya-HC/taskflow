@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
@@ -129,6 +130,13 @@ var _ = Describe("finishing a run", func() {
 		Expect(h.Outcome).To(Equal(string(transition.OutcomeDeclared)))
 		Expect(h.Reason).To(ContainSubstring("nothing to report"), "what the handler said after its directory is kept for a human")
 		Expect(h.FinishedAt).NotTo(BeNil())
+
+		// This flow never declared what 報告 means, so the ending the metric
+		// records has to say so rather than guessing at Success — that silence
+		// is the whole point of Undeclared existing as a value of its own.
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport), metrics.LabelSeverity: string(transition.EndingUndeclared),
+		}))).To(BeNumerically("==", 1), "a flow that has not declared its endings must still show up in the metric")
 	})
 
 	// The one reserved name a flow may send work to. Declaring it is what
@@ -166,6 +174,10 @@ var _ = Describe("finishing a run", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(string(transition.OutcomeDeclined)))
+
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseEscalated), metrics.LabelSeverity: string(transition.EndingEscalated),
+		}))).To(BeNumerically("==", 1), "the framework's own ending must be counted too, not only a flow's declared ones")
 	})
 
 	// A task can finish perfectly normally and still be carrying bad news:
@@ -208,9 +220,9 @@ var _ = Describe("finishing a run", func() {
 
 		// Each spec gets its own flow name, so this counter starts at zero
 		// and one ending is the whole of what it should have seen.
-		Expect(testutil.ToFloat64(metrics.TaskOutcomes.WithLabelValues(
-			fx.name, string(phaseBroken), string(transition.EndingFailure)),
-		)).To(BeNumerically("==", 1), "an alert rule has nothing else to fire on")
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseBroken), metrics.LabelSeverity: string(transition.EndingFailure),
+		}))).To(BeNumerically("==", 1), "an alert rule has nothing else to fire on")
 	})
 
 	// The same run, the same edge — only the flow's word for the ending
@@ -237,9 +249,9 @@ var _ = Describe("finishing a run", func() {
 
 		// Counted all the same: the metric is how many tasks ended and how,
 		// not how many went wrong.
-		Expect(testutil.ToFloat64(metrics.TaskOutcomes.WithLabelValues(
-			fx.name, string(phaseReport), string(transition.EndingSuccess)),
-		)).To(BeNumerically("==", 1))
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport), metrics.LabelSeverity: string(transition.EndingSuccess),
+		}))).To(BeNumerically("==", 1))
 	})
 
 	// A CRD's maxLength validates by rune count (utf8.RuneCountInString), not
@@ -413,6 +425,13 @@ var _ = Describe("finishing a run", func() {
 		cond := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+
+		// This Failed came from r.fail(), not from settle() reading the flow's
+		// own table — the one path that used to leave the metric silent about a
+		// flow broken badly enough to lose a handler mid-run.
+		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseFailed), metrics.LabelSeverity: string(transition.EndingFailed),
+		}))).To(BeNumerically("==", 1), "a Failed reached through r.fail() must be counted, not only one reached through settle()")
 	})
 
 	It("escalates straight away when the handler allows no infrastructure retries", func() {

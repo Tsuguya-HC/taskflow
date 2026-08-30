@@ -111,7 +111,7 @@ func Advance(
 	// until somebody looks; the third means the task finished and the news
 	// is bad. The history entry says so too, but a condition is where
 	// kubectl and anything watching for stuck tasks look first.
-	ending := transition.EndingOf(flow.Bindings, flow.Terminals, res.Next)
+	ending := transition.EndingOf(flow, res.Next)
 	if needsAHuman(ending) {
 		// For the reserved two, res.Outcome is exactly the distinction worth
 		// surfacing — NoAnswer from a run that said nothing, Declined from
@@ -166,7 +166,7 @@ func Expire(
 	if status.ExpiresAt != nil || flow == nil || flow.TTL == nil {
 		return
 	}
-	ending := transition.EndingOf(flow.Bindings, flow.Terminals, status.Phase)
+	ending := transition.EndingOf(flow, status.Phase)
 	if ending == transition.EndingRunning {
 		return
 	}
