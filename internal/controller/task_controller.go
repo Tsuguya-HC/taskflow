@@ -81,6 +81,21 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Get(ctx, req.NamespacedName, &task); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !task.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	// A stopped task has one thing left to do, and its date is already on
+	// it; nothing below needs consulting, least of all the flow. The Jobs go
+	// with it through their ownerReference (§10).
+	if task.Status.ExpiresAt != nil {
+		remaining := task.Status.ExpiresAt.Sub(r.now())
+		if remaining > 0 {
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt)
+		return ctrl.Result{}, r.expire(ctx, &task)
+	}
 
 	// The framework's own terminal phases are terminal on their own say-so —
 	// unlike a phase the flow declared terminal, they need no binding table to
@@ -88,7 +103,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Escalated is never at the mercy of a flow that GitOps has since deleted
 	// or renamed out from under it.
 	if task.Status.Phase.IsReserved() {
-		return ctrl.Result{}, nil
+		// A Task that reached Escalated or Failed before expiresAt existed
+		// has none, and never will on its own: nothing above sees it again,
+		// so without this it would sit forever. Backfilling means fetching
+		// the flow this once, ahead of where it is normally resolved; a
+		// flow already gone leaves nothing to read a ttl from, the same as
+		// the nil ttl fail() gets when there is no flow at all.
+		var flow flowv1alpha1.TaskFlow
+		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.backfillExpiry(ctx, &task, nil, flow.Spec.TTL)
 	}
 
 	// A flow is always resolved in the task's own namespace. There is no field
@@ -98,7 +126,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			// The flow was deleted or never existed. Nothing to repair.
-			return ctrl.Result{}, r.fail(ctx, &task, fmt.Sprintf("flow %q does not exist in this namespace", task.Spec.Flow))
+			return ctrl.Result{}, r.fail(ctx, &task, nil, fmt.Sprintf("flow %q does not exist in this namespace", task.Spec.Flow))
 		}
 		return ctrl.Result{}, err
 	}
@@ -116,10 +144,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// from success.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
 		if task.Status.CurrentRun != nil {
-			return ctrl.Result{}, r.fail(ctx, &task, fmt.Sprintf(
+			return ctrl.Result{}, r.fail(ctx, &task, flow.Spec.TTL, fmt.Sprintf(
 				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
 		}
-		return ctrl.Result{}, nil
+		// Same backfill as the reserved-phase branch above, for a task that
+		// reached a flow-declared terminal phase before expiresAt existed.
+		// The flow is already in hand here, so nothing extra needs fetching.
+		return ctrl.Result{}, r.backfillExpiry(ctx, &task, flow.Spec.Bindings, flow.Spec.TTL)
 	}
 
 	run := task.Status.CurrentRun
@@ -136,7 +167,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return ctrl.Result{}, r.fail(ctx, &task, broken.reason)
+			return ctrl.Result{}, r.fail(ctx, &task, flow.Spec.TTL, broken.reason)
 		}
 		return ctrl.Result{}, err
 	}
@@ -263,7 +294,8 @@ func (r *TaskReconciler) settle(
 	logf.FromContext(ctx).Info("run finished",
 		"phase", run.Phase, "runID", run.RunID, "directory", in.Directory,
 		"outcome", res.Outcome, "next", res.Next)
-	taskstate.Advance(&task.Status, flow.Spec.Bindings, in.Directory, res, "", metav1.NewTime(r.now()))
+	now := metav1.NewTime(r.now())
+	taskstate.Advance(&task.Status, flow.Spec.Bindings, in.Directory, res, "", flow.Spec.TTL, now)
 	return r.Status().Update(ctx, task)
 }
 
@@ -283,7 +315,7 @@ func (r *TaskReconciler) retryInfra(
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return r.fail(ctx, task, broken.reason)
+			return r.fail(ctx, task, flow.Spec.TTL, broken.reason)
 		}
 		return err
 	}
@@ -332,7 +364,7 @@ func (r *TaskReconciler) now() time.Time {
 // around it.
 func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
-		return r.fail(ctx, task, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
+		return r.fail(ctx, task, flow.Spec.TTL, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
 	taskstate.Begin(&task.Status, flow.Spec.Start, flow.Spec.ReworkBudget)
 	return r.Status().Update(ctx, task)
@@ -341,7 +373,14 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 // fail stops a task whose flow is broken. Nothing is retried: the fault is in
 // the definition rather than in the work, and guessing at a repair would hide
 // it.
-func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, reason string) error {
+//
+// ttl is the flow's, or nil when the fault is that there is no flow to read
+// one from; such a task stays for as long as the flow stays gone. That is
+// deliberate, not a gap: the reserved-phase branch above backfills expiresAt
+// from whatever flow the task names on every later reconcile, so a flow
+// created under the same name afterward is enough to make the date appear
+// and the task eventually clear, with no special path needed for that case.
+func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, ttl *flowv1alpha1.TTLSpec, reason string) error {
 	// A dispatched task with nothing in flight has already reached a terminal
 	// phase: Advance clears CurrentRun exactly when it lands one there, whether
 	// that phase is Failed, Escalated, or one the flow itself declared
@@ -351,8 +390,39 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, reas
 	if task.Status.Phase != "" && task.Status.CurrentRun == nil {
 		return nil
 	}
-	taskstate.Fail(&task.Status, reason)
+	taskstate.Fail(&task.Status, reason, ttl, metav1.NewTime(r.now()))
 	return r.Status().Update(ctx, task)
+}
+
+// backfillExpiry stamps expiresAt on a task that reached a terminal phase
+// before this field existed to stamp it there — the one gap Advance and Fail
+// cannot close themselves, since they only ever run at the moment a task
+// lands on a phase, not on every later reconcile of one already there.
+// Expire is unconditional here, not guarded on ExpiresAt already being set,
+// because Expire's own idempotence covers that: called again on a task that
+// already has a date, or one that would get none from ttl, it leaves status
+// exactly as it found it, and this returns nil rather than writing back a
+// status equal to what is already stored.
+func (r *TaskReconciler) backfillExpiry(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding,
+	ttl *flowv1alpha1.TTLSpec,
+) error {
+	before := task.Status.ExpiresAt
+	taskstate.Expire(&task.Status, bindings, ttl, metav1.NewTime(r.now()))
+	if task.Status.ExpiresAt == before {
+		return nil
+	}
+	return r.Status().Update(ctx, task)
+}
+
+// expire deletes a task whose date has passed. The UID precondition means a
+// stale read — the object this reconcile fetched has since been deleted and
+// a different one created under the same name — refuses rather than taking
+// the newer object down with it.
+func (r *TaskReconciler) expire(ctx context.Context, task *flowv1alpha1.Task) error {
+	return client.IgnoreNotFound(r.Delete(ctx, task, client.Preconditions{UID: &task.UID}))
 }
 
 // ensureJob creates the Job for a run, or returns the one already there.

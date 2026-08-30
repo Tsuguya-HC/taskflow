@@ -8,9 +8,8 @@
 
 ## 状態
 
-**設計と実測のみ。実装はまだ無い。** 検証は home-cluster 上の Argo Workflows で行っている。
-
-CRD とコントローラを書くかどうかは**未決**。[Discussions](../../discussions) を参照。
+Go + kubebuilder のコントローラを実装済み。CRD は `TaskFlow` / `Task` / `TaskHandler` の 3 つ
+（`flow.tgy.io`）で、home-cluster 上で稼働している。設計は [docs/design.md](docs/design.md) が正。
 
 ## 中身
 

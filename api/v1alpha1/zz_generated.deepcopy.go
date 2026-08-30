@@ -515,6 +515,10 @@ func (in *TaskStatus) DeepCopyInto(out *TaskStatus) {
 		*out = new(ArtifactsRef)
 		**out = **in
 	}
+	if in.ExpiresAt != nil {
+		in, out := &in.ExpiresAt, &out.ExpiresAt
+		*out = (*in).DeepCopy()
+	}
 	if in.History != nil {
 		in, out := &in.History, &out.History
 		*out = make([]HistoryEntry, len(*in))
