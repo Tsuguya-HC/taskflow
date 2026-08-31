@@ -88,6 +88,29 @@
     },
     {
       "description": [
+        "Makefile の ?= ピン（controller-gen / golangci-lint / kustomize）も同じ",
+        "理屈で自動で入れる。いずれも CLI ツールで、壊れれば lint か make test 後の",
+        "drift 検査が赤くなる。kustomize は sigs.k8s.io だが下の no-automerge",
+        "ルールの対象（envtest と噛み合う gomod ライブラリ）ではない。",
+        "custom.regex 全体に付けないのは、aqua preset も custom.regex で、",
+        "そちらまで巻き込まないため。"
+      ],
+      "matchManagers": ["custom.regex"],
+      "matchFileNames": ["Makefile"],
+      "matchUpdateTypes": ["patch", "minor", "digest"],
+      "automerge": true
+    },
+    {
+      "description": [
+        "aqua-registry はパッケージ本体でなくレジストリ定義の更新。ツールの版は",
+        "動かず、実体の検証は aqua-checksum の CI がやる。major だけは目を通す。"
+      ],
+      "matchPackageNames": ["aquaproj/aqua-registry"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
+    },
+    {
+      "description": [
         "kubernetes libraries のグループは自動マージしない。controller-runtime と",
         "k8s.io/* は patch でも envtest のアセット版と噛み合わなくなることがあり、",
         "CI が緑でも実クラスタで落ちる余地が残る。ここは目を通す。"
