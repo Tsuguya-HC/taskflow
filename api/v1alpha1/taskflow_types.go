@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -99,6 +100,31 @@ type TTLSpec struct {
 	Failed *metav1.Duration `json:"failed,omitempty"`
 }
 
+// FlowWorkspace gives every task of this flow one volume that lives exactly
+// as long as the task, so consecutive phases hand their results to each other
+// through it. It sits on the flow, not the handler or the task: what crosses
+// phases belongs to the thing that defines the set of phases — a handler is
+// one phase and cannot own what spans several, and a task is stamped out by
+// whatever submits it, which should not have to know about storage.
+type FlowWorkspace struct {
+	// VolumeClaimTemplate is the claim's spec, and only its spec — the
+	// controller owns the claim's name and ownership, and a whole
+	// PersistentVolumeClaim here would let a flow fight it over both (and
+	// carries name, merge-key and serialization problems its users have
+	// documented). It is the standard type: storageClassName, accessModes,
+	// resources, even volumeName for a hand-made PV all mean exactly what
+	// they mean on any claim. Left out entirely, it defaults to a small
+	// ReadWriteMany scratch claim on the cluster's default StorageClass;
+	// written at all, it is taken as written — the default is a whole
+	// template, not a base to merge into.
+	//
+	// Changing it affects tasks created afterwards. Claims that already
+	// exist are never rewritten to match.
+	// +kubebuilder:default={accessModes: {ReadWriteMany}, resources: {requests: {storage: "1Gi"}}}
+	// +optional
+	VolumeClaimTemplate *corev1.PersistentVolumeClaimSpec `json:"volumeClaimTemplate,omitempty"`
+}
+
 // TaskFlowSpec is the topology. It is validated once, when the TaskFlow is
 // created, and not re-derived per task.
 //
@@ -152,6 +178,14 @@ type TaskFlowSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	TTL *TTLSpec `json:"ttl,omitempty"`
+
+	// Workspace, when set, backs the flow's workspace with one claim per
+	// task, created by the controller and deleted with the task. A handler
+	// joins by naming the reserved volume flow-workspace; a flow that leaves
+	// this out keeps today's arrangement, where each handler's template
+	// brings its own volume and nothing crosses a phase.
+	// +optional
+	Workspace *FlowWorkspace `json:"workspace,omitempty"`
 }
 
 // TaskFlowStatus reports whether the flow was accepted. Nothing reconciles a

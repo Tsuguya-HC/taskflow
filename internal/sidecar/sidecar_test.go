@@ -272,6 +272,67 @@ func TestSealTreatsASymlinkDeclaredDirectoryAsNoAnswer(t *testing.T) {
 	}
 }
 
+func TestMoveRelocatesTheDirectory(t *testing.T) {
+	root := t.TempDir()
+	from := filepath.Join(root, "work", "3")
+	to := filepath.Join(root, "results", "3")
+	if err := os.MkdirAll(filepath.Join(from, "out", "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(from, "out", "ok", "report.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Move(from, to); err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(to, "out", "ok", "report.md")); err != nil {
+		t.Fatalf("results/3 does not hold what work/3 wrote: %v", err)
+	}
+	if _, err := os.Lstat(from); !os.IsNotExist(err) {
+		t.Fatalf("work/3 still exists after the move: %v", err)
+	}
+}
+
+// os.Rename onto an existing *empty* directory succeeds silently on POSIX —
+// the one case that matters most, an answer already sealed under this run's
+// number, is exactly the one a bare Rename would not refuse. Move has to
+// check for it itself.
+func TestMoveRefusesAnExistingDestination(t *testing.T) {
+	root := t.TempDir()
+	from := filepath.Join(root, "work", "3")
+	to := filepath.Join(root, "results", "3")
+	if err := os.MkdirAll(from, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(to, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Move(from, to); err == nil {
+		t.Fatal("Move over an existing results/3 must be refused")
+	}
+	if _, err := os.Stat(from); err != nil {
+		t.Fatalf("a refused move must leave work/3 in place: %v", err)
+	}
+}
+
+// A run whose work/<runID> was never made — publish invoked against the
+// wrong path, or a prior failure that never got this far — must not succeed
+// silently; os.Rename's own ENOENT is what Move is expected to surface.
+func TestMoveFailsWhenTheSourceIsMissing(t *testing.T) {
+	root := t.TempDir()
+	from := filepath.Join(root, "work", "3")
+	to := filepath.Join(root, "results", "3")
+
+	if err := Move(from, to); err == nil {
+		t.Fatal("Move of a source that was never made must fail")
+	}
+	if _, err := os.Stat(to); !os.IsNotExist(err) {
+		t.Fatalf("a failed move must not create the destination: %v", err)
+	}
+}
+
 // The two ends of the channel must agree. Whatever seal writes, collect on
 // the controller side must read back to the same directory — and a no-answer
 // must come through as no answer, never as a directory.

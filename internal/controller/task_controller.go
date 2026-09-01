@@ -71,6 +71,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=taskflows;taskhandlers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -534,9 +535,8 @@ func (r *TaskReconciler) ensureJob(
 		// permission on Jobs could have taken it first. Trusting whatever sits
 		// under it without checking who made it would let that Job's outcome
 		// pass for this task's.
-		if !runner.OwnedByTask(&existing, task.UID) {
-			return nil, fmt.Errorf("job %q exists but is not owned by task %s (uid %s): owners = %s",
-				name, task.Name, task.UID, ownerSummary(existing.OwnerReferences))
+		if !metav1.IsControlledBy(&existing, task) {
+			return nil, notOwnedError("job", name, task, existing.OwnerReferences)
 		}
 		run.Deadline = deadlineOf(&existing)
 		return &existing, nil
@@ -555,6 +555,11 @@ func (r *TaskReconciler) ensureJob(
 		return nil, err
 	}
 
+	workspacePVC, err := r.ensureWorkspacePVC(ctx, task, flow)
+	if err != nil {
+		return nil, err
+	}
+
 	job, err := runner.BuildJob(runner.Input{
 		Task:         task,
 		Handler:      handler,
@@ -563,6 +568,7 @@ func (r *TaskReconciler) ensureJob(
 		PrevRunID:    previousRun(task),
 		Directories:  transition.Directories(flow.Spec.Bindings, run.Phase),
 		SidecarImage: r.SidecarImage,
+		WorkspacePVC: workspacePVC,
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it
@@ -578,9 +584,8 @@ func (r *TaskReconciler) ensureJob(
 			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &got); err != nil {
 				return nil, err
 			}
-			if !runner.OwnedByTask(&got, task.UID) {
-				return nil, fmt.Errorf("job %q exists but is not owned by task %s (uid %s): owners = %s",
-					name, task.Name, task.UID, ownerSummary(got.OwnerReferences))
+			if !metav1.IsControlledBy(&got, task) {
+				return nil, notOwnedError("job", name, task, got.OwnerReferences)
 			}
 			run.Deadline = deadlineOf(&got)
 			return &got, nil
@@ -589,6 +594,72 @@ func (r *TaskReconciler) ensureJob(
 	}
 	run.Deadline = deadlineOf(job)
 	return job, nil
+}
+
+// ensureWorkspacePVC creates the claim behind the flow's workspace, or
+// returns the one already there; "" with no error means the flow declares no
+// workspace and there is nothing to mount. Idempotent the same way ensureJob
+// is — the name is deterministic, so a second reconcile collides instead of
+// making a second claim, and whatever sits under the name has to prove it is
+// this task's before being trusted. That check is IsControlledBy reading an
+// ownerReference, and an ownerReference is a garbage-collection hint, not an
+// authorization decision: its UID is whatever its author wrote, so it only
+// keeps this task's claim safe from squatting if nothing but the controller
+// can create PersistentVolumeClaims here (§ADR-0002) — the real backstop is
+// RBAC, not this check.
+//
+// An Invalid on create is the flow's volumeClaimTemplate being unusable as
+// written — a definition problem, so it goes through brokenFlow to Failed
+// rather than being retried into the same rejection forever. StatefulSet
+// left that surfacing to the moment the claim is made too, but with nothing
+// watching, an apply that passed turned into pods that never came; here the
+// task itself says so.
+func (r *TaskReconciler) ensureWorkspacePVC(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+) (string, error) {
+	if flow.Spec.Workspace == nil {
+		return "", nil
+	}
+	vct := flow.Spec.Workspace.VolumeClaimTemplate
+	if vct == nil {
+		// The CRD defaults this at admission; nil means the stored flow
+		// somehow predates or escaped the schema. Refusing beats guessing
+		// at a claim the flow never wrote (P8).
+		return "", brokenFlow{fmt.Sprintf("flow %q declares a workspace with no volumeClaimTemplate", flow.Name)}
+	}
+
+	pvc := runner.BuildWorkspacePVC(task, vct)
+	adopt := func(existing *corev1.PersistentVolumeClaim) (string, error) {
+		if !metav1.IsControlledBy(existing, task) {
+			return "", notOwnedError("claim", pvc.Name, task, existing.OwnerReferences)
+		}
+		return pvc.Name, nil
+	}
+
+	var existing corev1.PersistentVolumeClaim
+	err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, &existing)
+	if err == nil {
+		return adopt(&existing)
+	}
+	if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+	if err := r.Create(ctx, pvc); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			var got corev1.PersistentVolumeClaim
+			if err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, &got); err != nil {
+				return "", err
+			}
+			return adopt(&got)
+		}
+		if apierrors.IsInvalid(err) {
+			return "", brokenFlow{fmt.Sprintf("flow %q has a volumeClaimTemplate the cluster refuses: %v", flow.Name, err)}
+		}
+		return "", err
+	}
+	return pvc.Name, nil
 }
 
 // deadlineOf is when the Job's own deadline falls: the timeout the handler
@@ -601,6 +672,16 @@ func deadlineOf(job *batchv1.Job) *metav1.Time {
 	}
 	t := metav1.NewTime(job.CreationTimestamp.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second))
 	return &t
+}
+
+// notOwnedError reports that something already sits under a deterministic
+// name but was not put there by this task — the one error both idempotent
+// create paths (Job, PersistentVolumeClaim) raise when their ownership check
+// fails, so the wording does not drift between the two. kind names what
+// sits under the name, for the message.
+func notOwnedError(kind, name string, task *flowv1alpha1.Task, owners []metav1.OwnerReference) error {
+	return fmt.Errorf("%s %q exists but is not owned by task %s (uid %s): owners = %s",
+		kind, name, task.Name, task.UID, ownerSummary(owners))
 }
 
 // ownerSummary renders a Job's actual owners for an error message, so

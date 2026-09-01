@@ -493,9 +493,12 @@ run 番号が要るのは**配管**であってエージェントではない:
 **全コンテナに env を注入すると、エージェントに見せない選択肢が利用側から消える。**
 annotation なら「配管だけが読む」が書ける。
 
-なお PVC backend で、書き込み先を `results/<runID>/` への **subPath マウント**にした場合は、
-`<path>/ok` に書いた時点で正しい場所に落ちるので**誰も番号を知らなくてよい**。
-その構成では annotation は使われない。**どちらを採るかは利用側が選ぶ。**
+flow workspace（PVC backend）での per-run パスの扱いは §7「ワークスペースのレイアウト」と
+[ADR-0002](adr/0002-per-task-workspace-pvc.md) 決定 5 を参照。あちらではコントローラが生成時に
+`subPath: work/<runID>` を決定論的に焼き込み、封印後は publish が rename で `results/<runID>` に
+移す — annotation の fieldRef を挟む余地も、どちらを採るか利用側が選ぶ余地も無い。上の
+「annotation で渡すか env で渡すか」は、あくまで handler が自分の作るコンテナに run 番号を
+引き込みたい場合の一般論であって、framework 自身の prepare / publish の配線には効かない。
 
 RuntimeClass・SA・volume・エージェントのコンテナは全部 home-cluster 側の YAML のまま。
 P2 の分離が保たれる（prepare / publish はコントローラの側に移った — §7）。Pod 層（`template.spec`）は `corev1.PodSpec` 標準そのもの、Job 層だけが
@@ -909,14 +912,38 @@ handler が書くのは `spec.workspace: {volume, mountPath}` — 判定の回�
 どの権限で・どのプロンプトで、はタスクの話で利用者が決める。判定をどう回収するかはタスクの中身では
 なく framework の配管で、利用者に見せる理由が無い。
 
-**注入コンテナへ渡す動線。** SA は Pod 単位なので注入コンテナにも自動で届く。store の認証情報
-（`envFrom`）は封印を実装する段で足す — 消費者の無いフィールドを先に置かない、という 08-25 の
-判断そのものは正しかった。
+**注入コンテナへ渡す動線。** SA は Pod 単位なので注入コンテナにも自動で届く。store は S3 ではなく
+PVC になった（[ADR-0002](adr/0002-per-task-workspace-pvc.md)）ので、認証情報の口（`envFrom`）は
+一度も要らないまま終わった — 消費者の無いフィールドを先に置かない、という 08-25 の判断そのものは
+正しかった。
 
 実装は `internal/sidecar`（純粋関数 `Prepare` / `Seal`）と `cmd/sidecar`（`prepare` / `publish` の
-2 サブコマンド、同一イメージ `Dockerfile.sidecar`）、注入は `internal/runner`。**store への封印
-（`results/<runID>/` への持ち出し）はまだ無い** — investigate profile は循環しないので過去の run を
-読む必要が無く、S3 クライアントと認証情報の扱いは次の段で決める。
+2 サブコマンド、同一イメージ `Dockerfile.sidecar`）、注入は `internal/runner`。
+
+**フェーズ間の引き渡しは Task ごとの PVC**（[ADR-0002](adr/0002-per-task-workspace-pvc.md)）。
+flow が `spec.workspace.volumeClaimTemplate`（corev1 の **spec のみ**。省略時は CRD 既定
+`{RWX, 1Gi}` が admission で実体化、storageClassName 省略はクラスタ default SC）を書くと、
+コントローラが Task ごとに claim を 1 つ作る — 名前は Task UID 由来の決定論（同名 Task の
+作り直しと再バインドしない）、ownerRef = Task で TTL 削除に同乗。handler は予約 volume 名
+**`flow-workspace`** を `spec.workspace.volume` に書いて乗るだけでよい。走行中の書き込み先は
+`work/<runID>/out/...`（生成時にコントローラが書き込み可マウントへ literal `subPath: work/<runID>`
+を焼く。handler が自分でこのマウントに SubPath / SubPathExpr を書くのは拒否）。publish が seal で
+verdict を確定させた後、同一ボリューム内の rename で `work/<runID>` を `results/<runID>` に移す —
+別ボリュームを跨がないので原子的。**`results/` には封印済みの run だけが並ぶ**、というのが読み側の
+意味論。publish は flow-workspace モードでは唯一 volume の root を書き込み可でマウントする（rename
+が work/ と results/ の二つの棚を跨ぐため）— agent の書き込みは work/<runID> の subPath に閉じた
+まま。rename が失敗したら termination message を書かずに非 0 で exit し、既存の infra retry 経路に
+落ちる（移動できていないのに verdict だけ通ると下流が読めないディレクトリを指すことになるため）。
+孤児の窓（rename 成功後・message 送信前のクラッシュで History に無い完了 run が results/ に残る）は
+実害が薄いので許容する。env / subPathExpr は使わない、run 番号はエージェントの env には出ない
+（annotation `flow.tgy.io/run-id` は配管の記録のまま）。過去を読むフェーズは同じ volume を readOnly
+でマウントし、推奨形は `subPath: results`（リテラル定数。root のまま無指定でマウントすると、
+マウント先を `results` のような名前にした場合に `.../results/results/1/...` と二重に入れ子になる）
+— これでマウント直下の `<runID>/` を自分で開けば、封印済みの run だけが並ぶ。この literal subPath は
+checkWorkspace の拒否対象ではない（拒否は work/ を指す書き込み可マウントの SubPath / SubPathExpr
+だけで、readOnly 側はコントローラが何も焼かないので衝突せず、handler が自由に書ける）。今まさに
+走っている run のディレクトリは work/ にいるので、この読み取り専用ビューには見えない。vct を書かない
+flow は従来どおり template の volume で完結する（opt-in）。
 
 **Pod の中で走るバイナリと controller が共有する名前（env / annotation / label）は依存ゼロの
 `internal/contract` にだけ置く。** `cmd/sidecar` は k8s.io 系を一切 import しない
