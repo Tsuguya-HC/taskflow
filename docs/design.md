@@ -925,9 +925,11 @@ flow が `spec.workspace.volumeClaimTemplate`（corev1 の **spec のみ**。省
 `{RWX, 1Gi}` が admission で実体化、storageClassName 省略はクラスタ default SC）を書くと、
 コントローラが Task ごとに claim を 1 つ作る — 名前は Task UID 由来の決定論（同名 Task の
 作り直しと再バインドしない）、ownerRef = Task で TTL 削除に同乗。handler は予約 volume 名
-**`flow-workspace`** を `spec.workspace.volume` に書いて乗るだけでよい。走行中の書き込み先は
-`work/<runID>/out/...`（生成時にコントローラが書き込み可マウントへ literal `subPath: work/<runID>`
-を焼く。handler が自分でこのマウントに SubPath / SubPathExpr を書くのは拒否）。publish が seal で
+**`flow-workspace`** を `spec.workspace.volume` に書いて乗るだけでよい。**subPath を書かない
+マウントは readOnly でも「この run のビュー」**として、生成時に literal `subPath: work/<runID>` が
+焼かれる（[ADR-0003](adr/0003-run-view-and-sweep.md)。自分の run を読むだけの notify のような
+サイドカーも runID を知らずに済む）。書き込み可マウントに handler が自分で SubPath / SubPathExpr を
+書くのは拒否。走行中の書き込み先は `work/<runID>/out/...`。publish が seal で
 verdict を確定させた後、同一ボリューム内の rename で `work/<runID>` を `results/<runID>` に移す —
 別ボリュームを跨がないので原子的。**`results/` には封印済みの run だけが並ぶ**、というのが読み側の
 意味論。publish は flow-workspace モードでは唯一 volume の root を書き込み可でマウントする（rename
@@ -936,13 +938,19 @@ verdict を確定させた後、同一ボリューム内の rename で `work/<ru
 落ちる（移動できていないのに verdict だけ通ると下流が読めないディレクトリを指すことになるため）。
 孤児の窓（rename 成功後・message 送信前のクラッシュで History に無い完了 run が results/ に残る）は
 実害が薄いので許容する。env / subPathExpr は使わない、run 番号はエージェントの env には出ない
-（annotation `flow.tgy.io/run-id` は配管の記録のまま）。過去を読むフェーズは同じ volume を readOnly
-でマウントし、推奨形は `subPath: results`（リテラル定数。root のまま無指定でマウントすると、
-マウント先を `results` のような名前にした場合に `.../results/results/1/...` と二重に入れ子になる）
-— これでマウント直下の `<runID>/` を自分で開けば、封印済みの run だけが並ぶ。この literal subPath は
-checkWorkspace の拒否対象ではない（拒否は work/ を指す書き込み可マウントの SubPath / SubPathExpr
-だけで、readOnly 側はコントローラが何も焼かないので衝突せず、handler が自由に書ける）。今まさに
-走っている run のディレクトリは work/ にいるので、この読み取り専用ビューには見えない。vct を書かない
+（annotation `flow.tgy.io/run-id` は配管の記録のまま）。過去を読むフェーズは同じ volume を readOnly +
+**`subPath: results`（明示）**でマウントする — 無指定は「この run」に焼かれるので、棚が欲しい
+マウントだけが棚と言う（[ADR-0003](adr/0003-run-view-and-sweep.md)）。マウント直下の `<runID>/` を
+開けば封印済みの run だけが並び、今走っている run は work/ にいるので見えない。readOnly の明示
+subPath は checkWorkspace の拒否対象ではない（拒否は書き込み可マウントの SubPath / SubPathExpr だけ）。
+
+**残骸は次の run の prepare が掃除する**（同 ADR-0003）。prepare は work/ を 1 階層上でマウントし、
+自分の run ディレクトリを作ってから、コントローラが計算した sweep リスト（何が生きているかを知る
+のはコントローラだけ。直列の今は自 runID 未満の全部で、並列化の日はリスト計算だけが変わる）にある
+`work/<id>` を消す。封印済みは rename で work/ に居ないので、消えるのは封印できず死んだ run の
+残骸だけ。消せなければ（NFS の sillyrename ゴースト等）エラー = その run は始まらず infra retry へ
+— 係争中のボリュームで新しい仕事を始めない。Escalated で止まった Task には次の run が来ないので、
+その残骸は検死素材として TTL まで残る。vct を書かない
 flow は従来どおり template の volume で完結する（opt-in）。
 
 **Pod の中で走るバイナリと controller が共有する名前（env / annotation / label）は依存ゼロの

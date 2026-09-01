@@ -107,4 +107,18 @@ const (
 	// say why. prepare refuses both outright — they are publish's alone.
 	FlagSealFrom = "seal-from"
 	FlagSealTo   = "seal-to"
+
+	// FlagRunDir is prepare's own run directory under a flow workspace —
+	// prepare mounts work/ itself and makes this run's directory inside it,
+	// so the directory is prepare's to create and open up rather than
+	// whatever the kubelet's subPath machinery would have left there.
+	// Absent for a template-backed workspace, which has no run layout.
+	FlagRunDir = "run-dir"
+	// FlagSweep is the comma-separated runIDs whose work/ leftovers prepare
+	// clears away before this run starts. The controller computes the list —
+	// only it knows which runs are live — and prepare deletes exactly what
+	// it is told (ADR-0003). Sealed runs left work/ when their rename moved
+	// them, so what this actually removes is the debris of attempts that
+	// died before sealing. Meaningful only with FlagRunDir.
+	FlagSweep = "sweep"
 )

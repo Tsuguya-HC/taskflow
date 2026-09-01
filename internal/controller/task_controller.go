@@ -569,6 +569,7 @@ func (r *TaskReconciler) ensureJob(
 		Directories:  transition.Directories(flow.Spec.Bindings, run.Phase),
 		SidecarImage: r.SidecarImage,
 		WorkspacePVC: workspacePVC,
+		SweepRuns:    sweepRuns(run.RunID),
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it
@@ -660,6 +661,20 @@ func (r *TaskReconciler) ensureWorkspacePVC(
 		return "", err
 	}
 	return pvc.Name, nil
+}
+
+// sweepRuns is every run before this one — what prepare may clear out of
+// work/. With runs strictly serial, a prior run is either sealed (its work
+// directory already renamed onto the shelf, so there is nothing to remove)
+// or abandoned. The day runs overlap, this is the one place that learns to
+// subtract the live ones; prepare stays a program that deletes what it is
+// told (ADR-0003).
+func sweepRuns(current int32) []int32 {
+	var ids []int32
+	for id := int32(1); id < current; id++ {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // deadlineOf is when the Job's own deadline falls: the timeout the handler

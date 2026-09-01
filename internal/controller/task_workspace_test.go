@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -91,8 +92,8 @@ var _ = Describe("a flow with a workspace", func() {
 		}
 		Expect(claimed).To(Equal(pvc.Name), "the reserved volume mounts this task's claim and no other")
 		prepare, publish := podSpec.InitContainers[0], podSpec.InitContainers[1]
-		Expect(prepare.VolumeMounts[0].SubPath).To(Equal("work/1"),
-			"a run in flight writes under its own number in work/, not results/")
+		Expect(prepare.VolumeMounts[0].SubPath).To(Equal("work"),
+			"prepare works one level above its run, where it can make this run's directory and sweep abandoned ones")
 		Expect(podSpec.Containers[0].VolumeMounts[0].SubPath).To(Equal("work/1"),
 			"the handler's own writable mount is pinned to the run's number in work/ too, not left to the handler to resolve")
 
@@ -147,6 +148,53 @@ var _ = Describe("a flow with a workspace", func() {
 		again, err := fx.reconciler.ensureWorkspacePVC(fx.ctx, tk, &flow)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(again).To(Equal(name), "the second call adopts the claim the first one made")
+	})
+
+	It("carries the previous run's sweep list onto the next run's prepare", func() {
+		fx.makeFlow(withWorkspace)
+		fx.makeHandler(onFlowWorkspace, func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		fx.makeTask()
+
+		fx.reconcile() // settles the starting phase
+		fx.reconcile() // creates the claim and the first Job
+		job := fx.job(1)
+
+		// The pod exists, but no container in it ever terminated — never
+		// pulled, the same infrastructure shape task_finish_test.go's own
+		// infra-retry spec uses to drive RunID forward without spending
+		// rework budget.
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      job.Name,
+				Namespace: resourceNamespace,
+				Labels:    map[string]string{batchv1.ControllerUidLabel: string(job.UID)},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
+			},
+		}
+		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
+
+		now := metav1.Now()
+		job.Status.StartTime = &now
+		job.Status.Conditions = append(job.Status.Conditions,
+			batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded},
+			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded})
+		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+
+		fx.reconcile() // records the infra retry; RunID moves to 2
+		Expect(fx.get().Status.RunID).To(BeEquivalentTo(2))
+
+		fx.reconcile() // creates the second Job
+		second := fx.job(2)
+		prepare := second.Spec.Template.Spec.InitContainers[0]
+		Expect(prepare.Args).To(Equal([]string{
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/2/out",
+			"--" + contract.FlagRunDir, "/workspace/2",
+			"--" + contract.FlagSweep, "1",
+		}), "run 1 never sealed, so its work/ leftovers are on run 2's sweep list")
 	})
 
 	It("refuses a stored flow whose workspace has no volumeClaimTemplate", func() {

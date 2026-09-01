@@ -721,7 +721,7 @@ func flowWorkspace(h *flowv1alpha1.TaskHandler) {
 func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 	job := build(t, Input{
 		Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate,
-		RunID: 3, WorkspacePVC: "cnp-check-x7f2-ws-abcd1234",
+		RunID: 3, WorkspacePVC: "cnp-check-x7f2-ws-abcd1234", SweepRuns: []int32{1, 2},
 	})
 	spec := job.Spec.Template.Spec
 
@@ -736,11 +736,18 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 	}
 
 	prepare, publish := spec.InitContainers[0], spec.InitContainers[1]
-	if got := prepare.VolumeMounts[0].SubPath; got != "work/3" {
-		t.Fatalf("prepare subPath = %q; a run in flight writes under its own number in work/, not results/", got)
+	if got := prepare.VolumeMounts[0].SubPath; got != "work" {
+		t.Fatalf("prepare subPath = %q; prepare works one level above its run, where it can make this run's directory and sweep abandoned ones", got)
 	}
 	if prepare.VolumeMounts[0].ReadOnly {
 		t.Fatal("prepare has to write the directories")
+	}
+	wantPrepare := []string{
+		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/3/out",
+		"--" + contract.FlagRunDir, "/workspace/3", "--" + contract.FlagSweep, "1,2",
+	}
+	if !reflect.DeepEqual(prepare.Args, wantPrepare) {
+		t.Fatalf("prepare args = %v, want %v", prepare.Args, wantPrepare)
 	}
 	if got := spec.Containers[0].VolumeMounts[0].SubPath; got != "work/3" {
 		t.Fatalf("agent subPath = %q; the handler's own writable mount lands under the run's own number in work/ too, pinned by the controller rather than left to the handler to resolve", got)
@@ -764,17 +771,21 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 	}
 }
 
-// A phase reading earlier runs mounts the flow workspace read-only, at the
-// volume's root, precisely so it sees every run rather than only the one in
-// progress; pinning a subPath onto it the way the writable mount is pinned
-// would hide every run but this one from something whose whole point is
-// looking back at them.
-func TestFlowWorkspaceLeavesAReadOnlyMountUnpinned(t *testing.T) {
+// A mount of the flow workspace that names no subPath of its own means
+// "this run", read-only or not: a sidecar that only reads its own run's
+// out/ — cnp-check's notify — should find it where it always was, without
+// resolving a run number first. The shelf of finished runs is asked for
+// explicitly, with subPath: results, and that mount is the handler's own
+// view: left exactly as written (ADR-0003).
+func TestFlowWorkspacePinsMountsThatNameNoView(t *testing.T) {
 	h := handler(flowWorkspace, func(h *flowv1alpha1.TaskHandler) {
 		spec := &h.Spec.JobTemplate.Template.Spec
 		spec.Containers = append(spec.Containers, corev1.Container{
+			Name: "notify", Image: "example.invalid/notify:v0",
+			VolumeMounts: []corev1.VolumeMount{{Name: contract.WorkspaceVolume, MountPath: "/workspace", ReadOnly: true}},
+		}, corev1.Container{
 			Name: "history", Image: "example.invalid/history:v0",
-			VolumeMounts: []corev1.VolumeMount{{Name: contract.WorkspaceVolume, MountPath: "/history", ReadOnly: true}},
+			VolumeMounts: []corev1.VolumeMount{{Name: contract.WorkspaceVolume, MountPath: "/results", ReadOnly: true, SubPath: "results"}},
 		})
 	})
 	job := build(t, Input{
@@ -782,12 +793,29 @@ func TestFlowWorkspaceLeavesAReadOnlyMountUnpinned(t *testing.T) {
 	})
 
 	for _, c := range job.Spec.Template.Spec.Containers {
-		if c.Name != "history" {
-			continue
+		switch c.Name {
+		case "notify":
+			if got := c.VolumeMounts[0].SubPath; got != "work/3" {
+				t.Fatalf("notify subPath = %q; no subPath means this run, read-only or not", got)
+			}
+		case "history":
+			if got := c.VolumeMounts[0].SubPath; got != "results" {
+				t.Fatalf("history subPath = %q; an explicit view is the handler's own and stays as written", got)
+			}
 		}
-		if got := c.VolumeMounts[0].SubPath; got != "" {
-			t.Fatalf("history subPath = %q; a read-only mount reads every run, not just this one", got)
-		}
+	}
+}
+
+// An empty sweep list must not become a flag: run 1 has nothing before it.
+func TestFirstRunHasNothingToSweep(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 1, WorkspacePVC: "run-one-claim"})
+	prepare := job.Spec.Template.Spec.InitContainers[0]
+	want := []string{
+		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1/out",
+		"--" + contract.FlagRunDir, "/workspace/1",
+	}
+	if !reflect.DeepEqual(prepare.Args, want) {
+		t.Fatalf("prepare args = %v, want %v", prepare.Args, want)
 	}
 }
 

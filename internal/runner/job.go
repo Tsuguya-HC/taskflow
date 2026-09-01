@@ -145,6 +145,14 @@ type Input struct {
 	// controller's to have made before building the Job; this only says
 	// what the reserved flow-workspace volume mounts.
 	WorkspacePVC string
+	// SweepRuns are the runIDs whose work/ leftovers prepare clears away
+	// before this run starts. The set is the controller's to compute —
+	// which runs are live is only visible from the cluster's state — and
+	// today, with runs strictly serial, it is every run before this one.
+	// Sealed runs left work/ when their rename shelved them, so what this
+	// actually removes is the debris of attempts that died before sealing
+	// (ADR-0003).
+	SweepRuns []int32
 }
 
 // ErrReservedField reports a jobTemplate that sets something the design keeps
@@ -207,7 +215,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	// A deep copy: the handler is a cached object shared with everything else
 	// reading it, and the caller would not expect building a Job to edit it.
 	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
-	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec), in.WorkspacePVC, in.RunID)
+	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec), in.WorkspacePVC, in.RunID, in.SweepRuns)
 
 	// The framework's annotations go on the pod as well as the Job: a
 	// container reads them through the downward API, and that reads the pod
@@ -401,14 +409,17 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler, hasFlowWorkspace bool) error {
 			return fmt.Errorf("%w: container %q is the framework's to add", ErrReservedField, c.Name)
 		}
 		for _, m := range c.VolumeMounts {
-			// A read-only mount is skipped here entirely, not just left
-			// unpinned by pinSubPath: the framework writes nothing under it,
-			// so a handler's own SubPath there cannot collide with anything
-			// it sets. §ADR-0002 決定5 recommends one — subPath: results,
-			// literally, so the mount's root lines up with resultsDir's
-			// instead of nesting results/results/<runID> under it — but
-			// that is a convention for handlers to follow, not a rule this
-			// function enforces.
+			// A read-only mount is skipped here by this loop's own checks
+			// regardless of what SubPath it sets: the framework writes
+			// nothing under it, so a handler's own SubPath there cannot
+			// collide with anything it sets. That does not mean pinSubPath
+			// leaves it alone, though. An explicit SubPath or SubPathExpr is
+			// never overwritten, readOnly or not — a mount naming
+			// subPath: results, literally, gets the shelf of sealed runs,
+			// its root lining up with resultsDir's instead of nesting
+			// results/results/<runID> under it. One left unset, though, is
+			// pinned to this run's view the same as a writable mount is,
+			// rather than showing the volume's root (§ADR-0003 決定1).
 			if m.Name != ws.Volume || m.ReadOnly {
 				continue
 			}
@@ -512,12 +523,12 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 // would otherwise have to carry just to name it — the run stays out of the
 // agent's own environment, the same as the annotation it is read from
 // stays out of reach of anything but the downward API (§ADR-0002 決定5).
-func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image string, uid int64, pvcName string, runID int32) {
+func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image string, uid int64, pvcName string, runID int32, sweep []int32) {
 	prepareSubPath := ""
 	prepareOut := path.Join(ws.MountPath, outDir)
 	publishOut := prepareOut
 	publishReadOnly := true
-	var sealArgs []string
+	var prepareArgs, sealArgs []string
 
 	if ws.Volume == contract.WorkspaceVolume {
 		pod.Volumes = append(pod.Volumes, corev1.Volume{
@@ -527,8 +538,23 @@ func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image st
 			},
 		})
 		run := strconv.Itoa(int(runID))
-		prepareSubPath = path.Join(workDir, run)
-		pinSubPath(pod, ws.Volume, prepareSubPath)
+		pinSubPath(pod, ws.Volume, path.Join(workDir, run))
+
+		// prepare mounts work/ itself, one level above its own run: it
+		// makes the run's directory (so the mode is chosen, not left to
+		// the kubelet's subPath machinery) and it clears away the debris
+		// of abandoned runs — both need the parent, neither needs the
+		// shelf, which stays out of its reach.
+		prepareSubPath = workDir
+		prepareOut = path.Join(ws.MountPath, run, outDir)
+		prepareArgs = []string{"--" + contract.FlagRunDir, path.Join(ws.MountPath, run)}
+		if len(sweep) > 0 {
+			ids := make([]string, len(sweep))
+			for i, id := range sweep {
+				ids[i] = strconv.Itoa(int(id))
+			}
+			prepareArgs = append(prepareArgs, "--"+contract.FlagSweep, strings.Join(ids, ","))
+		}
 
 		publishReadOnly = false
 		workAt := path.Join(ws.MountPath, workDir, run)
@@ -540,25 +566,31 @@ func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image st
 	}
 
 	prepare := sidecarContainer(PrepareContainer, image, contract.SubcommandPrepare, prepareOut, ws, uid, prepareSubPath, false)
+	prepare.Args = append(prepare.Args, prepareArgs...)
 	publish := sidecarContainer(PublishContainer, image, contract.SubcommandPublish, publishOut, ws, uid, "", publishReadOnly)
 	publish.Args = append(publish.Args, sealArgs...)
 	publish.RestartPolicy = ptr(corev1.ContainerRestartPolicyAlways)
 	pod.InitContainers = append([]corev1.Container{prepare, publish}, pod.InitContainers...)
 }
 
-// pinSubPath writes the per-run subPath onto every writable mount of the
-// flow-workspace volume among the handler's own containers — called before
-// the injected containers are prepended, so pod.InitContainers here still
-// holds only the handler's own. checkWorkspace has already refused a handler
-// that set its own SubPath or SubPathExpr on such a mount, so nothing here
-// is overwriting a value the handler wrote; a read-only mount is left alone,
-// since that is how a phase reads every run rather than only this one.
+// pinSubPath aims every handler mount of the flow-workspace volume that does
+// not say otherwise at this run's directory — writable or read-only alike:
+// no subPath means "this run", and the shelf of finished runs is asked for
+// explicitly with subPath: results (ADR-0003; the first cut pinned only
+// writable mounts, which left a sidecar that merely reads its own run's
+// out/ — cnp-check's notify — staring at the volume root, unable to find
+// its run without the very wiring this design removed). Called before the
+// injected containers are prepended, so pod.InitContainers here still holds
+// only the handler's own. checkWorkspace has already refused a handler that
+// set its own SubPath or SubPathExpr on a writable mount, so nothing here
+// overwrites a value the handler wrote; a read-only mount carrying an
+// explicit subPath is the handler's own view and left alone.
 func pinSubPath(pod *corev1.PodSpec, volume, subPath string) {
 	pin := func(containers []corev1.Container) {
 		for i := range containers {
 			for j := range containers[i].VolumeMounts {
 				m := &containers[i].VolumeMounts[j]
-				if m.Name == volume && !m.ReadOnly {
+				if m.Name == volume && m.SubPath == "" && m.SubPathExpr == "" {
 					m.SubPath = subPath
 				}
 			}
