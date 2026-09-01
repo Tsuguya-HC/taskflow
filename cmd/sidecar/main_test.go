@@ -218,6 +218,24 @@ func TestPublishWithOnlyOneSealFlagIsRefused(t *testing.T) {
 	}
 }
 
+// -seal-from must be -out's parent, the same shape prepare's own -run-dir
+// check enforces from the other end: a controller-built Job always sets
+// -out under -seal-from (runner.injectSidecars), so a mismatch here is a
+// mangled command line, not a run to attempt sealing.
+func TestPublishSealFromMustParentOut(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	log := termLog(t)
+	out := filepath.Join(t.TempDir(), "out")
+
+	err := run(append(runArgs(cmdPublish, out, log), "-seal-from", "/somewhere-else", "-seal-to", "/somewhere-else-2"))
+	if err == nil {
+		t.Fatal("publish with a -seal-from that is not -out's parent must be refused")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
+	}
+}
+
 // The seal flags are publish's alone; prepare never moves anything, so a
 // prepare command line naming either is a misconfiguration to fail on, the
 // same as any other flag mixup at that end of the run.
@@ -323,5 +341,157 @@ func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 
 	if got := readFile(t, log); got != "" {
 		t.Fatalf("termination log = %q; a failed move must not report a verdict at all", got)
+	}
+}
+
+// runArgsWithRun is runArgs plus the flags a flow-workspace prepare takes:
+// its own run directory, and optionally the abandoned runs to sweep first.
+func runArgsWithRun(cmd, out, log, runDir, sweep string) []string {
+	args := append(runArgs(cmd, out, log), "-run-dir", runDir)
+	if sweep != "" {
+		args = append(args, "-sweep", sweep)
+	}
+	return args
+}
+
+func TestPrepareMakesItsRunAndSweepsTheAbandoned(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	work := t.TempDir()
+	for _, d := range []string{"1", "2"} {
+		if err := os.MkdirAll(filepath.Join(work, d, "out", "ok"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log := termLog(t)
+	runDir := filepath.Join(work, "3")
+	out := filepath.Join(runDir, "out")
+	// Prepare closes out/ to 0555; open it back up so TempDir's own cleanup
+	// can remove what the test made.
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+
+	if err := run(runArgsWithRun(cmdPrepare, out, log, runDir, "1,2")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	for _, d := range []string{"1", "2"} {
+		if _, err := os.Stat(filepath.Join(work, d)); err == nil {
+			t.Fatalf("abandoned run %s survived the sweep", d)
+		}
+	}
+	info, err := os.Stat(runDir)
+	if err != nil || info.Mode().Perm() != 0o777 {
+		t.Fatalf("run dir = %v (%v); the agent must be able to write beside out/", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ok")); err != nil {
+		t.Fatalf("the vocabulary was not laid down: %v", err)
+	}
+}
+
+// Making the run's own directory failing must fail prepare outright, wired
+// end to end through run() rather than sidecar.MakeRun in isolation: work is
+// closed off before -run-dir is ever created, so MakeRun's own MkdirAll is
+// what fails, ahead of anything sweep or Prepare could do.
+func TestPrepareMakeRunFailureIsReported(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	work := t.TempDir()
+	if err := os.Chmod(work, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(work, 0o755) })
+
+	log := termLog(t)
+	runDir := filepath.Join(work, "3") // never created
+	out := filepath.Join(runDir, "out")
+	err := run(runArgsWithRun(cmdPrepare, out, log, runDir, ""))
+	if err == nil {
+		t.Fatal("prepare must fail when the run's own directory cannot be created")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "prepare failed:")
+	}
+}
+
+// A sweep that cannot remove a run's leftovers must fail prepare outright,
+// wired end to end through run() rather than sidecar.Sweep in isolation: the
+// run's own directory (work/3) is made first and must survive, only the
+// abandoned one (work/1) is left behind. work/3 already exists before work
+// is closed off, so MakeRun's MkdirAll finds it rather than needing to
+// create it — the failure has to come from the sweep, not from making the
+// run's own directory.
+func TestPrepareSweepFailureIsReported(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, "1", "out", "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(work, "3")
+	if err := os.Mkdir(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(work, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(work, 0o755) })
+
+	log := termLog(t)
+	out := filepath.Join(runDir, "out")
+	err := run(runArgsWithRun(cmdPrepare, out, log, runDir, "1"))
+	if err == nil {
+		t.Fatal("prepare must fail when a swept run cannot be removed")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "prepare failed:")
+	}
+	if _, err := os.Stat(filepath.Join(work, "1")); err != nil {
+		t.Fatalf("a failed sweep must leave the run's directory alone: %v", err)
+	}
+}
+
+func TestPrepareSweepWithoutARunDirIsRefused(t *testing.T) {
+	log := termLog(t)
+	if err := run(append(runArgs(cmdPrepare, "/x/3/out", log), "-sweep", "1")); err == nil {
+		t.Fatal("a sweep with no run-dir has no work/ to operate under and must be refused")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
+		t.Fatalf("termination log = %q; startup validation reports its cause", got)
+	}
+}
+
+func TestPrepareRunDirMustParentOut(t *testing.T) {
+	log := termLog(t)
+	if err := run(append(runArgs(cmdPrepare, "/x/other/out", log), "-run-dir", "/x/3")); err == nil {
+		t.Fatal("a run-dir that is not out's parent is a mangled command line and must be refused")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
+		t.Fatalf("termination log = %q; startup validation reports its cause", got)
+	}
+}
+
+func TestPublishWithPrepareFlagsIsRefused(t *testing.T) {
+	log := termLog(t)
+	if err := run(append(runArgs(cmdPublish, "/x/out", log), "-run-dir", "/x/3")); err == nil {
+		t.Fatal("run-dir is prepare's; publish must refuse it")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
+		t.Fatalf("termination log = %q; startup validation reports its cause", got)
+	}
+}
+
+// -sweep alone, with no -run-dir, must be just as refused as -run-dir was
+// above: the two are checked with an OR, and a test only ever setting
+// -run-dir never touches the -sweep side of it.
+func TestPublishWithSweepFlagIsRefused(t *testing.T) {
+	log := termLog(t)
+	if err := run(append(runArgs(cmdPublish, "/x/out", log), "-sweep", "1")); err == nil {
+		t.Fatal("sweep is prepare's; publish must refuse it")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
+		t.Fatalf("termination log = %q; startup validation reports its cause", got)
 	}
 }

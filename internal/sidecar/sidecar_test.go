@@ -356,3 +356,102 @@ func TestMessageRoundTripsThroughCollect(t *testing.T) {
 		}
 	}
 }
+
+func TestMakeRunCreatesAnOpenDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "3")
+	if err := MakeRun(dir); err != nil {
+		t.Fatalf("MakeRun: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("stat %s: %v", dir, err)
+	}
+	if got := info.Mode().Perm(); got != 0o777 {
+		t.Fatalf("mode = %o; the run's directory is the agent's scratch space, whatever uid it runs as", got)
+	}
+	if err := MakeRun(dir); err != nil {
+		t.Fatalf("MakeRun must tolerate a directory that already exists: %v", err)
+	}
+}
+
+// A symlink standing in for the run's own directory must not be followed:
+// MkdirAll finds it already "exists" (Stat follows the link), so it is
+// checkRealDir's Lstat that has to catch it — the same attack
+// TestPrepareRefusesASymlinkStandingInForADeclaredDirectory catches from the
+// other end, on out's own children rather than the run directory itself.
+func TestMakeRunRefusesASymlinkStandingInForTheRunDirectory(t *testing.T) {
+	root := t.TempDir()
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "3")
+	if err := os.Symlink(elsewhere, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	err := MakeRun(dir)
+	if !errors.Is(err, ErrNotADirectory) {
+		t.Fatalf("MakeRun with a symlink standing in for the run directory: err = %v, want ErrNotADirectory", err)
+	}
+}
+
+func TestSweepRemovesOnlyTheListed(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"1", "2", "3"} {
+		if err := os.MkdirAll(filepath.Join(root, d, "out", "ok"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Sweep(root, []string{"1", "2"}, "3"); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	for _, d := range []string{"1", "2"} {
+		if _, err := os.Stat(filepath.Join(root, d)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("run %s survived the sweep", d)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "3")); err != nil {
+		t.Fatalf("run 3 is not on the list and must survive: %v", err)
+	}
+	if err := Sweep(root, []string{"9"}, "3"); err != nil {
+		t.Fatalf("a run that never wrote anything has nothing to remove; that is fine: %v", err)
+	}
+}
+
+// A run that will not go must fail Sweep outright rather than being silently
+// skipped: new work must not start on a volume in a disputed state. Removal
+// is denied by closing off root itself, the same as
+// TestClosedOutRefusesAnUndeclaredDirectory does for a create — root's own
+// uid can always chmod its way back in, so this only shows the half a unit
+// test can.
+func TestSweepFailsWhenARunCannotBeRemoved(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "1", "out", "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	if err := Sweep(root, []string{"1"}, "2"); err == nil {
+		t.Fatal("Sweep must fail when a run's directory cannot be removed")
+	}
+	if _, err := os.Stat(filepath.Join(root, "1")); err != nil {
+		t.Fatalf("a failed sweep must leave the run's directory alone: %v", err)
+	}
+}
+
+func TestSweepRefusesABadList(t *testing.T) {
+	root := t.TempDir()
+	for _, ids := range [][]string{{"../results"}, {""}, {"3"}} {
+		if err := Sweep(root, ids, "3"); err == nil {
+			t.Fatalf("Sweep(%v) accepted a list it should refuse", ids)
+		}
+	}
+}

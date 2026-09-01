@@ -36,6 +36,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
@@ -75,6 +77,13 @@ func run(args []string) error {
 	// them too, below, rather than accepting and silently ignoring a typo.
 	sealFrom := fs.String(contract.FlagSealFrom, "", "publish only: move the run's directory from here once sealed")
 	sealTo := fs.String(contract.FlagSealTo, "", "publish only: move the run's directory to here once sealed")
+	// runDir and sweep are prepare-only, the same arrangement in the other
+	// direction: declared for both subcommands so a typo fails rather than
+	// being silently accepted, refused below when publish gets them.
+	runDir := fs.String(contract.FlagRunDir, "",
+		"prepare only: this run's own directory, made and opened before the vocabulary is laid down")
+	sweep := fs.String(contract.FlagSweep, "",
+		"prepare only: comma-separated runIDs whose work/ leftovers are cleared away first")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -97,6 +106,28 @@ func run(args []string) error {
 		cause := fmt.Errorf("-%s and -%s must be given together or not at all", contract.FlagSealFrom, contract.FlagSealTo)
 		return reportFailure(*termLog, cmd, cause)
 	}
+	if cmd == cmdPublish && *sealFrom != "" && filepath.Dir(*out) != *sealFrom {
+		// The same shape prepare's own -run-dir/-out check refuses: -out is
+		// always sealFrom/out, so a -seal-from naming anything else is a
+		// mangled command line, the kind a controller-built Job never writes
+		// (runner.injectSidecars sets both from the same run directory).
+		cause := fmt.Errorf("-%s %q is not the parent of -%s %q", contract.FlagSealFrom, *sealFrom, contract.FlagOut, *out)
+		return reportFailure(*termLog, cmd, cause)
+	}
+	if cmd == cmdPublish && (*runDir != "" || *sweep != "") {
+		cause := fmt.Errorf("-%s/-%s are prepare's to set, not publish's", contract.FlagRunDir, contract.FlagSweep)
+		return reportFailure(*termLog, cmd, cause)
+	}
+	if cmd == cmdPrepare {
+		if *sweep != "" && *runDir == "" {
+			cause := fmt.Errorf("-%s without -%s has no work/ to sweep under", contract.FlagSweep, contract.FlagRunDir)
+			return reportFailure(*termLog, cmd, cause)
+		}
+		if *runDir != "" && filepath.Dir(*out) != *runDir {
+			cause := fmt.Errorf("-%s %q is not the parent of -%s %q", contract.FlagRunDir, *runDir, contract.FlagOut, *out)
+			return reportFailure(*termLog, cmd, cause)
+		}
+	}
 
 	// Both subcommands need the same vocabulary — prepare to create it,
 	// publish to read it back — so it is read once here rather than
@@ -107,6 +138,20 @@ func run(args []string) error {
 	}
 
 	if cmd == cmdPrepare {
+		if *runDir != "" {
+			// The run's own directory first, the sweep second: a sweep
+			// that fails should not also leave this run without even a
+			// place it was being prepared in, and neither step touches the
+			// other's target — the sweep list never names this run.
+			if err := sidecar.MakeRun(*runDir); err != nil {
+				return reportFailure(*termLog, cmd, err)
+			}
+			if *sweep != "" {
+				if err := sidecar.Sweep(filepath.Dir(*runDir), strings.Split(*sweep, ","), filepath.Base(*runDir)); err != nil {
+					return reportFailure(*termLog, cmd, err)
+				}
+			}
+		}
 		if err := sidecar.Prepare(*out, declared); err != nil {
 			return reportFailure(*termLog, cmd, err)
 		}

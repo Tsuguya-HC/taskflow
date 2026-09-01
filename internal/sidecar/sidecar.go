@@ -275,3 +275,49 @@ func (a Answer) Message() string {
 	}
 	return a.Directory + "\n" + a.Reason
 }
+
+// MakeRun creates a run's own directory under work/ and opens it to everyone
+// in the pod — the declared directories' reasoning again: the agent runs as
+// whatever uid the handler chose, and the run's directory is its scratch
+// space, not part of the vocabulary. prepare makes it, rather than leaving it
+// to the kubelet's subPath machinery, so the mode is chosen instead of
+// inherited.
+func MakeRun(dir string) error {
+	if err := os.MkdirAll(dir, modeOpen); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	if err := checkRealDir(dir); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, modeDir); err != nil {
+		return fmt.Errorf("open %s for writing: %w", dir, err)
+	}
+	return nil
+}
+
+// Sweep removes the work/ leftovers of the runs it is told to — and only
+// those. The list is the controller's: which runs are live is only visible
+// where the cluster's state is, so what to delete is decided there and merely
+// executed here, next to the volume (ADR-0003). Every id has to look like a
+// run number and none may name this run itself; both are defenses against a
+// mangled invocation, not expected traffic.
+//
+// A directory already gone is fine — an abandoned run may never have written
+// anything, and a sweep may simply be running again. A directory that will
+// not go (NFS keeps one alive while some zombie still holds a file in it
+// open) is an error, and failing the run over it is deliberate: new work
+// does not start on a volume in a disputed state.
+func Sweep(root string, ids []string, self string) error {
+	for _, id := range ids {
+		if id == "" || strings.Trim(id, "0123456789") != "" {
+			return fmt.Errorf("sweep id %q is not a run number", id)
+		}
+		if id == self {
+			return fmt.Errorf("sweep id %q names this run itself", id)
+		}
+		if err := os.RemoveAll(filepath.Join(root, id)); err != nil {
+			return fmt.Errorf("sweep run %s: %w", id, err)
+		}
+	}
+	return nil
+}
