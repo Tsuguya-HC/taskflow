@@ -16,7 +16,10 @@ limitations under the License.
 
 // Package sidecar is the two ends of the verdict channel that live inside the
 // pod: prepare lays the declared directories down before the agent runs, and
-// seal reads which one was written into after it has finished.
+// seal reads which one was written into after it has finished. When the
+// task's flow brings a workspace, publish's closing act is Move — a rename
+// that shelves the now-sealed run where a later phase reads completed runs
+// back from, once and only once its answer is decided.
 //
 // It knows the layout and nothing else. What the directories are called comes
 // from the flow, through the environment; where they go comes from whoever
@@ -219,6 +222,46 @@ func summarize(entries []string) string {
 		return strings.Join(entries, ", ")
 	}
 	return fmt.Sprintf("%s and %d more", strings.Join(entries[:maxListed], ", "), len(entries)-maxListed)
+}
+
+// Move relocates a run's directory from the work/ shelf it wrote into onto
+// the results/ shelf a later phase reads back, once Seal has already decided
+// the run's answer. from and to are expected on the same volume, so the
+// rename is a single atomic step rather than a copy — the controller only
+// ever calls this with paths under one task's own claim.
+//
+// to must not already exist. results/<runID> being there already means
+// either an earlier publish already moved this run and this one should
+// never have run again, or something else put it there first; either way,
+// renaming over it would erase whatever is already sealed there; the check
+// runs before MkdirAll below rather than trusting os.Rename's own semantics
+// for it, since renaming a directory onto an existing *empty* one succeeds
+// silently on POSIX rather than failing — the one case that would matter
+// most, an answer already sitting there, is exactly the case a bare Rename
+// would not refuse.
+func Move(from, to string) error {
+	if _, err := os.Lstat(to); err == nil {
+		return fmt.Errorf("%s already exists; refusing to move %s over it", to, from)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", to, err)
+	}
+
+	shelf := filepath.Dir(to)
+	if err := os.MkdirAll(shelf, modeDir); err != nil {
+		return fmt.Errorf("create %s: %w", shelf, err)
+	}
+	// MkdirAll leaves an existing directory's mode alone, and the shelf may
+	// already be there from an earlier run's publish, running as a
+	// different uid; either way MkdirAll's own mode is subject to the
+	// umask, so it is set outright rather than trusted.
+	if err := os.Chmod(shelf, modeDir); err != nil {
+		return fmt.Errorf("open %s for writing: %w", shelf, err)
+	}
+
+	if err := os.Rename(from, to); err != nil {
+		return fmt.Errorf("move %s to %s: %w", from, to, err)
+	}
+	return nil
 }
 
 // Message renders an answer the way the controller reads it: the directory

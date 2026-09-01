@@ -19,7 +19,9 @@ limitations under the License.
 // code.
 //
 //	sidecar prepare   init container: create the declared directories, close out
-//	sidecar publish   native sidecar: wait to be stopped, then seal and report
+//	sidecar publish   native sidecar: wait to be stopped, seal, report — and,
+//	                  for a flow workspace, move the now-sealed run onto the
+//	                  results/ shelf first
 //
 // The declared directories arrive in FLOW_DIRECTORIES, which the controller
 // sets on every container. Where they live is the pod spec's business and
@@ -67,8 +69,33 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("sidecar "+cmd, flag.ContinueOnError)
 	out := fs.String(contract.FlagOut, "/workspace/out", "directory the declared directories are created under")
 	termLog := fs.String("termination-log", "/dev/termination-log", "where the answer is written for the controller")
+	// sealFrom and sealTo are publish-only, and meaningful only together: a
+	// flow workspace's run is shelved from the one to the other once sealed.
+	// Declared here regardless of cmd so prepare's own flag set can refuse
+	// them too, below, rather than accepting and silently ignoring a typo.
+	sealFrom := fs.String(contract.FlagSealFrom, "", "publish only: move the run's directory from here once sealed")
+	sealTo := fs.String(contract.FlagSealTo, "", "publish only: move the run's directory to here once sealed")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Both of these are startup validation, ahead of anything that could have
+	// produced a verdict yet — a misconfigured command line, same kind of
+	// fault as an unparsable flag. Reported the way every other prepare or
+	// publish failure ahead of Seal is: cause named, non-zero exit. That is
+	// not the same footing the Move failure below stands on, which happens
+	// only after Seal already has a real answer to have moved.
+	if cmd == cmdPrepare && (*sealFrom != "" || *sealTo != "") {
+		cause := fmt.Errorf("-%s/-%s are publish's to set, not prepare's", contract.FlagSealFrom, contract.FlagSealTo)
+		return reportFailure(*termLog, cmd, cause)
+	}
+	if cmd == cmdPublish && (*sealFrom == "") != (*sealTo == "") {
+		// One without the other is refused, not treated as neither: silently
+		// sealing only would leave a flow workspace's run stranded in work/
+		// forever, with nothing to say why it never reached the results/
+		// shelf a later phase reads back.
+		cause := fmt.Errorf("-%s and -%s must be given together or not at all", contract.FlagSealFrom, contract.FlagSealTo)
+		return reportFailure(*termLog, cmd, cause)
 	}
 
 	// Both subcommands need the same vocabulary — prepare to create it,
@@ -96,7 +123,28 @@ func run(args []string) error {
 	<-ctx.Done()
 
 	ans := sidecar.Seal(*out, declared)
+	// Printed before the move is attempted: a run whose move then fails
+	// still sealed to a real answer, and that answer belongs in the pod's
+	// own log even though it never reaches the termination message below —
+	// otherwise a failed move is the one path through publish that leaves no
+	// trace anywhere of what sealing actually found.
 	fmt.Println(ans.Message())
+	// The flag validation above has already ruled out one of these being
+	// set without the other; a flow workspace has both, a template-backed
+	// one has neither.
+	if *sealFrom != "" {
+		if err := sidecar.Move(*sealFrom, *sealTo); err != nil {
+			// Unlike the startup validation above, this comes after Seal
+			// already decided a real answer — and no termination message is
+			// written for it: a verdict without the move having actually
+			// happened would tell a later phase to read a run that never
+			// made it onto the results/ shelf. Coming through as no verdict
+			// at all — the same as any other infrastructure failure the
+			// controller retries on its own — is safer than an answer
+			// collect would otherwise trust.
+			return fmt.Errorf("publish: %w", err)
+		}
+	}
 	return report(*termLog, ans)
 }
 

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
 const (
@@ -558,6 +559,9 @@ func TestInjectsPrepareAndPublish(t *testing.T) {
 	if !publish.VolumeMounts[0].ReadOnly {
 		t.Fatal("publish only reads; give it no more")
 	}
+	if len(publish.Args) != 3 {
+		t.Fatalf("publish args = %v; a template-backed workspace has no results/ shelf to move a run onto", publish.Args)
+	}
 }
 
 // The sidecars read the vocabulary from the same environment as everyone
@@ -698,5 +702,201 @@ func TestRefusesATemplateUsingAnInjectedName(t *testing.T) {
 func TestRefusesToBuildWithoutASidecarImage(t *testing.T) {
 	if _, err := BuildJob(Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1}); err == nil {
 		t.Fatal("a Job with no publish container can never answer; building one must fail")
+	}
+}
+
+// flowWorkspace rewires the handler onto the reserved volume, the way a
+// handler joins a flow that brings a claim of its own.
+func flowWorkspace(h *flowv1alpha1.TaskHandler) {
+	h.Spec.Workspace.Volume = contract.WorkspaceVolume
+	spec := &h.Spec.JobTemplate.Template.Spec
+	spec.Volumes = nil
+	spec.InitContainers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
+	spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
+}
+
+// prepare and the handler's own containers write to work/<runID>, not
+// results/<runID>: results/ is the shelf of already-sealed runs, and a run
+// still in flight is not one of those yet (§ADR-0002 決定5, the mv design).
+func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate,
+		RunID: 3, WorkspacePVC: "cnp-check-x7f2-ws-abcd1234",
+	})
+	spec := job.Spec.Template.Spec
+
+	var claim *corev1.PersistentVolumeClaimVolumeSource
+	for _, v := range spec.Volumes {
+		if v.Name == contract.WorkspaceVolume {
+			claim = v.PersistentVolumeClaim
+		}
+	}
+	if claim == nil || claim.ClaimName != "cnp-check-x7f2-ws-abcd1234" {
+		t.Fatalf("volumes = %v; want flow-workspace backed by the task's claim", spec.Volumes)
+	}
+
+	prepare, publish := spec.InitContainers[0], spec.InitContainers[1]
+	if got := prepare.VolumeMounts[0].SubPath; got != "work/3" {
+		t.Fatalf("prepare subPath = %q; a run in flight writes under its own number in work/, not results/", got)
+	}
+	if prepare.VolumeMounts[0].ReadOnly {
+		t.Fatal("prepare has to write the directories")
+	}
+	if got := spec.Containers[0].VolumeMounts[0].SubPath; got != "work/3" {
+		t.Fatalf("agent subPath = %q; the handler's own writable mount lands under the run's own number in work/ too, pinned by the controller rather than left to the handler to resolve", got)
+	}
+
+	// publish moves this run from work/ to results/ once it seals, so its own
+	// mount cannot be pinned to either shelf — it needs the claim's root,
+	// writably, to see and rename between both.
+	if got := publish.VolumeMounts[0].SubPath; got != "" {
+		t.Fatalf("publish subPath = %q; a flow-workspace publish must mount the claim's root to see both shelves", got)
+	}
+	if publish.VolumeMounts[0].ReadOnly {
+		t.Fatal("publish must be able to write, to move the run onto the results/ shelf")
+	}
+	wantArgs := []string{
+		"publish", "--out", "/workspace/work/3/out",
+		"--seal-from", "/workspace/work/3", "--seal-to", "/workspace/results/3",
+	}
+	if !reflect.DeepEqual(publish.Args, wantArgs) {
+		t.Fatalf("publish args = %v, want %v", publish.Args, wantArgs)
+	}
+}
+
+// A phase reading earlier runs mounts the flow workspace read-only, at the
+// volume's root, precisely so it sees every run rather than only the one in
+// progress; pinning a subPath onto it the way the writable mount is pinned
+// would hide every run but this one from something whose whole point is
+// looking back at them.
+func TestFlowWorkspaceLeavesAReadOnlyMountUnpinned(t *testing.T) {
+	h := handler(flowWorkspace, func(h *flowv1alpha1.TaskHandler) {
+		spec := &h.Spec.JobTemplate.Template.Spec
+		spec.Containers = append(spec.Containers, corev1.Container{
+			Name: "history", Image: "example.invalid/history:v0",
+			VolumeMounts: []corev1.VolumeMount{{Name: contract.WorkspaceVolume, MountPath: "/history", ReadOnly: true}},
+		})
+	})
+	job := build(t, Input{
+		Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 3, WorkspacePVC: "some-claim",
+	})
+
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name != "history" {
+			continue
+		}
+		if got := c.VolumeMounts[0].SubPath; got != "" {
+			t.Fatalf("history subPath = %q; a read-only mount reads every run, not just this one", got)
+		}
+	}
+}
+
+// The per-run layout under a writable flow-workspace mount is the
+// controller's to pin, at generation time; a handler that already wrote a
+// SubPath or SubPathExpr there would either have it silently overwritten
+// every run, or — for a SubPathExpr expecting $(FLOW_RUN_ID) — run against a
+// variable this design deliberately never injects. Refused rather than
+// merged, same as every other reserved field.
+func TestRefusesAHandlerSettingItsOwnLayoutOnAWritableFlowWorkspaceMount(t *testing.T) {
+	cases := map[string]func(*flowv1alpha1.TaskHandler){
+		"subPath": func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.JobTemplate.Template.Spec.Containers[0].VolumeMounts[0].SubPath = "mine"
+		},
+		"subPathExpr": func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.JobTemplate.Template.Spec.Containers[0].VolumeMounts[0].SubPathExpr = "$(SOME_VAR)"
+		},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := handler(flowWorkspace, mut)
+			_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage, WorkspacePVC: "x"})
+			if !errors.Is(err, ErrReservedField) {
+				t.Fatalf("err = %v; the per-run layout under a writable flow-workspace mount is the framework's to set", err)
+			}
+		})
+	}
+}
+
+// A phase may stay on its own template volume even when the flow brings a
+// claim: nothing forces every handler through the shared workspace, and the
+// flat layout it has today must not change underneath it.
+func TestATemplateVolumeKeepsTheFlatLayout(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(), Phase: phaseInvestigate,
+		RunID: 2, WorkspacePVC: "some-claim",
+	})
+	spec := job.Spec.Template.Spec
+	for _, c := range spec.InitContainers[:2] {
+		if got := c.VolumeMounts[0].SubPath; got != "" {
+			t.Fatalf("%s subPath = %q; a template-backed workspace has no run layout", c.Name, got)
+		}
+	}
+	for _, v := range spec.Volumes {
+		if v.Name == contract.WorkspaceVolume {
+			t.Fatal("the reserved volume was added though nothing mounts it")
+		}
+	}
+}
+
+func TestRefusesATemplateVolumeWearingTheReservedName(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		spec := &h.Spec.JobTemplate.Template.Spec
+		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: contract.WorkspaceVolume})
+	})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage, WorkspacePVC: "x"})
+	if !errors.Is(err, ErrReservedField) {
+		t.Fatalf("err = %v; a template volume under the injected name would silently differ from what runs", err)
+	}
+}
+
+func TestRefusesFlowWorkspaceUnderAFlowWithoutOne(t *testing.T) {
+	h := handler(flowWorkspace)
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
+	if !errors.Is(err, ErrWorkspace) {
+		t.Fatalf("err = %v; a mount of a claim no flow brings fails at the kubelet, too late and too quietly", err)
+	}
+}
+
+func TestWorkspacePVCNameIsUIDDerived(t *testing.T) {
+	a := WorkspacePVCName("cnp-check", "uid-1")
+	if a != WorkspacePVCName("cnp-check", "uid-1") {
+		t.Fatal("not deterministic")
+	}
+	if a == WorkspacePVCName("cnp-check", "uid-2") {
+		t.Fatal("two tasks under one name must not share a claim")
+	}
+	long := WorkspacePVCName(strings.Repeat("x", 80), "uid-1")
+	if len(long) > maxNameLength {
+		t.Fatalf("len = %d; a claim name over the limit is refused by the apiserver", len(long))
+	}
+}
+
+func TestBuildWorkspacePVCOwnership(t *testing.T) {
+	vct := &corev1.PersistentVolumeClaimSpec{
+		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+	}
+	tk := task()
+	pvc := BuildWorkspacePVC(tk, vct)
+
+	if pvc.Name != WorkspacePVCName(tk.Name, tk.UID) || pvc.Namespace != tk.Namespace {
+		t.Fatalf("claim is %s/%s; want the task's namespace under the derived name", pvc.Namespace, pvc.Name)
+	}
+	if pvc.Labels[LabelTaskUID] != taskUID {
+		t.Fatalf("labels = %v; the bookkeeping label is the controller's to set", pvc.Labels)
+	}
+	if len(pvc.OwnerReferences) != 1 {
+		t.Fatalf("ownerReferences = %v", pvc.OwnerReferences)
+	}
+	ref := pvc.OwnerReferences[0]
+	if ref.UID != taskUID || ref.Controller == nil || !*ref.Controller {
+		t.Fatalf("ownerReference = %+v; the claim must be controlled by its task", ref)
+	}
+	if ref.BlockOwnerDeletion != nil && *ref.BlockOwnerDeletion {
+		t.Fatal("the claim rides the task's TTL out; it does not get a say in the deletion")
+	}
+
+	vct.AccessModes[0] = corev1.ReadWriteOnce
+	if pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+		t.Fatal("the claim's spec must be a copy, not an alias of the flow's")
 	}
 }

@@ -44,11 +44,16 @@ const (
 	// label because these are free strings: 調査 is not a legal label value
 	// and not a legal object name either.
 	AnnotationPhase = "flow.tgy.io/phase"
-	// AnnotationRunID is read by the plumbing that files results under
-	// results/<runID>/. The agent has no use for it — it opens
-	// results/1/ok and reads — and there is reason to keep it away from
-	// one: a run count suggests how much rope is left, the same way a
-	// remaining-rework count would.
+	// AnnotationRunID is the record of which attempt this is, carried on the
+	// pod for whoever wants it — not read by the plumbing itself: prepare and
+	// publish get the run's paths as CLI arguments the controller computes
+	// at generation time (runner.injectSidecars), never by reading this
+	// back. A handler's own author can still pull it into a container of
+	// their own via a fieldRef, the way any other annotation would be. The
+	// agent has no use for it — it opens work/1/ok while the run is in
+	// flight and reads — and there is reason to keep it away from one: a run
+	// count suggests how much rope is left, the same way a remaining-rework
+	// count would.
 	AnnotationRunID = "flow.tgy.io/run-id"
 	// AnnotationPrevRunID is absent on the first run.
 	AnnotationPrevRunID = "flow.tgy.io/prev-run-id"
@@ -70,6 +75,14 @@ const (
 	// on disk anyway.
 	EnvDirectories = "FLOW_DIRECTORIES"
 
+	// WorkspaceVolume is the name of the volume the controller adds to a Job
+	// when the task's flow declares a workspace, backed by that task's own
+	// claim. A handler joins the flow's workspace by naming it in
+	// spec.workspace.volume and mounting it from its own containers; a
+	// template that defines a volume under this name itself is refused, the
+	// same way a container wearing an injected container's name is.
+	WorkspaceVolume = "flow-workspace"
+
 	// SubcommandPrepare and SubcommandPublish name the sidecar binary's two
 	// subcommands. The Job template the controller builds (runner.BuildJob)
 	// and the sidecar's own argument parsing (cmd/sidecar) both read these,
@@ -81,4 +94,17 @@ const (
 	// sidecar's flag set use for the directory the declared directories are
 	// created under.
 	FlagOut = "out"
+
+	// FlagSealFrom and FlagSealTo name the flags publish takes when the
+	// task's flow brings a workspace: once sealing has decided the run's
+	// answer, publish moves its own directory from the work/ shelf it wrote
+	// into onto the results/ shelf a later phase reads back, one rename
+	// within the same volume (§ADR-0002 決定5). Both absent means publish
+	// only seals — the template-volume case, where there is no shelf to
+	// move between. One without the other is refused rather than treated as
+	// neither: a run silently left sealing-only in a flow workspace would
+	// never reach the results/ shelf a later phase reads, with nothing to
+	// say why. prepare refuses both outright — they are publish's alone.
+	FlagSealFrom = "seal-from"
+	FlagSealTo   = "seal-to"
 )

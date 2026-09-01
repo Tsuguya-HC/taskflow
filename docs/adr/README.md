@@ -11,3 +11,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | # | status | 決定 |
 |---|---|---|
 | [0001](0001-inject-sidecars.md) | accepted | prepare / publish サイドカーはコントローラが注入する |
+| [0002](0002-per-task-workspace-pvc.md) | accepted | フェーズ間の引き渡しは Task ごとの PVC、claim は flow が書く |

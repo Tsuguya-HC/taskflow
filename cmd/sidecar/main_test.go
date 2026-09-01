@@ -53,6 +53,12 @@ func runArgs(cmd, out, log string) []string {
 	return []string{cmd, "-out", out, "-termination-log", log}
 }
 
+// runArgsWithSeal is runArgs plus the two flags a flow-workspace publish
+// takes, so a run's directory moves from sealFrom to sealTo once sealed.
+func runArgsWithSeal(cmd, out, log, sealFrom, sealTo string) []string {
+	return append(runArgs(cmd, out, log), "-seal-from", sealFrom, "-seal-to", sealTo)
+}
+
 func TestRunWithNoArgsIsAnError(t *testing.T) {
 	if err := run(nil); err == nil {
 		t.Fatal("run(nil): want an error, got nil")
@@ -190,5 +196,132 @@ func TestPublishSealsAndReportsOnSIGTERM(t *testing.T) {
 
 	if got := readFile(t, log); got == "" {
 		t.Fatal("termination log is empty; publish must report an answer once stopped")
+	}
+}
+
+// One seal flag without the other is refused outright, before publish even
+// waits for SIGTERM — a controller-built Job always sets both together
+// (runner.injectSidecars), so reaching this at all means something else
+// wrote the command line, and silently sealing only would strand the run in
+// work/ forever with nothing to say why it never reached results/.
+func TestPublishWithOnlyOneSealFlagIsRefused(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	log := termLog(t)
+	out := filepath.Join(t.TempDir(), "out")
+
+	err := run(append(runArgs(cmdPublish, out, log), "-seal-from", "/somewhere"))
+	if err == nil {
+		t.Fatal("publish with only -seal-from set must be refused")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
+	}
+}
+
+// The seal flags are publish's alone; prepare never moves anything, so a
+// prepare command line naming either is a misconfiguration to fail on, the
+// same as any other flag mixup at that end of the run.
+func TestPrepareWithSealFlagsIsRefused(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	log := termLog(t)
+	out := filepath.Join(t.TempDir(), "out")
+
+	err := run(append(runArgs(cmdPrepare, out, log), "-seal-from", "/somewhere"))
+	if err == nil {
+		t.Fatal("prepare with a seal flag set must be refused")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "prepare failed:")
+	}
+}
+
+// A flow-workspace publish moves the sealed run from work/<runID> to
+// results/<runID> before it reports anything, once -seal-from and -seal-to
+// are both given.
+func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	log := termLog(t)
+	root := t.TempDir()
+	sealFrom := filepath.Join(root, "work", "3")
+	sealTo := filepath.Join(root, "results", "3")
+	out := filepath.Join(sealFrom, "out")
+	// prepare closes out to 0o555 on success; a successful move relocates it
+	// to sealTo/out, so it is that path, not the original, TempDir's cleanup
+	// needs reopened.
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(sealTo, "out"), 0o755) })
+	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
+		t.Fatalf("run(prepare): %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(runArgsWithSeal(cmdPublish, out, log, sealFrom, sealTo))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run(publish): %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run(publish) did not return after SIGTERM")
+	}
+
+	if _, err := os.Stat(sealFrom); !os.IsNotExist(err) {
+		t.Fatalf("work/3 still exists after publish moved it: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sealTo, "out")); err != nil {
+		t.Fatalf("results/3 does not hold the moved out/: %v", err)
+	}
+	if got := readFile(t, log); got == "" {
+		t.Fatal("termination log is empty; a successful move must still report the answer")
+	}
+}
+
+// A move that cannot complete must not report a verdict at all: an answer
+// without the run actually having made it onto the results/ shelf would tell
+// a later phase to read a directory that is not there. This has to come
+// through as no termination message and a non-zero exit, the same as any
+// other infrastructure failure, rather than as an answer collect would trust.
+func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	log := termLog(t)
+	root := t.TempDir()
+	sealFrom := filepath.Join(root, "work", "3")
+	sealTo := filepath.Join(root, "results", "3")
+	out := filepath.Join(sealFrom, "out")
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
+		t.Fatalf("run(prepare): %v", err)
+	}
+	// results/3 already exists, so Move must refuse rather than overwrite it.
+	if err := os.MkdirAll(sealTo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(runArgsWithSeal(cmdPublish, out, log, sealFrom, sealTo))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run(publish) must fail when the move is refused")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run(publish) did not return after SIGTERM")
+	}
+
+	if got := readFile(t, log); got != "" {
+		t.Fatalf("termination log = %q; a failed move must not report a verdict at all", got)
 	}
 }
