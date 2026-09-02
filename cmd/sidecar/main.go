@@ -62,6 +62,23 @@ const (
 	cmdPublish = contract.SubcommandPublish
 )
 
+// options is the parsed command line, the same set for both subcommands:
+// each one's flags are declared on the other's flag set too, so a flag given
+// to the wrong subcommand fails in checkFlags rather than being silently
+// accepted and ignored.
+type options struct {
+	out     string
+	termLog string
+	// sealFrom and sealTo are publish-only, and meaningful only together: a
+	// flow workspace's run is shelved from the one to the other once sealed.
+	sealFrom string
+	sealTo   string
+	// runDir and sweep are prepare-only, the same arrangement in the other
+	// direction.
+	runDir string
+	sweep  string
+}
+
 func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: sidecar prepare|publish [flags]")
@@ -71,73 +88,36 @@ func run(args []string) error {
 		return fmt.Errorf("unknown subcommand %q: want prepare or publish", cmd)
 	}
 
+	var o options
 	fs := flag.NewFlagSet("sidecar "+cmd, flag.ContinueOnError)
-	out := fs.String(contract.FlagOut, "/workspace/out", "directory the declared directories are created under")
-	termLog := fs.String("termination-log", "/dev/termination-log", "where the answer is written for the controller")
-	// sealFrom and sealTo are publish-only, and meaningful only together: a
-	// flow workspace's run is shelved from the one to the other once sealed.
-	// Declared here regardless of cmd so prepare's own flag set can refuse
-	// them too, below, rather than accepting and silently ignoring a typo.
-	sealFrom := fs.String(contract.FlagSealFrom, "", "publish only: move the run's directory from here once sealed")
-	sealTo := fs.String(contract.FlagSealTo, "", "publish only: move the run's directory to here once sealed")
-	// runDir and sweep are prepare-only, the same arrangement in the other
-	// direction: declared for both subcommands so a typo fails rather than
-	// being silently accepted, refused below when publish gets them.
-	runDir := fs.String(contract.FlagRunDir, "",
+	fs.StringVar(&o.out, contract.FlagOut, "/workspace/out", "directory the declared directories are created under")
+	fs.StringVar(&o.termLog, "termination-log", "/dev/termination-log", "where the answer is written for the controller")
+	fs.StringVar(&o.sealFrom, contract.FlagSealFrom, "", "publish only: move the run's directory from here once sealed")
+	fs.StringVar(&o.sealTo, contract.FlagSealTo, "", "publish only: move the run's directory to here once sealed")
+	fs.StringVar(&o.runDir, contract.FlagRunDir, "",
 		"prepare only: this run's own directory, made and opened before the vocabulary is laid down")
-	sweep := fs.String(contract.FlagSweep, "",
+	fs.StringVar(&o.sweep, contract.FlagSweep, "",
 		"prepare only: comma-separated runIDs whose work/ leftovers are cleared away first")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	// Both of these are startup validation, ahead of anything that could have
-	// produced a verdict yet — a misconfigured command line, same kind of
-	// fault as an unparsable flag. Reported the way every other prepare or
-	// publish failure ahead of Seal is: cause named, non-zero exit. That is
-	// not the same footing the Move failure below stands on, which happens
-	// only after Seal already has a real answer to have moved.
-	if cmd == cmdPrepare && (*sealFrom != "" || *sealTo != "") {
-		cause := fmt.Errorf("-%s/-%s are publish's to set, not prepare's", contract.FlagSealFrom, contract.FlagSealTo)
-		return reportFailure(*termLog, cmd, cause)
+	// Everything up to the subcommand's own body is startup validation,
+	// ahead of anything that could have produced a verdict yet — a
+	// misconfigured command line, same kind of fault as an unparsable flag.
+	// Reported the way every other prepare or publish failure ahead of Seal
+	// is: cause named, non-zero exit. That is not the same footing publish's
+	// Move failure stands on, which happens only after Seal already has a
+	// real answer to have moved.
+	if cause := checkFlags(cmd, o); cause != nil {
+		return reportFailure(o.termLog, cmd, cause)
 	}
-	if cmd == cmdPublish && (*sealFrom == "") != (*sealTo == "") {
-		// One without the other is refused, not treated as neither: silently
-		// sealing only would leave a flow workspace's run stranded in work/
-		// forever, with nothing to say why it never reached the results/
-		// shelf a later phase reads back.
-		cause := fmt.Errorf("-%s and -%s must be given together or not at all", contract.FlagSealFrom, contract.FlagSealTo)
-		return reportFailure(*termLog, cmd, cause)
-	}
-	if cmd == cmdPublish && *sealFrom != "" && filepath.Dir(*out) != *sealFrom {
-		// The same shape prepare's own -run-dir/-out check refuses: -out is
-		// always sealFrom/out, so a -seal-from naming anything else is a
-		// mangled command line, the kind a controller-built Job never writes
-		// (runner.injectSidecars sets both from the same run directory).
-		cause := fmt.Errorf("-%s %q is not the parent of -%s %q", contract.FlagSealFrom, *sealFrom, contract.FlagOut, *out)
-		return reportFailure(*termLog, cmd, cause)
-	}
-	if cmd == cmdPublish && (*runDir != "" || *sweep != "") {
-		cause := fmt.Errorf("-%s/-%s are prepare's to set, not publish's", contract.FlagRunDir, contract.FlagSweep)
-		return reportFailure(*termLog, cmd, cause)
-	}
-	if cmd == cmdPrepare {
-		if *sweep != "" && *runDir == "" {
-			cause := fmt.Errorf("-%s without -%s has no work/ to sweep under", contract.FlagSweep, contract.FlagRunDir)
-			return reportFailure(*termLog, cmd, cause)
-		}
-		if *runDir != "" && filepath.Dir(*out) != *runDir {
-			cause := fmt.Errorf("-%s %q is not the parent of -%s %q", contract.FlagRunDir, *runDir, contract.FlagOut, *out)
-			return reportFailure(*termLog, cmd, cause)
-		}
-	}
-
 	// Both subcommands need the same vocabulary — prepare to create it,
 	// publish to read it back — so it is read once here rather than
-	// duplicated in each branch below.
+	// duplicated in each.
 	declared, err := declaredDirectories()
 	if err != nil {
-		return reportFailure(*termLog, cmd, err)
+		return reportFailure(o.termLog, cmd, err)
 	}
 	// A flow workspace's run is marked with the pod that prepared it and
 	// checked against the pod that publishes it, so the identity is needed
@@ -145,43 +125,85 @@ func run(args []string) error {
 	// Read up front for the same reason the vocabulary is: a missing one
 	// should fail before anything has been touched.
 	podUID := ""
-	if *runDir != "" || *sealFrom != "" {
+	if o.runDir != "" || o.sealFrom != "" {
 		if podUID, err = podIdentity(); err != nil {
-			return reportFailure(*termLog, cmd, err)
+			return reportFailure(o.termLog, cmd, err)
 		}
 	}
 
 	if cmd == cmdPrepare {
-		if *runDir != "" {
-			// The run's own directory first, the sweep second: a sweep
-			// that fails should not also leave this run without even a
-			// place it was being prepared in, and neither step touches the
-			// other's target — the sweep list never names this run. The
-			// mark goes down last of the three, once the directory it
-			// belongs in is known to be the fresh one MakeRun made, and
-			// ahead of Prepare so it is closed in with the vocabulary.
-			if err := sidecar.MakeRun(*runDir); err != nil {
-				return reportFailure(*termLog, cmd, err)
-			}
-			if *sweep != "" {
-				if err := sidecar.Sweep(filepath.Dir(*runDir), strings.Split(*sweep, ","), filepath.Base(*runDir)); err != nil {
-					return reportFailure(*termLog, cmd, err)
-				}
-			}
-			if err := sidecar.Mark(*out, podUID); err != nil {
-				return reportFailure(*termLog, cmd, err)
-			}
+		return prepare(o, declared, podUID)
+	}
+	return publish(o, declared, podUID)
+}
+
+// checkFlags refuses the command lines a controller-built Job never writes:
+// one subcommand's flags handed to the other, or a flow workspace's flags
+// given by halves.
+func checkFlags(cmd string, o options) error {
+	if cmd == cmdPrepare {
+		if o.sealFrom != "" || o.sealTo != "" {
+			return fmt.Errorf("-%s/-%s are publish's to set, not prepare's", contract.FlagSealFrom, contract.FlagSealTo)
 		}
-		if err := sidecar.Prepare(*out, declared); err != nil {
-			return reportFailure(*termLog, cmd, err)
+		if o.sweep != "" && o.runDir == "" {
+			return fmt.Errorf("-%s without -%s has no work/ to sweep under", contract.FlagSweep, contract.FlagRunDir)
 		}
-		fmt.Printf("prepared %s with %v\n", *out, declared)
+		if o.runDir != "" && filepath.Dir(o.out) != o.runDir {
+			return fmt.Errorf("-%s %q is not the parent of -%s %q", contract.FlagRunDir, o.runDir, contract.FlagOut, o.out)
+		}
 		return nil
 	}
+	if (o.sealFrom == "") != (o.sealTo == "") {
+		// One without the other is refused, not treated as neither: silently
+		// sealing only would leave a flow workspace's run stranded in work/
+		// forever, with nothing to say why it never reached the results/
+		// shelf a later phase reads back.
+		return fmt.Errorf("-%s and -%s must be given together or not at all", contract.FlagSealFrom, contract.FlagSealTo)
+	}
+	if o.sealFrom != "" && filepath.Dir(o.out) != o.sealFrom {
+		// The same shape prepare's own -run-dir/-out check refuses: -out is
+		// always sealFrom/out, so a -seal-from naming anything else is a
+		// mangled command line (runner.injectSidecars sets both from the
+		// same run directory).
+		return fmt.Errorf("-%s %q is not the parent of -%s %q", contract.FlagSealFrom, o.sealFrom, contract.FlagOut, o.out)
+	}
+	if o.runDir != "" || o.sweep != "" {
+		return fmt.Errorf("-%s/-%s are prepare's to set, not publish's", contract.FlagRunDir, contract.FlagSweep)
+	}
+	return nil
+}
 
-	// cmd == cmdPublish: a native sidecar is stopped with SIGTERM once the
-	// main containers have finished. That signal is the only "the run is
-	// over" there is.
+func prepare(o options, declared []string, podUID string) error {
+	if o.runDir != "" {
+		// The run's own directory first, the sweep second: a sweep that
+		// fails should not also leave this run without even a place it was
+		// being prepared in, and neither step touches the other's target —
+		// the sweep list never names this run. The mark goes down last of
+		// the three, once the directory it belongs in is known to be the
+		// fresh one MakeRun made, and ahead of Prepare so it is closed in
+		// with the vocabulary.
+		if err := sidecar.MakeRun(o.runDir); err != nil {
+			return reportFailure(o.termLog, cmdPrepare, err)
+		}
+		if o.sweep != "" {
+			if err := sidecar.Sweep(filepath.Dir(o.runDir), strings.Split(o.sweep, ","), filepath.Base(o.runDir)); err != nil {
+				return reportFailure(o.termLog, cmdPrepare, err)
+			}
+		}
+		if err := sidecar.Mark(o.out, podUID); err != nil {
+			return reportFailure(o.termLog, cmdPrepare, err)
+		}
+	}
+	if err := sidecar.Prepare(o.out, declared); err != nil {
+		return reportFailure(o.termLog, cmdPrepare, err)
+	}
+	fmt.Printf("prepared %s with %v\n", o.out, declared)
+	return nil
+}
+
+func publish(o options, declared []string, podUID string) error {
+	// A native sidecar is stopped with SIGTERM once the main containers have
+	// finished. That signal is the only "the run is over" there is.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	fmt.Println("waiting for the run to finish")
@@ -195,24 +217,23 @@ func run(args []string) error {
 	// the same path, and an answer read out of that is not this run's to
 	// report, let alone to shelve. Ahead of Seal, this is startup
 	// validation's footing: cause named, non-zero exit, no verdict.
-	if *sealFrom != "" {
-		if err := sidecar.CheckMark(*out, podUID); err != nil {
-			return reportFailure(*termLog, cmd, err)
+	if o.sealFrom != "" {
+		if err := sidecar.CheckMark(o.out, podUID); err != nil {
+			return reportFailure(o.termLog, cmdPublish, err)
 		}
 	}
 
-	ans := sidecar.Seal(*out, declared)
+	ans := sidecar.Seal(o.out, declared)
 	// Printed before the move is attempted: a run whose move then fails
 	// still sealed to a real answer, and that answer belongs in the pod's
 	// own log even though it never reaches the termination message below —
 	// otherwise a failed move is the one path through publish that leaves no
 	// trace anywhere of what sealing actually found.
 	fmt.Println(ans.Message())
-	// The flag validation above has already ruled out one of these being
-	// set without the other; a flow workspace has both, a template-backed
-	// one has neither.
-	if *sealFrom != "" {
-		if err := sidecar.Move(*sealFrom, *sealTo); err != nil {
+	// checkFlags has already ruled out one of these being set without the
+	// other; a flow workspace has both, a template-backed one has neither.
+	if o.sealFrom != "" {
+		if err := sidecar.Move(o.sealFrom, o.sealTo); err != nil {
 			// Unlike the startup validation above, this comes after Seal
 			// already decided a real answer — and no termination message is
 			// written for it: a verdict without the move having actually
@@ -224,7 +245,7 @@ func run(args []string) error {
 			return fmt.Errorf("publish: %w", err)
 		}
 	}
-	return report(*termLog, ans)
+	return report(o.termLog, ans)
 }
 
 // declaredDirectories reads the vocabulary the controller put in the

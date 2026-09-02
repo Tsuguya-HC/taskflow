@@ -157,7 +157,7 @@ var _ = Describe("a flow with a workspace", func() {
 		fx.makeFlow(withWorkspace, func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
 				Handler: fx.name,
-				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: "more"},
+				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: nextMore},
 			}
 		})
 		fx.makeHandler(onFlowWorkspace)
@@ -178,15 +178,15 @@ var _ = Describe("a flow with a workspace", func() {
 			},
 			Spec: corev1.PodSpec{
 				RestartPolicy: corev1.RestartPolicyNever,
-				Containers:    []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
+				Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
 			},
 		}
 		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
 		pod.Status.Phase = corev1.PodSucceeded
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:  "agent",
-			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: "more"}},
+			Name:  agentName,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: nextMore}},
 		}}
 		Expect(k8sClient.Status().Update(fx.ctx, pod)).To(Succeed())
 
@@ -235,7 +235,7 @@ var _ = Describe("a flow with a workspace", func() {
 			},
 			Spec: corev1.PodSpec{
 				RestartPolicy: corev1.RestartPolicyNever,
-				Containers:    []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
+				Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
 			},
 		}
 		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())

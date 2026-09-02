@@ -351,14 +351,14 @@ var _ = Describe("finishing a run", func() {
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
 				Handler: fx.name,
-				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: "more"},
+				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: nextMore},
 			}
 		})
 		fx.makeHandler()
 		fx.makeTask()
 		job := start()
 
-		podOf(job, "", terminated(agentName, "more"))
+		podOf(job, "", terminated(agentName, nextMore))
 		finish(job, "")
 		fx.reconcile()
 

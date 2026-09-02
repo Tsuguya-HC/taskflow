@@ -55,10 +55,10 @@ func runArgs(cmd, out, log string) []string {
 	return []string{cmd, "-out", out, "-termination-log", log}
 }
 
-// runArgsWithSeal is runArgs plus the two flags a flow-workspace publish
+// publishArgs is runArgs for publish plus the two flags a flow-workspace one
 // takes, so a run's directory moves from sealFrom to sealTo once sealed.
-func runArgsWithSeal(cmd, out, log, sealFrom, sealTo string) []string {
-	return append(runArgs(cmd, out, log), "-seal-from", sealFrom, "-seal-to", sealTo)
+func publishArgs(out, log, sealFrom, sealTo string) []string {
+	return append(runArgs(cmdPublish, out, log), "-seal-from", sealFrom, "-seal-to", sealTo)
 }
 
 func TestRunWithNoArgsIsAnError(t *testing.T) {
@@ -270,13 +270,13 @@ func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 	// to sealTo/out, so it is that path, not the original, TempDir's cleanup
 	// needs reopened.
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(sealTo, "out"), 0o755) })
-	if err := run(runArgsWithRun(cmdPrepare, out, log, sealFrom, "")); err != nil {
+	if err := run(prepareArgs(out, log, sealFrom, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- run(runArgsWithSeal(cmdPublish, out, log, sealFrom, sealTo))
+		done <- run(publishArgs(out, log, sealFrom, sealTo))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -320,7 +320,7 @@ func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 	sealTo := filepath.Join(root, "results", "3")
 	out := filepath.Join(sealFrom, "out")
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
-	if err := run(runArgsWithRun(cmdPrepare, out, log, sealFrom, "")); err != nil {
+	if err := run(prepareArgs(out, log, sealFrom, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 	// results/3 already exists, so Move must refuse rather than overwrite it.
@@ -330,7 +330,7 @@ func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- run(runArgsWithSeal(cmdPublish, out, log, sealFrom, sealTo))
+		done <- run(publishArgs(out, log, sealFrom, sealTo))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -351,10 +351,10 @@ func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 	}
 }
 
-// runArgsWithRun is runArgs plus the flags a flow-workspace prepare takes:
+// prepareArgs is runArgs for prepare plus the flags a flow-workspace one takes:
 // its own run directory, and optionally the abandoned runs to sweep first.
-func runArgsWithRun(cmd, out, log, runDir, sweep string) []string {
-	args := append(runArgs(cmd, out, log), "-run-dir", runDir)
+func prepareArgs(out, log, runDir, sweep string) []string {
+	args := append(runArgs(cmdPrepare, out, log), "-run-dir", runDir)
 	if sweep != "" {
 		args = append(args, "-sweep", sweep)
 	}
@@ -377,7 +377,7 @@ func TestPrepareMakesItsRunAndSweepsTheAbandoned(t *testing.T) {
 	// can remove what the test made.
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
 
-	if err := run(runArgsWithRun(cmdPrepare, out, log, runDir, "1,2")); err != nil {
+	if err := run(prepareArgs(out, log, runDir, "1,2")); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -408,7 +408,7 @@ func TestPrepareWithARunButNoPodIdentityFailsAndReportsIt(t *testing.T) {
 	runDir := filepath.Join(work, "3")
 	out := filepath.Join(runDir, "out")
 
-	err := run(runArgsWithRun(cmdPrepare, out, log, runDir, ""))
+	err := run(prepareArgs(out, log, runDir, ""))
 	if err == nil {
 		t.Fatal("prepare with -run-dir but no pod identity must fail")
 	}
@@ -427,7 +427,7 @@ func TestPublishWithSealButNoPodIdentityFailsAndReportsIt(t *testing.T) {
 	sealFrom := filepath.Join(root, "work", "3")
 	out := filepath.Join(sealFrom, "out")
 
-	err := run(runArgsWithSeal(cmdPublish, out, log, sealFrom, filepath.Join(root, "results", "3")))
+	err := run(publishArgs(out, log, sealFrom, filepath.Join(root, "results", "3")))
 	if err == nil {
 		t.Fatal("publish with seal flags but no pod identity must fail")
 	}
@@ -450,7 +450,7 @@ func TestPublishRefusesAnotherPodsRunWithoutSealing(t *testing.T) {
 	sealTo := filepath.Join(root, "results", "3")
 	out := filepath.Join(sealFrom, "out")
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
-	if err := run(runArgsWithRun(cmdPrepare, out, log, sealFrom, "")); err != nil {
+	if err := run(prepareArgs(out, log, sealFrom, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 	// The live attempt has answered; the zombie must not carry that off.
@@ -464,7 +464,7 @@ func TestPublishRefusesAnotherPodsRunWithoutSealing(t *testing.T) {
 	t.Setenv(contract.EnvPodUID, "pod-a")
 	done := make(chan error, 1)
 	go func() {
-		done <- run(runArgsWithSeal(cmdPublish, out, log, sealFrom, sealTo))
+		done <- run(publishArgs(out, log, sealFrom, sealTo))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -510,7 +510,7 @@ func TestPrepareMakeRunFailureIsReported(t *testing.T) {
 	log := termLog(t)
 	runDir := filepath.Join(work, "3") // never created
 	out := filepath.Join(runDir, "out")
-	err := run(runArgsWithRun(cmdPrepare, out, log, runDir, ""))
+	err := run(prepareArgs(out, log, runDir, ""))
 	if err == nil {
 		t.Fatal("prepare must fail when the run's own directory cannot be created")
 	}
@@ -548,7 +548,7 @@ func TestPrepareSweepFailureIsReported(t *testing.T) {
 
 	log := termLog(t)
 	out := filepath.Join(runDir, "out")
-	err := run(runArgsWithRun(cmdPrepare, out, log, runDir, "1"))
+	err := run(prepareArgs(out, log, runDir, "1"))
 	if err == nil {
 		t.Fatal("prepare must fail when a swept run cannot be removed")
 	}
