@@ -316,8 +316,8 @@ func TestExecutionMechanics(t *testing.T) {
 }
 
 func TestNameIsDeterministicAndLegal(t *testing.T) {
-	a := JobName("cnp-check-x7f2", phaseInvestigate, 2)
-	b := JobName("cnp-check-x7f2", phaseInvestigate, 2)
+	a := JobName("cnp-check-x7f2", phaseInvestigate, 2, 0)
+	b := JobName("cnp-check-x7f2", phaseInvestigate, 2, 0)
 	if a != b {
 		t.Fatalf("%q != %q; creating twice must conflict rather than make a second Job", a, b)
 	}
@@ -331,21 +331,66 @@ func TestNameIsDeterministicAndLegal(t *testing.T) {
 			t.Fatalf("name %q contains %q, which RFC 1123 does not allow", a, r)
 		}
 	}
-	if JobName("cnp-check-x7f2", "報告", 2) == a {
+	if JobName("cnp-check-x7f2", "報告", 2, 0) == a {
 		t.Fatal("two phases produced the same name")
 	}
-	if JobName("cnp-check-x7f2", phaseInvestigate, 3) == a {
+	if JobName("cnp-check-x7f2", phaseInvestigate, 3, 0) == a {
 		t.Fatal("two runs produced the same name")
+	}
+}
+
+// A run keeps its number across infrastructure retries, so the number alone
+// no longer separates two attempts at starting it — and the Job the last
+// attempt left behind is still there to collide with.
+func TestRetriesOfOneRunGetDistinctNames(t *testing.T) {
+	first := JobName("cnp-check-x7f2", phaseInvestigate, 2, 0)
+	second := JobName("cnp-check-x7f2", phaseInvestigate, 2, 1)
+	third := JobName("cnp-check-x7f2", phaseInvestigate, 2, 2)
+	if first == second || second == third || first == third {
+		t.Fatalf("attempts at run 2 collided: %q, %q, %q", first, second, third)
+	}
+	// The first attempt is spelled the way it always was, so only a run that
+	// actually retried carries the extra segment.
+	if !strings.HasPrefix(first, "cnp-check-x7f2-2-") || strings.Contains(first, "-r") {
+		t.Fatalf("first attempt = %q, want the bare run-and-phase form", first)
+	}
+	if !strings.HasPrefix(second, "cnp-check-x7f2-2-r1-") {
+		t.Fatalf("second attempt = %q, want the run's name with the attempt in it", second)
+	}
+	for _, name := range []string{second, third} {
+		if len(name) > maxNameLength {
+			t.Fatalf("name is %d characters: %q", len(name), name)
+		}
+		for _, r := range name {
+			lower := r >= 'a' && r <= 'z'
+			digit := r >= '0' && r <= '9'
+			if !lower && !digit && r != '-' {
+				t.Fatalf("name %q contains %q, which Kubernetes rejects", name, r)
+			}
+		}
+	}
+}
+
+// A retried run of a task whose name had to be cut still has to fit, and the
+// extra segment is exactly what would push it over.
+func TestRetryNameStaysWithinTheLimit(t *testing.T) {
+	long := strings.Repeat("x", 200)
+	name := JobName(long, phaseInvestigate, 12, 7)
+	if len(name) > maxNameLength {
+		t.Fatalf("name is %d characters: %q", len(name), name)
+	}
+	if name == JobName(long, phaseInvestigate, 12, 0) {
+		t.Fatal("truncation collapsed two attempts onto one name")
 	}
 }
 
 func TestNameStaysWithinTheLimit(t *testing.T) {
 	long := strings.Repeat("x", 200)
-	name := JobName(long, phaseInvestigate, 12)
+	name := JobName(long, phaseInvestigate, 12, 0)
 	if len(name) > maxNameLength {
 		t.Fatalf("name is %d characters: %q", len(name), name)
 	}
-	if name == JobName(long, "報告", 12) {
+	if name == JobName(long, "報告", 12, 0) {
 		t.Fatal("truncation collapsed two phases onto one name")
 	}
 }
@@ -355,8 +400,8 @@ func TestNameStaysWithinTheLimit(t *testing.T) {
 func TestTruncatedNamesStayDistinct(t *testing.T) {
 	a := "cnp-check-" + strings.Repeat("a", 60) + "-x7f2a"
 	b := "cnp-check-" + strings.Repeat("a", 60) + "-q91zz"
-	nameA := JobName(a, phaseInvestigate, 1)
-	nameB := JobName(b, phaseInvestigate, 1)
+	nameA := JobName(a, phaseInvestigate, 1, 0)
+	nameB := JobName(b, phaseInvestigate, 1, 0)
 	if nameA == nameB {
 		t.Fatalf("two task names differing only after the truncation point collided on %q", nameA)
 	}
@@ -577,6 +622,38 @@ func TestInjectedContainersGetTheVocabulary(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("%s env = %v; without %s it cannot lay the directories down", c.Name, c.Env, EnvDirectories)
+		}
+	}
+}
+
+// The sidecars need to know which pod they are — prepare to mark the run,
+// publish to check the mark before moving it (ADR-0004). The pod's UID is not
+// known when the Job is built, so it is the one thing they take from the pod
+// itself, by fieldRef. The handler's containers get no such thing: what pod
+// they are in is not their concern, and a leaked identity is one more way to
+// tell how much rope is left.
+func TestInjectedContainersKnowTheirOwnPod(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	for _, c := range job.Spec.Template.Spec.InitContainers[:2] {
+		found := false
+		for _, e := range c.Env {
+			if e.Name != EnvPodUID {
+				continue
+			}
+			if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil || e.ValueFrom.FieldRef.FieldPath != "metadata.uid" {
+				t.Fatalf("%s %s = %+v; want the pod's own uid by fieldRef", c.Name, EnvPodUID, e)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("%s env = %v; without %s it cannot tell its run from a later attempt's", c.Name, c.Env, EnvPodUID)
+		}
+	}
+	for _, c := range append(job.Spec.Template.Spec.InitContainers[2:], job.Spec.Template.Spec.Containers...) {
+		for _, e := range c.Env {
+			if e.Name == EnvPodUID {
+				t.Fatalf("%s carries %s; the pod's identity is the sidecars' business", c.Name, EnvPodUID)
+			}
 		}
 	}
 }

@@ -19,6 +19,7 @@ package sidecar
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,16 @@ func TestPrepareRefusesANameThatIsNotOnePathElement(t *testing.T) {
 		if !errors.Is(err, ErrBadName) {
 			t.Fatalf("Prepare with %q: err = %v, want ErrBadName", bad, err)
 		}
+	}
+}
+
+// A flow declaring markName as one of its own directories would let Prepare's
+// Mkdir land on the file Mark already wrote there — ErrNotADirectory on every
+// run. checkName has to refuse the name outright, ahead of that collision.
+func TestPrepareRefusesTheMarkNameAsADeclaration(t *testing.T) {
+	err := Prepare(filepath.Join(t.TempDir(), "out"), []string{"ok", markName})
+	if !errors.Is(err, ErrBadName) {
+		t.Fatalf("Prepare with %q declared: err = %v, want ErrBadName", markName, err)
 	}
 }
 
@@ -394,6 +405,193 @@ func TestMakeRunRefusesASymlinkStandingInForTheRunDirectory(t *testing.T) {
 	err := MakeRun(dir)
 	if !errors.Is(err, ErrNotADirectory) {
 		t.Fatalf("MakeRun with a symlink standing in for the run directory: err = %v, want ErrNotADirectory", err)
+	}
+}
+
+// A run keeps its number across infrastructure retries, so the second
+// attempt's prepare finds the first attempt's directory sitting where it is
+// about to work. Leftovers from an attempt that reached the agent would
+// otherwise be there to be read as this attempt's own.
+func TestMakeRunClearsWhatTheLastAttemptLeft(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "3")
+	if err := os.MkdirAll(filepath.Join(dir, "out", "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "out", "ok", "report.md")
+	if err := os.WriteFile(stale, []byte("the last attempt's answer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MakeRun(dir); err != nil {
+		t.Fatalf("MakeRun over the last attempt's directory: %v", err)
+	}
+
+	if _, err := os.Lstat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the last attempt's report survived into this one: err = %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("run directory is not empty: %v", entries)
+	}
+}
+
+// A dir that exists but cannot be cleared must fail MakeRun outright rather
+// than starting work on top of whatever RemoveAll left behind — the same
+// bargain Sweep strikes with the abandoned runs, applied to this run's own
+// leftovers.
+func TestMakeRunFailsWhenTheExistingDirectoryCannotBeRemoved(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "3")
+	if err := os.MkdirAll(filepath.Join(dir, "out", "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	if err := MakeRun(dir); err == nil {
+		t.Fatal("MakeRun must fail when the existing run directory cannot be removed")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("a failed MakeRun must leave the existing directory alone: %v", err)
+	}
+}
+
+// The mark is laid ahead of the vocabulary and closed in with it: once
+// Prepare has run, the agent's uid can neither remove nor rewrite it, the
+// same way it cannot touch the declared directories' set — and the mark
+// stays out of Seal's way, which reads only the declared names.
+func TestMarkIsClosedInWithTheVocabulary(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(root, "3", "out")
+	if err := Mark(out, "pod-a"); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if err := Prepare(out, declared); err != nil {
+		t.Fatalf("Prepare over a marked out/: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+
+	if err := CheckMark(out, "pod-a"); err != nil {
+		t.Fatalf("CheckMark with the pod that marked it: %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(out, markName))
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+		t.Fatalf("mark = %v (%v); want a regular file nobody but its owner can write", info, err)
+	}
+	if got := Seal(out, declared); got.Directory != "" || !strings.Contains(got.Reason, "nothing was written") {
+		t.Fatalf("Seal over a marked out/ = %+v; the mark must not count as an answer", got)
+	}
+	if os.Getuid() != 0 {
+		if err := os.Remove(filepath.Join(out, markName)); err == nil {
+			t.Fatal("the mark could be removed through the closed out/")
+		}
+	}
+}
+
+// A publish whose pod is not the one that prepared the directory has found
+// another attempt's run at its path, and must not touch it.
+func TestCheckMarkRefusesAnotherPodsRun(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(root, "3", "out")
+	if err := Mark(out, "pod-a"); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+
+	err := CheckMark(out, "pod-b")
+	if !errors.Is(err, ErrMark) {
+		t.Fatalf("CheckMark as another pod: err = %v, want ErrMark", err)
+	}
+	if !strings.Contains(err.Error(), "pod-a") || !strings.Contains(err.Error(), "pod-b") {
+		t.Fatalf("err = %q; a human reading it should see both pods", err)
+	}
+}
+
+// No mark at all means nothing of this binary's prepared the directory — a
+// run laid down under an older sidecar, or a path that is not a run at all.
+// Neither is this pod's to shelve.
+func TestCheckMarkRefusesAnUnmarkedRun(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(root, "3", "out")
+	if err := os.MkdirAll(filepath.Join(out, "ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CheckMark(out, "pod-a"); !errors.Is(err, ErrMark) {
+		t.Fatalf("CheckMark over an unmarked out/: err = %v, want ErrMark", err)
+	}
+}
+
+// Mark runs on the directory MakeRun just cleared, so a mark already there
+// is a directory that is not the fresh one it was meant to be. Exclusive
+// creation is what refuses it — WriteFile would truncate and carry on.
+func TestMarkRefusesToOverwrite(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(root, "3", "out")
+	if err := Mark(out, "pod-a"); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+
+	if err := Mark(out, "pod-b"); err == nil {
+		t.Fatal("Mark over an existing mark must be refused")
+	}
+	if err := CheckMark(out, "pod-a"); err != nil {
+		t.Fatalf("a refused Mark must leave the existing one intact: %v", err)
+	}
+}
+
+// A symlink standing in for out/ would carry Mark's write, and Prepare's
+// chmod after it, wherever the link points — the same substitution
+// MakeRun and Prepare refuse on their own targets.
+func TestMarkRefusesASymlinkStandingInForOut(t *testing.T) {
+	root := t.TempDir()
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(root, "3", "out")
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, out); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Mark(out, "pod-a"); !errors.Is(err, ErrNotADirectory) {
+		t.Fatalf("Mark through a symlink: err = %v, want ErrNotADirectory", err)
+	}
+	if _, err := os.Lstat(filepath.Join(elsewhere, markName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the mark landed where the link pointed: err = %v", err)
+	}
+}
+
+// CheckMark must not follow a symlink standing in for the mark either: Lstat
+// catches it ahead of ReadFile, which would otherwise happily read through to
+// whatever the link points at — even a file naming the right pod.
+func TestCheckMarkRefusesASymlinkStandingInForTheMark(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(root, "3", "out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.WriteFile(elsewhere, []byte("pod-a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(out, markName)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CheckMark(out, "pod-a"); !errors.Is(err, ErrMark) {
+		t.Fatalf("CheckMark with a symlink standing in for the mark: err = %v, want ErrMark", err)
 	}
 }
 

@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
+	"github.com/Tsuguya-HC/taskflow/internal/sidecar"
 )
 
 // termLog returns the path to a termination-log file that already exists,
@@ -258,6 +260,7 @@ func TestPrepareWithSealFlagsIsRefused(t *testing.T) {
 // are both given.
 func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	t.Setenv(contract.EnvPodUID, "pod-a")
 	log := termLog(t)
 	root := t.TempDir()
 	sealFrom := filepath.Join(root, "work", "3")
@@ -267,7 +270,7 @@ func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 	// to sealTo/out, so it is that path, not the original, TempDir's cleanup
 	// needs reopened.
 	t.Cleanup(func() { _ = os.Chmod(filepath.Join(sealTo, "out"), 0o755) })
-	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
+	if err := run(runArgsWithRun(cmdPrepare, out, log, sealFrom, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 
@@ -298,6 +301,9 @@ func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 	if got := readFile(t, log); got == "" {
 		t.Fatal("termination log is empty; a successful move must still report the answer")
 	}
+	if got := readFile(t, filepath.Join(sealTo, "out", ".prepared-by")); got != "pod-a" {
+		t.Fatalf("the shelved run's mark = %q, want the pod that prepared it to travel with it", got)
+	}
 }
 
 // A move that cannot complete must not report a verdict at all: an answer
@@ -307,13 +313,14 @@ func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 // other infrastructure failure, rather than as an answer collect would trust.
 func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	t.Setenv(contract.EnvPodUID, "pod-a")
 	log := termLog(t)
 	root := t.TempDir()
 	sealFrom := filepath.Join(root, "work", "3")
 	sealTo := filepath.Join(root, "results", "3")
 	out := filepath.Join(sealFrom, "out")
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
-	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
+	if err := run(runArgsWithRun(cmdPrepare, out, log, sealFrom, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 	// results/3 already exists, so Move must refuse rather than overwrite it.
@@ -356,6 +363,7 @@ func runArgsWithRun(cmd, out, log, runDir, sweep string) []string {
 
 func TestPrepareMakesItsRunAndSweepsTheAbandoned(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	t.Setenv(contract.EnvPodUID, "pod-a")
 	work := t.TempDir()
 	for _, d := range []string{"1", "2"} {
 		if err := os.MkdirAll(filepath.Join(work, d, "out", "ok"), 0o755); err != nil {
@@ -385,6 +393,102 @@ func TestPrepareMakesItsRunAndSweepsTheAbandoned(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "ok")); err != nil {
 		t.Fatalf("the vocabulary was not laid down: %v", err)
 	}
+	if got := readFile(t, filepath.Join(out, ".prepared-by")); got != "pod-a" {
+		t.Fatalf("mark = %q, want this pod's identity closed in with the vocabulary", got)
+	}
+}
+
+// The identity is needed the moment there is a run to mark, and its absence
+// is a misbuilt Job rather than something to carry on without: a run left
+// unmarked could never be shelved by its own publish.
+func TestPrepareWithARunButNoPodIdentityFailsAndReportsIt(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	work := t.TempDir()
+	log := termLog(t)
+	runDir := filepath.Join(work, "3")
+	out := filepath.Join(runDir, "out")
+
+	err := run(runArgsWithRun(cmdPrepare, out, log, runDir, ""))
+	if err == nil {
+		t.Fatal("prepare with -run-dir but no pod identity must fail")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") || !strings.Contains(got, contract.EnvPodUID) {
+		t.Fatalf("termination log = %q, want it to name %s", got, contract.EnvPodUID)
+	}
+	if _, err := os.Lstat(runDir); !os.IsNotExist(err) {
+		t.Fatalf("the run directory was made before the identity was checked: %v", err)
+	}
+}
+
+func TestPublishWithSealButNoPodIdentityFailsAndReportsIt(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	log := termLog(t)
+	root := t.TempDir()
+	sealFrom := filepath.Join(root, "work", "3")
+	out := filepath.Join(sealFrom, "out")
+
+	err := run(runArgsWithSeal(cmdPublish, out, log, sealFrom, filepath.Join(root, "results", "3")))
+	if err == nil {
+		t.Fatal("publish with seal flags but no pod identity must fail")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "publish failed:") || !strings.Contains(got, contract.EnvPodUID) {
+		t.Fatalf("termination log = %q, want it to name %s", got, contract.EnvPodUID)
+	}
+}
+
+// A publish that outlives its own pod's record still gets its SIGTERM, and by
+// then the next attempt at the same runID may be working at the same path.
+// It must not seal what it finds there, let alone shelve it: the failure is
+// reported the way startup validation's is, and the run stays where the live
+// attempt left it.
+func TestPublishRefusesAnotherPodsRunWithoutSealing(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	t.Setenv(contract.EnvPodUID, "pod-b")
+	log := termLog(t)
+	root := t.TempDir()
+	sealFrom := filepath.Join(root, "work", "3")
+	sealTo := filepath.Join(root, "results", "3")
+	out := filepath.Join(sealFrom, "out")
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+	if err := run(runArgsWithRun(cmdPrepare, out, log, sealFrom, "")); err != nil {
+		t.Fatalf("run(prepare): %v", err)
+	}
+	// The live attempt has answered; the zombie must not carry that off.
+	if err := os.WriteFile(filepath.Join(out, "ok", "report.md"), []byte("the live attempt's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(log, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv(contract.EnvPodUID, "pod-a")
+	done := make(chan error, 1)
+	go func() {
+		done <- run(runArgsWithSeal(cmdPublish, out, log, sealFrom, sealTo))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, sidecar.ErrMark) {
+			t.Fatalf("run(publish) as another pod: err = %v, want ErrMark", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run(publish) did not return after SIGTERM")
+	}
+
+	if got := readFile(t, log); !strings.HasPrefix(got, "publish failed:") || strings.HasPrefix(got, "ok") {
+		t.Fatalf("termination log = %q; the refusal must be reported, never the other run's answer", got)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ok", "report.md")); err != nil {
+		t.Fatalf("the live attempt's run was disturbed: %v", err)
+	}
+	if _, err := os.Lstat(sealTo); !os.IsNotExist(err) {
+		t.Fatalf("results/3 appeared: %v", err)
+	}
 }
 
 // Making the run's own directory failing must fail prepare outright, wired
@@ -396,6 +500,7 @@ func TestPrepareMakeRunFailureIsReported(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	t.Setenv(contract.EnvPodUID, "pod-a")
 	work := t.TempDir()
 	if err := os.Chmod(work, 0o555); err != nil {
 		t.Fatal(err)
@@ -417,15 +522,16 @@ func TestPrepareMakeRunFailureIsReported(t *testing.T) {
 // A sweep that cannot remove a run's leftovers must fail prepare outright,
 // wired end to end through run() rather than sidecar.Sweep in isolation: the
 // run's own directory (work/3) is made first and must survive, only the
-// abandoned one (work/1) is left behind. work/3 already exists before work
-// is closed off, so MakeRun's MkdirAll finds it rather than needing to
-// create it — the failure has to come from the sweep, not from making the
-// run's own directory.
+// abandoned one (work/1) is left behind. work itself stays writable — closing
+// it off would make MakeRun's own RemoveAll of the pre-existing work/3 fail
+// first, never reaching the sweep — so it is work/1/out that is closed
+// instead, refusing the removal of what it holds.
 func TestPrepareSweepFailureIsReported(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	t.Setenv(contract.EnvPodUID, "pod-a")
 	work := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(work, "1", "out", "ok"), 0o755); err != nil {
 		t.Fatal(err)
@@ -434,10 +540,11 @@ func TestPrepareSweepFailureIsReported(t *testing.T) {
 	if err := os.Mkdir(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(work, 0o555); err != nil {
+	abandonedOut := filepath.Join(work, "1", "out")
+	if err := os.Chmod(abandonedOut, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(work, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(abandonedOut, 0o755) })
 
 	log := termLog(t)
 	out := filepath.Join(runDir, "out")

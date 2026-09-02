@@ -71,6 +71,7 @@ const (
 	EnvPhase       = contract.EnvPhase
 	EnvInput       = contract.EnvInput
 	EnvDirectories = contract.EnvDirectories
+	EnvPodUID      = contract.EnvPodUID
 
 	frameworkPrefix = contract.Prefix
 
@@ -127,8 +128,13 @@ type Input struct {
 	// handler, so a handler bound to the wrong phase fails validation rather
 	// than quietly running under its own name.
 	Phase flowv1alpha1.Phase
-	// RunID of this attempt.
+	// RunID of this run. It is the run's number, not the attempt's: an
+	// infrastructure retry comes back with the same one.
 	RunID int32
+	// Attempt is how many infrastructure retries this run has spent, and 0
+	// on the first try. It separates the Jobs of a run that had to be
+	// started more than once, which RunID no longer does.
+	Attempt int32
 	// PrevRunID is 0 when this is the first attempt.
 	PrevRunID int32
 	// Directories the flow declares for this phase — the only answers the
@@ -176,9 +182,22 @@ var ErrWorkspace = errors.New("workspace is not usable")
 // Object names commonly carry their distinguishing part at the end — a
 // generateName suffix, for instance — and two task names that agree up to
 // the cut would otherwise collide on the exact same Job name.
-func JobName(taskName string, phase flowv1alpha1.Phase, runID int32) string {
+//
+// attempt is how many infrastructure retries this run has already spent, and
+// it appears in the name only once it is nonzero. A run keeps its number
+// across those retries (taskstate.RetryInfra), so the number alone no longer
+// tells two attempts apart, and the Job the first attempt left behind is
+// still there — the controller does not delete it, the task's own deletion
+// collects it. Leaving the first attempt's name bare keeps the common case
+// spelled the way it always was, and means only a run that actually retried
+// carries the extra segment.
+func JobName(taskName string, phase flowv1alpha1.Phase, runID, attempt int32) string {
 	phaseSum := sha256.Sum256([]byte(phase))
-	suffix := fmt.Sprintf("-%d-%s", runID, hex.EncodeToString(phaseSum[:])[:phaseHashLength])
+	retry := ""
+	if attempt > 0 {
+		retry = fmt.Sprintf("-r%d", attempt)
+	}
+	suffix := fmt.Sprintf("-%d%s-%s", runID, retry, hex.EncodeToString(phaseSum[:])[:phaseHashLength])
 	prefix := taskName
 	if len(prefix)+len(suffix) > maxNameLength {
 		taskSum := sha256.Sum256([]byte(taskName))
@@ -243,9 +262,10 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 			Spec: tpl.Spec,
 		},
 		// Job-internal retry is off. An attempt that failed for reasons
-		// outside the handler's judgement is re-run by the controller under a
-		// new runID, so it gets fresh directories rather than reading what the
-		// last one left.
+		// outside the handler's judgement is re-run by the controller as a
+		// Job of its own — same runID, next attempt in the name (ADR-0004) —
+		// so the retry is visible in the object rather than buried in a
+		// Job's own backoff.
 		BackoffLimit: ptr(int32(0)),
 	}
 	if in.Handler.Spec.Timeout != nil {
@@ -255,7 +275,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        JobName(in.Task.Name, in.Phase, in.RunID),
+			Name:        JobName(in.Task.Name, in.Phase, in.RunID, in.Attempt),
 			Namespace:   in.Task.Namespace,
 			Labels:      labels(in),
 			Annotations: annotations(in),
@@ -609,6 +629,14 @@ func sidecarContainer(name, image, subcommand, out string, ws flowv1alpha1.Works
 		Name:  name,
 		Image: image,
 		Args:  []string{subcommand, "--" + contract.FlagOut, out},
+		// The pod's own UID, for prepare to mark the run with and publish to
+		// check before it moves the run (sidecar.Mark / CheckMark). Not
+		// generation-time information, so not an argument: the pod does not
+		// exist yet when this is built.
+		Env: []corev1.EnvVar{{
+			Name:      EnvPodUID,
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}},
+		}},
 		SecurityContext: &corev1.SecurityContext{
 			RunAsUser:                ptr(uid),
 			RunAsNonRoot:             ptr(true),

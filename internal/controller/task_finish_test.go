@@ -375,7 +375,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(second.Annotations["flow.tgy.io/prev-run-id"]).To(Equal("1"))
 	})
 
-	It("retries under a new runID when the handler never got to run", func() {
+	It("retries under the same runID when the handler never got to run", func() {
 		fx.makeFlow()
 		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
 		fx.makeTask()
@@ -387,13 +387,15 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the same phase, tried again")
-		Expect(tk.Status.RunID).To(BeEquivalentTo(2))
+		Expect(tk.Status.RunID).To(BeEquivalentTo(1), "a runID counts decided runs, and nothing was decided")
 		Expect(tk.Status.History).To(BeEmpty(), "nothing was decided, so nothing is recorded")
 		Expect(tk.Status.CurrentRun.InfraRetries).To(BeEquivalentTo(1))
 		Expect(tk.Status.ReworkBudget).To(BeEquivalentTo(2), "an infrastructure retry costs no budget")
 
 		fx.reconcile()
-		second := fx.job(2)
+		second := fx.jobAttempt(1, 1)
+		Expect(second.Name).NotTo(Equal(job.Name),
+			"the failed attempt's Job is still there, so the retry needs a name of its own")
 
 		// The retry fails the same way, and the allowance is spent.
 		finish(second, batchv1.JobReasonBackoffLimitExceeded)
@@ -402,7 +404,7 @@ var _ = Describe("finishing a run", func() {
 		tk = fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
 		Expect(tk.Status.History).To(HaveLen(1))
-		Expect(tk.Status.History[0].RunID).To(BeEquivalentTo(2))
+		Expect(tk.Status.History[0].RunID).To(BeEquivalentTo(1))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("never started"))
 	})
 

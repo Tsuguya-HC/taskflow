@@ -151,6 +151,71 @@ var _ = Describe("a flow with a workspace", func() {
 	})
 
 	It("carries the previous run's sweep list onto the next run's prepare", func() {
+		// A rework, not an infrastructure retry: only a run that reached a
+		// verdict moves the number on, so a self-loop is what puts a run 1
+		// behind run 2 for the sweep list to name.
+		fx.makeFlow(withWorkspace, func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
+				Handler: fx.name,
+				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: "more"},
+			}
+		})
+		fx.makeHandler(onFlowWorkspace)
+		fx.makeTask()
+
+		fx.reconcile() // settles the starting phase
+		fx.reconcile() // creates the claim and the first Job
+		job := fx.job(1)
+
+		// A pod whose publish container named "more", which is the self-loop
+		// edge — the same shape task_finish_test.go's rework spec drives,
+		// spelled out here because its helpers are local to that file.
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      job.Name,
+				Namespace: resourceNamespace,
+				Labels:    map[string]string{batchv1.ControllerUidLabel: string(job.UID)},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: "agent", Image: "example.invalid/agent:v0"}},
+			},
+		}
+		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
+		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "agent",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: "more"}},
+		}}
+		Expect(k8sClient.Status().Update(fx.ctx, pod)).To(Succeed())
+
+		now := metav1.Now()
+		job.Status.StartTime = &now
+		job.Status.CompletionTime = &now
+		job.Status.Conditions = append(job.Status.Conditions,
+			batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+			batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+
+		fx.reconcile() // the rework lands on run 2
+		Expect(fx.get().Status.RunID).To(BeEquivalentTo(2))
+
+		fx.reconcile() // creates the second Job
+		second := fx.job(2)
+		prepare := second.Spec.Template.Spec.InitContainers[0]
+		Expect(prepare.Args).To(Equal([]string{
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/2/out",
+			"--" + contract.FlagRunDir, "/workspace/2",
+			"--" + contract.FlagSweep, "1",
+		}), "run 1 sealed, but the sweep list names every run before this one either way")
+	})
+
+	// A retry is not a new run, so it comes back to the same directory rather
+	// than being handed the last attempt's on a sweep list. Clearing it is
+	// MakeRun's, which is what makes a directory some zombie still holds open
+	// stop the retry instead of it starting work beside a live writer.
+	It("puts an infrastructure retry back on the same run directory", func() {
 		fx.makeFlow(withWorkspace)
 		fx.makeHandler(onFlowWorkspace, func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
 		fx.makeTask()
@@ -161,8 +226,7 @@ var _ = Describe("a flow with a workspace", func() {
 
 		// The pod exists, but no container in it ever terminated — never
 		// pulled, the same infrastructure shape task_finish_test.go's own
-		// infra-retry spec uses to drive RunID forward without spending
-		// rework budget.
+		// infra-retry spec uses.
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      job.Name,
@@ -184,17 +248,17 @@ var _ = Describe("a flow with a workspace", func() {
 			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded})
 		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
 
-		fx.reconcile() // records the infra retry; RunID moves to 2
-		Expect(fx.get().Status.RunID).To(BeEquivalentTo(2))
+		fx.reconcile() // records the infra retry
+		Expect(fx.get().Status.RunID).To(BeEquivalentTo(1), "nothing was decided, so no run was spent")
 
-		fx.reconcile() // creates the second Job
-		second := fx.job(2)
+		fx.reconcile() // creates the retry's Job
+		second := fx.jobAttempt(1, 1)
+		Expect(second.Name).NotTo(Equal(job.Name), "the failed attempt's Job is still there to collide with")
 		prepare := second.Spec.Template.Spec.InitContainers[0]
 		Expect(prepare.Args).To(Equal([]string{
-			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/2/out",
-			"--" + contract.FlagRunDir, "/workspace/2",
-			"--" + contract.FlagSweep, "1",
-		}), "run 1 never sealed, so its work/ leftovers are on run 2's sweep list")
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1/out",
+			"--" + contract.FlagRunDir, "/workspace/1",
+		}), "the retry returns to run 1's own directory, with nothing before it to sweep")
 	})
 
 	It("refuses a stored flow whose workspace has no volumeClaimTemplate", func() {

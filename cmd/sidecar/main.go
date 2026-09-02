@@ -19,9 +19,12 @@ limitations under the License.
 // code.
 //
 //	sidecar prepare   init container: create the declared directories, close out
+//	                  — for a flow workspace, after making this run's own
+//	                  directory, sweeping the abandoned ones, and marking the
+//	                  run with this pod's identity
 //	sidecar publish   native sidecar: wait to be stopped, seal, report — and,
-//	                  for a flow workspace, move the now-sealed run onto the
-//	                  results/ shelf first
+//	                  for a flow workspace, check the run is this pod's and
+//	                  move the now-sealed run onto the results/ shelf first
 //
 // The declared directories arrive in FLOW_DIRECTORIES, which the controller
 // sets on every container. Where they live is the pod spec's business and
@@ -136,13 +139,27 @@ func run(args []string) error {
 	if err != nil {
 		return reportFailure(*termLog, cmd, err)
 	}
+	// A flow workspace's run is marked with the pod that prepared it and
+	// checked against the pod that publishes it, so the identity is needed
+	// on both ends of that and on neither end of a template-backed one.
+	// Read up front for the same reason the vocabulary is: a missing one
+	// should fail before anything has been touched.
+	podUID := ""
+	if *runDir != "" || *sealFrom != "" {
+		if podUID, err = podIdentity(); err != nil {
+			return reportFailure(*termLog, cmd, err)
+		}
+	}
 
 	if cmd == cmdPrepare {
 		if *runDir != "" {
 			// The run's own directory first, the sweep second: a sweep
 			// that fails should not also leave this run without even a
 			// place it was being prepared in, and neither step touches the
-			// other's target — the sweep list never names this run.
+			// other's target — the sweep list never names this run. The
+			// mark goes down last of the three, once the directory it
+			// belongs in is known to be the fresh one MakeRun made, and
+			// ahead of Prepare so it is closed in with the vocabulary.
 			if err := sidecar.MakeRun(*runDir); err != nil {
 				return reportFailure(*termLog, cmd, err)
 			}
@@ -150,6 +167,9 @@ func run(args []string) error {
 				if err := sidecar.Sweep(filepath.Dir(*runDir), strings.Split(*sweep, ","), filepath.Base(*runDir)); err != nil {
 					return reportFailure(*termLog, cmd, err)
 				}
+			}
+			if err := sidecar.Mark(*out, podUID); err != nil {
+				return reportFailure(*termLog, cmd, err)
 			}
 		}
 		if err := sidecar.Prepare(*out, declared); err != nil {
@@ -166,6 +186,20 @@ func run(args []string) error {
 	defer stop()
 	fmt.Println("waiting for the run to finish")
 	<-ctx.Done()
+
+	// Before sealing, not just before moving: the directory at -out is this
+	// run's only if the pod that prepared it is this one. A run keeps its
+	// number across infrastructure retries, so a publish outliving its own
+	// pod's record — gone from the apiserver, still running until the node
+	// gets around to stopping it — finds the next attempt's directory at
+	// the same path, and an answer read out of that is not this run's to
+	// report, let alone to shelve. Ahead of Seal, this is startup
+	// validation's footing: cause named, non-zero exit, no verdict.
+	if *sealFrom != "" {
+		if err := sidecar.CheckMark(*out, podUID); err != nil {
+			return reportFailure(*termLog, cmd, err)
+		}
+	}
 
 	ans := sidecar.Seal(*out, declared)
 	// Printed before the move is attempted: a run whose move then fails
@@ -207,6 +241,19 @@ func declaredDirectories() ([]string, error) {
 		return nil, fmt.Errorf("%s is not a JSON array of names: %w", contract.EnvDirectories, err)
 	}
 	return dirs, nil
+}
+
+// podIdentity reads the UID of the pod this container runs in, which the
+// controller hands the injected containers through the downward API. It is
+// what tells one attempt's prepare and publish apart from another's at the
+// same runID, so an unset value is an error where it is needed, the same as
+// an unset vocabulary.
+func podIdentity() (string, error) {
+	uid, ok := os.LookupEnv(contract.EnvPodUID)
+	if !ok || uid == "" {
+		return "", fmt.Errorf("%s is not set; is this container in a Job the controller created?", contract.EnvPodUID)
+	}
+	return uid, nil
 }
 
 // reportFailure says why in the same channel the answer would have used, so
