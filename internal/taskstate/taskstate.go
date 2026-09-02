@@ -215,14 +215,26 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.Tas
 
 // RetryInfra prepares another attempt at the same phase after a failure that
 // was not the handler's judgement — an image that would not pull, an evicted
-// pod. It costs a runID, so the retry gets fresh directories rather than
-// whatever the last attempt left behind, and it costs no budget, because
-// nothing was decided.
+// pod. It costs no budget, because nothing was decided, and no runID, because
+// nothing was run.
+//
+// The number stays put deliberately. A runID counts the runs a task has
+// decided its way through, not the attempts it took to get one started, and
+// keeping the two apart is what makes results/ line up with history: one
+// sealed directory per run, numbered the way the phases went. A number spent
+// on an attempt that never ran would leave a hole in that shelf, and a hole
+// is only readable by whoever already knows it is there.
+//
+// Reusing it also puts the retry back on the same directory, which is where
+// the last attempt's leftovers would be. That is MakeRun's to clear, and its
+// removal is fail-closed: a directory some zombie still holds open will not
+// go, and the retry stops rather than starting work beside a live writer.
+// Under the old numbering that zombie was invisible — the retry simply
+// started somewhere else and nothing said the volume was contested.
 //
 // Nothing is appended to history: no verdict was reached, and a history of
 // non-events makes the record harder to read, not easier.
 func RetryInfra(status *flowv1alpha1.TaskStatus) {
-	status.RunID++
 	retries := int32(0)
 	if status.CurrentRun != nil {
 		retries = status.CurrentRun.InfraRetries + 1

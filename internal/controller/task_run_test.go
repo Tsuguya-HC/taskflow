@@ -76,7 +76,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce() // creates the Job
 
 		var job batchv1.Job
-		jobName := runner.JobName(name, phaseInvestigate, 1)
+		jobName := runner.JobName(name, phaseInvestigate, 1, 0)
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: resourceNamespace}, &job)).To(Succeed())
 
 		Expect(job.Annotations[runner.AnnotationPhase]).To(Equal(string(phaseInvestigate)),
@@ -163,7 +163,7 @@ var _ = Describe("starting a task", func() {
 		tk := get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
-			types.NamespacedName{Name: runner.JobName(name, phaseInvestigate, 1), Namespace: resourceNamespace},
+			types.NamespacedName{Name: runner.JobName(name, phaseInvestigate, 1, 0), Namespace: resourceNamespace},
 			&batchv1.Job{}))).To(BeTrue(), "no Job should exist for a phase that cannot run")
 	})
 
@@ -271,7 +271,7 @@ var _ = Describe("starting a task", func() {
 		tk := makeTask()
 
 		controllerTrue := true
-		jobName := runner.JobName(name, phaseInvestigate, 1)
+		jobName := runner.JobName(name, phaseInvestigate, 1, 0)
 		stray := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      jobName,
@@ -394,7 +394,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 		reconcileOnce() // creates the Job
 
-		jobName := runner.JobName(name, phaseInvestigate, 1)
+		jobName := runner.JobName(name, phaseInvestigate, 1, 0)
 		var job batchv1.Job
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: resourceNamespace}, &job)).To(Succeed())
 

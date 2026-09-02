@@ -44,8 +44,11 @@ const (
 	// label because these are free strings: 調査 is not a legal label value
 	// and not a legal object name either.
 	AnnotationPhase = "flow.tgy.io/phase"
-	// AnnotationRunID is the record of which attempt this is, carried on the
-	// pod for whoever wants it — not read by the plumbing itself: prepare and
+	// AnnotationRunID is the record of which run this is — the number of the
+	// runs the task has decided its way through, which an infrastructure
+	// retry does not move (ADR-0004); two attempts at one run are told apart
+	// by the Job's name, not by this. It is carried on the pod for whoever
+	// wants it — not read by the plumbing itself: prepare and
 	// publish get the run's paths as CLI arguments the controller computes
 	// at generation time (runner.injectSidecars), never by reading this
 	// back. A handler's own author can still pull it into a container of
@@ -74,6 +77,16 @@ const (
 	// has — the sidecar creates exactly these, and the agent can see them
 	// on disk anyway.
 	EnvDirectories = "FLOW_DIRECTORIES"
+	// EnvPodUID is the injected containers' own, not every container's: the
+	// UID of the pod they run in, from the downward API. prepare writes it
+	// into the run's out/ and publish reads it back before it moves the run
+	// onto the results/ shelf, so a publish whose pod is already gone from
+	// the apiserver — but still running, and still due its SIGTERM — cannot
+	// shelve the directory a later attempt at the same runID is working in
+	// (ADR-0004). It is not generation-time information the way the run's
+	// paths are, so it is the one thing the sidecars take from the pod
+	// rather than from their arguments.
+	EnvPodUID = "FLOW_POD_UID"
 
 	// WorkspaceVolume is the name of the volume the controller adds to a Job
 	// when the task's flow declares a workspace, backed by that task's own

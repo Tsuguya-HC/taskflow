@@ -52,12 +52,15 @@ type TaskSpec struct {
 
 // RunRef identifies one execution of one phase. runID separates the second
 // visit to a phase from the first, so a rework does not read what the previous
-// attempt left behind.
+// run left behind. It does not separate two attempts at starting one run —
+// an infrastructure retry comes back with the same number (ADR-0004), and
+// infraRetries is what tells those apart.
 type RunRef struct {
 	Phase Phase `json:"phase"`
 	RunID int32 `json:"runID"`
-	// JobName is derived deterministically from the task, phase and runID, so
-	// a controller restart re-creates the same object instead of a second one.
+	// JobName is derived deterministically from the task, phase, runID and
+	// the count of infrastructure retries, so a controller restart re-creates
+	// the same object instead of a second one.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 	// +optional
@@ -107,7 +110,10 @@ type TaskStatus struct {
 	// +optional
 	Phase Phase `json:"phase,omitempty"`
 
-	// RunID of the current or last run.
+	// RunID of the current or last run. It counts the runs this task has
+	// decided its way through, not the attempts it took to start them: an
+	// infrastructure retry leaves it alone, so the numbers on the results/
+	// shelf run without gaps (ADR-0004).
 	// +optional
 	RunID int32 `json:"runID,omitempty"`
 

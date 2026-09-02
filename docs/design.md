@@ -425,8 +425,8 @@ properties 無しで出力し、structural schema がそこにぶら下がる po
 - env: `FLOW_TASK_UID` / `FLOW_PHASE` / `FLOW_INPUT`（`spec.input` の JSON）
 - annotation: `flow.tgy.io/phase`（UTF-8 のまま）、`flow.tgy.io/run-id`、
   `flow.tgy.io/prev-run-id`（初回は付けない）
-- `backoffLimit: 0`（Job 内リトライを止める。インフラ起因の再実行は新しい runID で
-  Job を作り直す）
+- `backoffLimit: 0`（Job 内リトライを止める。インフラ起因の再実行は同じ runID のまま
+  attempt を進めた名前で Job を作り直す。ADR-0004）
 - `activeDeadlineSeconds`（handler の `timeout` から）
 
 **フェーズ名はラベルに入れない。** ステータス名は利用側の自由文字列なので、
@@ -436,7 +436,8 @@ properties 無しで出力し、structural schema がそこにぶら下がる po
 UTF-8 のまま入り、長さの制約も無い。
 
 **Job 名も同じ理由でフェーズ名を直接使えない**（RFC 1123）。
-`<task>-<runID>-<フェーズ名のハッシュ 8 桁>` にする。task 名が長くて 63 文字に収まらない
+`<task>-<runID>-<フェーズ名のハッシュ 8 桁>` にする。インフラ再試行では runID が動かないので、
+2 回目以降は `<task>-<runID>-r<attempt>-<フェーズ名のハッシュ>`（ADR-0004）— 初回の綴りは変えない。task 名が長くて 63 文字に収まらない
 ときは、切り詰めた task 名の横に**全体のハッシュ 8 桁**を添える — 名前の判別部分は末尾に
 来がち（`generateName` のサフィックス等）なので、尻尾を捨てるだけだと途中まで同じ
 2 つの task が同じ Job 名に衝突する。読みたい人は annotation を見る。
@@ -512,7 +513,7 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 
 | フィールド | 拒否する理由 | 担保の実態 |
 |---|---|---|
-| `backoffLimit`（0 以外） | リトライ機構が 2 つになる。Job 内リトライは runID が据え置きで、前回の残骸と同じ prefix を見る | **型から除去。** `JobTemplate` に対応するフィールドが無く、書けない |
+| `backoffLimit`（0 以外） | リトライ機構が 2 つになる。再試行してよいのは「何も走らなかった」ときだけで（`collect.Ran`）、それを判定し attempt を数えるのはコントローラ。Job 内リトライは走った handler を数えずに黙ってやり直す | **型から除去。** `JobTemplate` に対応するフィールドが無く、書けない |
 | `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化 | 同上 |
 | `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） | 同上 |
 | `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる | 同上 |
@@ -722,6 +723,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | `terminals` のキーが `Escalated` / `Failed` | 予約語。framework 自身の終端の意味は flow のものではない（**CEL で実装済み**） |
 | 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない |
 | ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない |
+| ディレクトリ名が `.prepared-by` | 予約語。prepare が Pod マークを置く場所（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)） |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え |
 | 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない |
 | 束縛の無いステータス（＝終端）に到達する経路が 1 本も無い（`Escalated` / `Failed` 自体は除く） | 成功しえないタスク |
@@ -754,8 +756,12 @@ handler の変更検知は `status.currentRun.handlerHash` に解決済み spec 
 
 | カウンタ | 増える条件 | 用途 |
 |---|---|---|
-| `runID` | rework でもインフラリトライでも必ず | パス・子リソース名の識別子 |
+| `runID` | **決着した run の後だけ**（rework も前進も。インフラリトライでは動かない） | パス・子リソース名の識別子 |
 | `reworkBudget` | rework の時だけ減る | ループ終了保証 |
+
+`runID` が数えるのは**タスクが決着させた run** であって、その run を起動するのに何回かかったかでは
+ない（ADR-0004）。何も決まっていない試行に番号を払うと `results/` の棚に穴が空き、穴はそこに穴が
+あると既に知っている者にしか読めない。同じ run の 2 回目を区別するのは Job 名の attempt。
 
 インフラ起因の失敗（OOMKilled / evicted / ImagePull / ノード落ち）は **rework 予算を消費しない**。
 区別できない場合は安全側（Escalated）。
@@ -900,7 +906,9 @@ handler が書くのは `spec.workspace: {volume, mountPath}` — 判定の回�
 - **コントローラが足すのは両端**: `flow-prepare`（init、`<mountPath>/out` を敷く）と `flow-publish`
   （ネイティブサイドカー、読み取り専用マウント、SIGTERM で封じて termination log に書く）を
   initContainers の先頭に置く。イメージは controller のフラグ `--sidecar-image`。template が同名の
-  コンテナを持っていたら framework ラベルと同じく**上書きせず拒否**する
+  コンテナを持っていたら framework ラベルと同じく**上書きせず拒否**する。この 2 本だけが
+  `FLOW_POD_UID`（downward API `metadata.uid`）を持つ — prepare が run に刻み publish が照合する
+  同一性で、handler のコンテナには渡さない（ADR-0004 決定5）
 
 2026-08-25 の時点では `spec.workspace.path` を「コントローラにそのフィールドの消費者が無い」として
 却下し、片端の配線だけ利用側の pod spec に書かせていた。これは取り違えだった: §2 の責務表で
@@ -936,6 +944,11 @@ verdict を確定させた後、同一ボリューム内の rename で `work/<ru
 が work/ と results/ の二つの棚を跨ぐため）— agent の書き込みは work/<runID> の subPath に閉じた
 まま。rename が失敗したら termination message を書かずに非 0 で exit し、既存の infra retry 経路に
 落ちる（移動できていないのに verdict だけ通ると下流が読めないディレクトリを指すことになるため）。
+再試行は同じ runID に戻ってくるので（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)）、
+Pod オブジェクトが消えたあとも生きているゾンビ publish が、次の attempt の書きかけを同じパスから
+棚へ運びうる。prepare が `out/.prepared-by` に自分の Pod UID を刻み（downward API、注入 sidecar
+だけに渡る）、publish は SIGTERM 後・封印前に照合して、他 Pod の run なら封印も rename もせず
+失敗を報告する。
 孤児の窓（rename 成功後・message 送信前のクラッシュで History に無い完了 run が results/ に残る）は
 実害が薄いので許容する。env / subPathExpr は使わない、run 番号はエージェントの env には出ない
 （annotation `flow.tgy.io/run-id` は配管の記録のまま）。過去を読むフェーズは同じ volume を readOnly +
@@ -1065,8 +1078,10 @@ store へ到達するために開けた egress は agent コンテナからも�
 
 **Job 固有の注意:** `backoffLimit` / `ttlSecondsAfterFinished` / `activeDeadlineSeconds` /
 `completions` / `parallelism` / `restartPolicy` は予約フィールドとして admission で拒否する（§4 の表）。
-インフラ起因の再実行はコントローラが**新しい runID で Job を作り直す**（Job 内リトライだと
-runID が据え置きになり、前回の残骸と同じ prefix を見る）。
+インフラ起因の再実行はコントローラが**同じ runID・次の attempt の名前で Job を作り直す**
+（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)。何も決まっていない試行に番号は払わない。
+前の attempt の残骸は prepare の `MakeRun` が消し、ゾンビ publish が次の attempt の run を棚へ
+運ばないよう prepare が `out/.prepared-by` に Pod UID を刻み、publish は封印前に照合する）。
 
 ### 終了必須（長命 Sandbox は v1 では採らない）
 
@@ -1109,7 +1124,7 @@ Pod は `batch.kubernetes.io/controller-uid` ラベルで引く（Job controller
 | Job の状態 | 扱い | 理由 |
 |---|---|---|
 | `Failed` / `DeadlineExceeded` | **読まずに** Escalated（`NoAnswer`） | 途中で切られた run がディレクトリを書いていても、それは結論ではない |
-| `Failed` かつ**どのコンテナも Terminated に達していない** | インフラ起因。`maxInfraRetries` まで新 runID で作り直し、尽きたら Escalated | pull 失敗・未スケジュール等、handler が何もしていない失敗だけがコントローラの再試行対象。**走ってから黙った run は再試行しない**（それは handler の沈黙であり人間の仕事） |
+| `Failed` かつ**どのコンテナも Terminated に達していない** | インフラ起因。`maxInfraRetries` まで**同じ runID・次の attempt の名前で**作り直し（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)）、尽きたら Escalated | pull 失敗・未スケジュール等、handler が何もしていない失敗だけがコントローラの再試行対象。**走ってから黙った run は再試行しない**（それは handler の沈黙であり人間の仕事） |
 | それ以外（`Complete`、または走ってから `Failed`） | termination message を回収して遷移表へ | 終了コードは verdict ではない。agent が exit 1 でも sidecar が `ok` を封していれば `ok` |
 
 Terminated の判定は init コンテナも含む。init が exit 1 で落ちたなら handler 自身のコードが
@@ -1383,7 +1398,7 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 | Argo Workflow の再帰テンプレートで差し戻しを表現 | DAG は非巡回。回数も追えず UI も読めなくなる |
 | 判定不能を pass 扱い | 論外。fail-closed |
 | handler が Argo の WorkflowTemplate を参照する | コントローラに Argo 依存が焼き付く。フェーズグラフをコントローラに移した時点で 1 フェーズ = 1 ステップであり、Job で足りる |
-| Job の `backoffLimit` でインフラリトライ | リトライ機構が 2 つになる。runID が据え置きで前回の残骸と同じ prefix を見る |
+| Job の `backoffLimit` でインフラリトライ | リトライ機構が 2 つになる。再試行の可否（何も走らなかったか）と attempt の勘定はコントローラの仕事で、Job 内リトライは走った handler を数えずにやり直す |
 | 予約フィールドを黙って上書き | 「書いた値と違う」で混乱する。admission で落として理由を返す |
 | S3 の掃除を bucket lifecycle に任せる | SeaweedFS は API を受け付けるが upstream に未修正の全件削除バグ（#6619）。動くように見えるのが最も危険。sweep に統合 |
 | handler に `promptConfigMapRef` / `contextStores` / `publishTo` を持たせる | コントローラに LLM 固有の語彙が漏れる。全部ユーザーの pod spec に畳める（P7） |

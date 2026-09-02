@@ -57,7 +57,19 @@ const (
 	// maxListed bounds how many entries a sealed directory names in its
 	// reason. The reason is a line for a human, not a manifest.
 	maxListed = 8
+
+	// markName is the file Mark leaves inside out/ naming the pod whose
+	// prepare laid the run down, and which CheckMark reads back before the
+	// run is shelved. Inside out/ rather than beside it: out/ is closed to
+	// the agent once prepared, so the mark is as safe from a stray rm -rf
+	// as the vocabulary is. It travels with the run onto results/, where it
+	// says which pod produced what is there.
+	markName = ".prepared-by"
 )
+
+// ErrMark reports a run directory whose mark is not this pod's — it was
+// prepared by another pod, and is that pod's to shelve.
+var ErrMark = errors.New("run directory was prepared by another pod")
 
 // ErrBadName reports a declared directory name that cannot be a single path
 // element. Admission is meant to refuse these at creation; the sidecar refuses
@@ -82,11 +94,17 @@ type Answer struct {
 	Reason string
 }
 
-// checkName refuses anything that is not a plain single path element.
+// checkName refuses anything that is not a plain single path element, and
+// markName itself: a flow declaring that name would let Prepare's Mkdir land
+// on the file Mark already put there, failing every run with
+// ErrNotADirectory.
 func checkName(name string) error {
 	if name == "" || name == "." || name == ".." ||
 		strings.ContainsAny(name, "/\x00") || filepath.Base(name) != name {
 		return fmt.Errorf("%w: %q", ErrBadName, name)
+	}
+	if name == markName {
+		return fmt.Errorf("%w: %q is reserved for the pod's mark", ErrBadName, name)
 	}
 	return nil
 }
@@ -228,7 +246,9 @@ func summarize(entries []string) string {
 // the results/ shelf a later phase reads back, once Seal has already decided
 // the run's answer. from and to are expected on the same volume, so the
 // rename is a single atomic step rather than a copy — the controller only
-// ever calls this with paths under one task's own claim.
+// ever calls this with paths under one task's own claim. Whether from is
+// this pod's to move at all is CheckMark's question, asked by the caller
+// ahead of sealing; Move takes the paths it is given.
 //
 // to must not already exist. results/<runID> being there already means
 // either an earlier publish already moved this run and this one should
@@ -282,7 +302,31 @@ func (a Answer) Message() string {
 // space, not part of the vocabulary. prepare makes it, rather than leaving it
 // to the kubelet's subPath machinery, so the mode is chosen instead of
 // inherited.
+//
+// Anything already at the path goes first. A run keeps its number across
+// infrastructure retries, so on the second attempt this is where the first
+// attempt's leftovers are, and starting work on top of them would mix two
+// attempts in one directory. The removal is Sweep's bargain applied to this
+// run rather than the abandoned ones: a directory that will not go means
+// some zombie still holds a file open in it, and the run fails rather than
+// starting work on a volume in a disputed state. On the first attempt there
+// is nothing there and this costs a syscall.
+//
+// Only a real directory is cleared. Anything else standing at the path —
+// most concerningly a symlink, which RemoveAll would unlink without a word,
+// leaving the check below to pass on the fresh directory made in its place —
+// is refused instead, the same answer checkRealDir gives afterwards.
 func MakeRun(dir string) error {
+	switch st, err := os.Lstat(dir); {
+	case err == nil && !st.Mode().IsDir():
+		return fmt.Errorf("%w: %s", ErrNotADirectory, dir)
+	case err == nil:
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("clear %s: %w", dir, err)
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("stat %s: %w", dir, err)
+	}
 	if err := os.MkdirAll(dir, modeOpen); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
@@ -291,6 +335,76 @@ func MakeRun(dir string) error {
 	}
 	if err := os.Chmod(dir, modeDir); err != nil {
 		return fmt.Errorf("open %s for writing: %w", dir, err)
+	}
+	return nil
+}
+
+// Mark records id under out as the identity of the pod that prepared this
+// run, for CheckMark in the same pod's publish to read back before the run
+// is moved. It runs after MakeRun and ahead of Prepare, while out/ is still
+// open — Prepare closes it, and the mark is meant to be closed in with the
+// vocabulary.
+//
+// A run keeps its number across infrastructure retries (ADR-0004), so two
+// attempts at one run use the same work/<runID> at different times. A pod
+// whose object is gone but whose processes are not — a node that lost the
+// apiserver and came back — still gets its SIGTERM eventually, and its
+// publish would then seal and shelve whatever is at that path: the attempt
+// running there now. Under the old numbering the two never met; with the
+// number held still, the mark is what tells a publish whose directory it is
+// looking at.
+//
+// The file is created exclusively rather than written over. MakeRun has
+// just cleared the run, so nothing should be there; anything that is means
+// the path is not the fresh directory it was meant to be.
+func Mark(out, id string) error {
+	if err := os.MkdirAll(out, modeOpen); err != nil {
+		return fmt.Errorf("create %s: %w", out, err)
+	}
+	if err := checkRealDir(out); err != nil {
+		return err
+	}
+	path := filepath.Join(out, markName)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("mark %s: %w", path, err)
+	}
+	if _, err := f.WriteString(id); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("mark %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("mark %s: %w", path, err)
+	}
+	return nil
+}
+
+// CheckMark reads the mark Mark left under out and refuses anything but id:
+// a missing mark as much as a foreign one, since a run with no mark was not
+// prepared by this binary at all. It is publish's gate on the move — and on
+// sealing, which comes first: an answer read out of another pod's directory
+// is not this run's answer and should not even reach the log.
+//
+// There is a window between this check and the rename that follows it, in
+// which another attempt's MakeRun could clear and remake the directory. It
+// is the width of a few stats against a process that was frozen for
+// minutes, and what it costs is a fail-closed run (the moved directory is
+// missing where the live attempt looks for it), not a wrong verdict.
+func CheckMark(out, id string) error {
+	path := filepath.Join(out, markName)
+	st, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrMark, path, err)
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is not a regular file", ErrMark, path)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if string(got) != id {
+		return fmt.Errorf("%w: %s names %q, this pod is %q", ErrMark, path, string(got), id)
 	}
 	return nil
 }

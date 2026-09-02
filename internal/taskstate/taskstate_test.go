@@ -332,7 +332,7 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	}
 }
 
-func TestInfraRetryCostsARunButNoBudget(t *testing.T) {
+func TestInfraRetryCostsNeitherARunNorBudget(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
 		Phase:        phaseReport,
 		RunID:        4,
@@ -341,8 +341,8 @@ func TestInfraRetryCostsARunButNoBudget(t *testing.T) {
 	}
 	RetryInfra(s)
 
-	if s.RunID != 5 || s.CurrentRun.RunID != 5 {
-		t.Fatalf("runID = %d, want 5 so the retry cannot read the last attempt's out/", s.RunID)
+	if s.RunID != 4 || s.CurrentRun.RunID != 4 {
+		t.Fatalf("runID = %d, want it to stay 4: a runID counts decided runs, not attempts at starting one", s.RunID)
 	}
 	if s.ReworkBudget != 1 {
 		t.Fatalf("budget = %d, want 1 — nothing was judged", s.ReworkBudget)

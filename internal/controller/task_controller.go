@@ -227,8 +227,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case failure != "" && !collect.Ran(pods.Items):
 		// The handler never got to run — nothing pulled, nothing scheduled.
 		// That is the one kind of failure the controller retries on its own,
-		// under a new runID so the retry does not find the last attempt's
-		// directories.
+		// under the same runID: nothing was decided, so no run was spent
+		// (ADR-0004). Whatever the attempt left behind is prepare's to clear.
 		return ctrl.Result{}, r.retryInfra(ctx, &task, &flow, run, failure)
 	}
 
@@ -522,7 +522,7 @@ func (r *TaskReconciler) ensureJob(
 	flow *flowv1alpha1.TaskFlow,
 	run *flowv1alpha1.RunRef,
 ) (*batchv1.Job, error) {
-	name := runner.JobName(task.Name, run.Phase, run.RunID)
+	name := runner.JobName(task.Name, run.Phase, run.RunID, run.InfraRetries)
 	// Deterministic the moment it's computed, regardless of which branch below
 	// ends up returning: the caller persists this into CurrentRun so a run
 	// stuck in flight can be found by name without recomputing the hash.
@@ -565,6 +565,7 @@ func (r *TaskReconciler) ensureJob(
 		Handler:      handler,
 		Phase:        run.Phase,
 		RunID:        run.RunID,
+		Attempt:      run.InfraRetries,
 		PrevRunID:    previousRun(task),
 		Directories:  transition.Directories(flow.Spec.Bindings, run.Phase),
 		SidecarImage: r.SidecarImage,

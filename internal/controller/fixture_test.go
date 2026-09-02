@@ -212,11 +212,18 @@ func (fx *fixture) get() *flowv1alpha1.Task {
 	return &tk
 }
 
-// job fetches the Job for one run of the starting phase.
+// job fetches the Job for the first attempt at one run of the starting phase.
 func (fx *fixture) job(runID int32) *batchv1.Job {
+	return fx.jobAttempt(runID, 0)
+}
+
+// jobAttempt fetches the Job for one attempt at one run of the starting
+// phase. A run keeps its number across infrastructure retries, so the
+// attempt is what tells the second Job from the first.
+func (fx *fixture) jobAttempt(runID, attempt int32) *batchv1.Job {
 	var job batchv1.Job
 	Expect(k8sClient.Get(fx.ctx, types.NamespacedName{
-		Name: runner.JobName(fx.name, phaseInvestigate, runID), Namespace: resourceNamespace,
+		Name: runner.JobName(fx.name, phaseInvestigate, runID, attempt), Namespace: resourceNamespace,
 	}, &job)).To(Succeed())
 	return &job
 }

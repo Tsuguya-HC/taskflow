@@ -37,6 +37,7 @@ import (
 const (
 	exampleFlow = "cnp-check"
 	agentName   = "agent"
+	nextMore    = "more"
 	labelKeeper = "label-keeper"
 	agentImage  = "example.invalid/agent:v0"
 )
@@ -74,7 +75,7 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 						Handler: "claude-planner",
 						Next: map[flowv1alpha1.Phase]string{
 							"報告": "ok",
-							"調査": "more",
+							"調査": nextMore,
 						},
 					},
 					"報告": {
