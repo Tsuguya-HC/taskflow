@@ -485,3 +485,69 @@ func TestExpireWithoutATTLKeepsTheTask(t *testing.T) {
 		}
 	}
 }
+
+// TestCurrentRunNamesTheCurrentPhase pins the invariant this package's
+// callers rely on without asking for it, and why it matters, both documented
+// on the package itself.
+//
+// Every writer in this package is exercised here rather than the one that
+// happens to be interesting, because the invariant is a property of the set
+// of them: it survives only as long as no writer sets one field without the
+// other.
+func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
+	agrees := func(t *testing.T, after string, s *flowv1alpha1.TaskStatus) {
+		t.Helper()
+		if s.CurrentRun == nil {
+			return
+		}
+		if s.CurrentRun.Phase != s.Phase {
+			t.Fatalf("after %s: currentRun names %q but the task is on %q", after, s.CurrentRun.Phase, s.Phase)
+		}
+	}
+
+	// Begin, then every kind of move Advance can make, walked in sequence so
+	// each one starts from the state the last one left.
+	s := &flowv1alpha1.TaskStatus{}
+	Begin(s, phaseInvestigate, 1)
+	agrees(t, "Begin", s)
+
+	RetryInfra(s)
+	agrees(t, "RetryInfra", s)
+
+	Advance(s, spec(), dirMore, transition.Result{
+		Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 0,
+	}, "", at)
+	agrees(t, "Advance on a rework", s)
+
+	Advance(s, spec(), dirOK, transition.Result{
+		Next: phaseReport, Outcome: transition.OutcomeDeclared, Budget: 0,
+	}, "", at)
+	agrees(t, "Advance on a declared edge", s)
+
+	// The three ways a task stops. Each is run from its own copy of the state
+	// above, since a stopped task cannot go on to the next case.
+	stopped := *s
+	Advance(&stopped, spec(), dirSent, transition.Result{
+		Next: phaseDone, Outcome: transition.OutcomeDeclared, Budget: 0,
+	}, "", at)
+	agrees(t, "Advance to a terminal the flow declared", &stopped)
+	if stopped.CurrentRun != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", stopped.CurrentRun)
+	}
+
+	escalated := *s
+	Advance(&escalated, spec(), dirMore, transition.Result{
+		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer, Budget: 0,
+	}, "", at)
+	agrees(t, "Advance to Escalated", &escalated)
+	if escalated.CurrentRun != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", escalated.CurrentRun)
+	}
+
+	failed := *s
+	Fail(&failed, "the flow lost the binding it was running", spec(), at)
+	agrees(t, "Fail", &failed)
+	if failed.CurrentRun != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", failed.CurrentRun)
+	}
+}

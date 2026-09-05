@@ -170,6 +170,9 @@ spec:
                   run left behind. It does not separate two attempts at starting one run —
                   an infrastructure retry comes back with the same number (ADR-0004), and
                   infraRetries is what tells those apart.
+
+                  A task's currentRun, when it has one, always names the phase the task is
+                  on. A task that has stopped has no currentRun at all.
                 properties:
                   deadline:
                     format: date-time

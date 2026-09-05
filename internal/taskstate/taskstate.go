@@ -20,6 +20,25 @@ limitations under the License.
 //
 // Like transition it is pure, so the bookkeeping that makes cycles terminate
 // can be tested without a cluster.
+//
+// This package keeps one invariant on status.currentRun: whenever it is set,
+// it names the phase status.phase also names. Every writer here keeps the two
+// together — Begin and Advance set both at once, RetryInfra rebuilds the ref
+// from status.phase, and a task that has stopped has no ref at all.
+// Reconcile's recovery path, in task_controller.go, is the one writer outside
+// this package, and holds the same rule: finding no currentRun, it rebuilds
+// one from status.phase before persisting it. Nothing reads a flag to know
+// any of this, which is why it is written down here.
+//
+// The controller leans on it twice over. It decides a task is terminal by
+// looking up status.phase and then hands currentRun to settle, so the two
+// naming different phases would settle a run against the wrong binding. And
+// it is the reason transition.Next's "phase has no binding" guard cannot be
+// reached in production: Reconcile's check of status.phase is also a check of
+// currentRun.phase. Break the invariant and that guard is what catches it —
+// with less to say than Reconcile's own message, because Reconcile, looking
+// only at status.phase, never saw the mismatch. Pinned by
+// TestCurrentRunNamesTheCurrentPhase in this package.
 package taskstate
 
 import (
