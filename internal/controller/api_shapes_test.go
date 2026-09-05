@@ -358,6 +358,72 @@ var _ = Describe("the API refuses what the design forbids", func() {
 		invalid(k8sClient.Create(ctx, task), "spec.flow")
 	})
 
+	DescribeTable("refuses to change what a task was asked to do",
+		// spec.input is x-kubernetes-preserve-unknown-fields, so CEL cannot
+		// address what is inside it — the worry was that self == oldSelf would
+		// silently compare only flow and dedupKey and let the prompt payload
+		// through, which is the one field an attacker would want. Measured
+		// with the rule removed as a control (2026-09-05, envtest 1.37): all
+		// four of these updates are accepted without it, and all four are
+		// refused with it. Comparing the whole spec covers the opaque field.
+		func(name string, mutate func(*flowv1alpha1.Task)) {
+			task := &flowv1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "immutable-" + name, Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskSpec{
+					Flow:     exampleFlow,
+					Input:    &apiextensionsv1.JSON{Raw: []byte(`{"scope":"one namespace"}`)},
+					DedupKey: "issue-1",
+				},
+			}
+			Expect(k8sClient.Create(ctx, task)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, task) })
+
+			var got flowv1alpha1.Task
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: resourceNamespace}, &got)).To(Succeed())
+			mutate(&got)
+			invalid(k8sClient.Update(ctx, &got), "fixed at creation")
+		},
+		Entry("changing spec.flow", "flow", func(tk *flowv1alpha1.Task) { tk.Spec.Flow = "another-flow" }),
+		Entry("changing spec.dedupKey", "dedupkey", func(tk *flowv1alpha1.Task) { tk.Spec.DedupKey = "issue-2" }),
+		Entry("changing spec.input", "input", func(tk *flowv1alpha1.Task) {
+			tk.Spec.Input = &apiextensionsv1.JSON{Raw: []byte(`{"scope":"every namespace"}`)}
+		}),
+		Entry("removing spec.input", "input-removed", func(tk *flowv1alpha1.Task) { tk.Spec.Input = nil }),
+	)
+
+	// The rejection cases above only show the CEL rule can say no. They say
+	// nothing about whether a spec-preserving update still goes through —
+	// which matters more, since a false negative there would fail every
+	// metadata-only update a controller or human makes. An update with no
+	// diff at all is not a fair test of that: the apiserver can short-circuit
+	// it before CEL ever runs, so it would pass whether or not the rule
+	// worked. This changes a label (a real diff, outside spec) to force the
+	// update through, and reorders spec.input's keys and whitespace rather
+	// than sending the same bytes back — two keys, because with only one
+	// there is no order to change, and the bytes would be identical to
+	// creation, which a literal comparison would also pass. Accepting a
+	// same-content, different-bytes input measures that the comparison is
+	// structural, ruling out both literal-byte and pointer-identity
+	// explanations for why this passes.
+	It("accepts an update that leaves the spec alone", func() {
+		task := &flowv1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: "immutable-noop", Namespace: resourceNamespace},
+			Spec: flowv1alpha1.TaskSpec{
+				Flow:     exampleFlow,
+				Input:    &apiextensionsv1.JSON{Raw: []byte(`{"scope":"one namespace","priority":1}`)},
+				DedupKey: "issue-1",
+			},
+		}
+		Expect(k8sClient.Create(ctx, task)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, task) })
+
+		var got flowv1alpha1.Task
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: resourceNamespace}, &got)).To(Succeed())
+		got.Labels = map[string]string{"round-trip": "true"}
+		got.Spec.Input = &apiextensionsv1.JSON{Raw: []byte(`{"priority": 1, "scope": "one namespace"}`)}
+		Expect(k8sClient.Update(ctx, &got)).To(Succeed())
+	})
+
 	DescribeTable("refuses a value that violates a bound or enum",
 		func(create func() error, reason string) {
 			invalid(create(), reason)
