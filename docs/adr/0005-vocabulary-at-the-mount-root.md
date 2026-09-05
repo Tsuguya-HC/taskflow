@@ -46,7 +46,7 @@ ADR-0003 で prepare は run ディレクトリを自分で作るようになっ
 run ディレクトリ自体でよい。emptyDir 経路も同じ手が使える — init container は main より先に走り、
 kubelet は既に存在する subPath ディレクトリを作り直さない。
 
-**実測（2026-09-05、claude-code namespace、runc と kata の両方）**: prepare 役（uid 65532、
+**実測（runc とサンドボックス VM の両方）**: prepare 役（uid 65532、
 `subPath: work`）が `work/1/ok` を作って `work/1` を 0555 に閉じ、handler 役（uid 65533、
 `subPath: work/1`）から見ると root が `dr-xr-xr-x 65532`。`mkdir /workspace/evil` は EACCES、
 `chmod 777 /workspace` は EPERM、`ok/` への書き込みは成功。kubelet が作った `work` 自体への
@@ -65,7 +65,7 @@ scratch 領域で語彙の外」、ADR-0004 決定5 の `out/.prepared-by`。い
 大きな成果物）。それは棚の中身の話で、`out/` を戻すより `results/<runID>/` の下に語彙と並ぶ
 別名を宣言する方向
 
-**利用側の追従**（home-cluster、同時に切り替える）: handler の `/workspace/out/` → `/workspace/`、
+**利用側の追従**（同時に切り替える）: handler の `/workspace/out/` → `/workspace/`、
 棚の `/shelf/<n>/out/ok/` → `/shelf/<n>/ok/`、verdict-protocol プロンプトの `ls /workspace/out` →
 `ls /workspace`。controller / sidecar のイメージと同じ commit に揃えて上げる（kustomize の
 手動ゲート）

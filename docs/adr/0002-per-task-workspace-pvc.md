@@ -1,9 +1,9 @@
 # ADR-0002 フェーズ間の引き渡しは Task ごとの PVC で、claim は flow が書き、コントローラは設定を持たない
 
 - **status**: accepted（2026-09-01、人間の承認）
-- **根拠**: 2026-08-30 の実測（subPathExpr 下で prepare の語彙強制が Kata + NFS でも成立、
+- **根拠**: 2026-08-30 の実測（subPathExpr 下で prepare の語彙強制がサンドボックス VM + NFS でも成立、
   手書き Job）/ 先行調査 2026-09-01（Tekton / Argo Workflows / StatefulSet / CNPG の一次資料。
-  レポートと実測リストは `.claude/works/prior-art-20260901-workspace-pvc/report.md`）
+  レポートと実測リストはリポジトリ外の調査記録）
 
 **決定**:
 
@@ -20,7 +20,7 @@
    保存オブジェクトへ実体化するので、効いている値が `kubectl get` に見える）。
    `storageClassName` は既定に含めない — クラスタ固有名を CRD に書かない。省略はクラスタの
    default StorageClass へ。**コントローラは CM / flag の既定を持たない**（workflowDefaults が
-   YAML に見えない注入で CNP timeout を生んだ実測 2026-08-30 を踏まえる）
+   YAML に見えない注入でネットワークポリシーの timeout を生んだ実測 2026-08-30 を踏まえる）
 4. **コントローラが Task ごとに PVC を 1 つ作る**。名前は **Task UID 由来の決定論**（Task 名だけだと
    作り直し・terminating 残骸と再バインドレースになる — CNPG #10985、Tekton は同じ理由で UID ハッシュ）。
    AlreadyExists は ownerRef の UID 照合で自分のものだけ採用し、他人の同名 PVC は拒否（STS が TODO の
@@ -77,11 +77,11 @@ subPathExpr + 手書き Job で行ったもので、コントローラが焼く 
 
 **解決済み（2026-09-05）**:
 
-- *qnap-nfs 上での rename 封印*: 成立する。`taskflow-smoke-workspace` flow が注入経路で
+- *ネットワーク FS 上での rename 封印*: 成立する。smoke 用の flow が注入経路で
   一周し、`results/<runID>` のモードが `*555` のまま保たれることを読み側の `stat` で確認した。
-  Kata のゲストからも同じ順（0755 に開ける → rename → 0555 に閉じる）で成立する
-- *cnp-check への 報告 フェーズ追加*: home-cluster 側で入った。棚は `/shelf`
+  サンドボックスのゲストからも同じ順（0755 に開ける → rename → 0555 に閉じる）で成立する
+- *利用側の flow への報告フェーズ追加*: 利用側で入った。棚は `/shelf`
   （`subPath: results`, `readOnly: true`）としてマウントし、`/shelf/1/ok/report.md` を読む
-- *Kata + NFS の書き戻し*: 成立するが**作法が 1 つ増える**。handler は exit 前に `sync` する
+- *サンドボックス VM + NFS の書き戻し*: 成立するが**作法が 1 つ増える**。handler は exit 前に `sync` する
   必要がある（design.md §15-5 に実測表つきで記載）。8/30 の実測は語彙強制の成否を見たもので、
   コンテナの終了コードまでは見ていなかった

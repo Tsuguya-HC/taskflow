@@ -16,13 +16,13 @@
    最大 N 個」を課したうえ、式の正しさが実行するまで分からなくなる（P9 が宣言側に禁じたものを
    検証側で自分がやる形になる）
 3. **証明書は配置側が与える。** taskflow は `--webhook-cert-path` の下のファイルを読むだけで、
-   cert-manager を知らない（`cmd/main.go` は scaffold の時点で既にこの形）。
+   証明書を配る仕組みを知らない（`cmd/main.go` は scaffold の時点で既にこの形）。
    `ValidatingWebhookConfiguration` は caBundle 空で配り、cert と caBundle をどう供給するかは
-   home-cluster の裁量（design.md §14 の分担そのもの）。これで増える依存は
+   利用側の裁量（design.md §14 の分担そのもの）。これで増える依存は
    `admissionregistration.k8s.io/v1` だけ、すなわち core API のみで、§7 の
    「**サードパーティ依存はゼロ**」は保たれる
 4. **別オブジェクトを参照する検査は webhook に入れない。** handler の実在と `spec.phase` の一致は
-   定義時に弾いてはいけない — ArgoCD は TaskFlow と TaskHandler を同じ sync で撒くので、handler が
+   定義時に弾いてはいけない — admission が別オブジェクトの存在に依存してはならず、handler が
    まだ無いことを理由に TaskFlow を拒否すると適用順で詰む。design.md §8「遅延バインディングの
    代償」の立場（framework は実在確認をしない）を維持し、実行時の `brokenFlow` → `Failed` のまま
 5. **admission が走ったことに依存する実装にしない。** `internal/transition` の実行時検査は
@@ -41,16 +41,16 @@
   効いていない」層そのものになる。
 
   **「コントローラは replica 1 なので rollout 中は数秒拒否される」という当初の懸念は、配置側が
-  引き取った**（home-cluster PR #803）。webhook を入れたことで「コントローラが落ちる」の意味が
+  引き取った**。webhook を入れたことで「コントローラが落ちる」の意味が
   reconcile の遅延から TaskFlow の書き込み拒否へ変わるので、あちらが `replicas: 2` +
   `PodDisruptionBudget(minAvailable: 1)` + ノードをまたぐ `podAntiAffinity` + `maxSurge: 0` /
   `maxUnavailable: 1` を入れている。可用性は配置側の持ち物であって、この ADR が決めることでは
   なかった。
 
-  **残る窓は 2 つで、どちらも実測していない**: cert を注入する側（home-cluster では cainjector）が
+  **残る窓は 2 つで、どちらも実測していない**: cert を注入する側が
   `caBundle` を埋めるまでの間と、drain と rollout が重なった場合。2026-09-05 の初回投入では
   どちらも踏まずに通ったが、**1 回通っただけで、意図的に起こして測ってはいない**
-- **Task にも webhook を掛けるかは決めない。** Task を作るのは cron / Argo Events / エージェントで、
+- **Task にも webhook を掛けるかは決めない。** Task を作るのは cron / イベント / エージェントで、
   TaskFlow を作る GitOps とは経路も頻度も違う。まとめて決める根拠がまだない
 - profile の必須フェーズ（#18）は機構の問題ではなく未決。profile はフェーズ**名**を要求する形で
   書かれているが、名前は利用側が決める（`調査`/`報告` と `レビュー`）。Discussion #2

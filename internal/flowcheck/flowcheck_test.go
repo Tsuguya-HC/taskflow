@@ -26,9 +26,9 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
-// The example flow, in the author's own words — the same one design.md §16
-// and the transition tests use, so that what admission accepts and what the
-// controller can actually walk are visibly the same flow.
+// The example flow, in the author's own words — the same one the transition
+// tests use, so that what admission accepts and what the controller can
+// actually walk are visibly the same flow.
 const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 	phaseReport      flowv1alpha1.Phase = "報告"
