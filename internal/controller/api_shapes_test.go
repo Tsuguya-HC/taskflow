@@ -33,7 +33,7 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 )
 
-// The flow name used across these examples, matching design.md §16.
+// The flow name used across these examples.
 const (
 	exampleFlow = "cnp-check"
 	agentName   = "agent"
@@ -52,7 +52,7 @@ const phaseDone flowv1alpha1.Phase = "おわり"
 // The ending these examples use when they need one the flow calls bad news.
 const phaseGave flowv1alpha1.Phase = "失敗"
 
-// These do not reproduce design.md §16 verbatim — names, handlers and budget
+// These are not copied from any worked example — names, handlers and budget
 // differ. What they check is the shape the design requires: a declaration
 // decides its own vocabulary, the two reserved names cannot be bound, and the
 // required fields are enforced. They run against a real API server so the

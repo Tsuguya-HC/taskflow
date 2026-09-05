@@ -20,9 +20,9 @@ limitations under the License.
 // inside a single TaskFlow live here, and the rows that a CEL rule can state
 // in one line stay on the type (ADR-0006 決定1). What is deliberately absent
 // is anything needing a second object — a handler's spec.phase, a profile's
-// required phases — because ArgoCD applies a TaskFlow and its TaskHandlers in
-// one sync and a flow refused for a handler that has not landed yet cannot be
-// applied at all (ADR-0006 決定4).
+// required phases — because the admission of one object must not be gated on
+// another one's existence: a handler that lands after its flow cannot be a
+// reason to refuse the flow (ADR-0006 決定4).
 //
 // Like transition, it is a pure function over values: no client, no context,
 // no clock. Admission is where it is called from, not what it is — the

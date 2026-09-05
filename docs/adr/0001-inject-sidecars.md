@@ -12,7 +12,7 @@ handler が書くのは `spec.workspace: {volume, mountPath}` だけで、サイ
 - handler に残る条件は 2 つ: Pod の `securityContext.runAsUser` を書く（未設定だとイメージ既定で
   見えず、違う uid を選べない）/ 少なくとも 1 コンテナが workspace を書き込み可でマウントする
   （無ければ沈黙が確定しているのに実行時まで気付かない）。どちらも配管が定義できるための条件
-- **root で走る handler は拒否しない。** それは Pod セキュリティポリシー（PSA / Kyverno）の層で、
+- **root で走る handler は拒否しない。** それは Pod セキュリティポリシーの層で、
   コントローラはポリシーを持たない（P2）。uid 分離が守る相手はエージェント（操られうる側）であって
   handler 作者ではない
 - 注入コンテナへ渡す env（store 認証情報）の口は、消費者ができる段（store 封印）で足す

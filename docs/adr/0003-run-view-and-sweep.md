@@ -1,14 +1,14 @@
 # ADR-0003 subPath 無しのマウントは「この run」を見せ、残骸は次の run の prepare が明示リストで掃除する
 
 - **status**: accepted（2026-09-02、人間の承認）
-- **根拠**: issue #85。ADR-0002 の利用側の台本（cnp-check 報告フェーズ）を書いて見つかった 2 点
+- **根拠**: issue #85。ADR-0002 の利用側の台本（報告フェーズ）を書いて見つかった 2 点
 
 **決定**:
 
 1. **flow-workspace のマウントは、subPath を書かなければ readOnly でも「この run のビュー」**
    （生成時に literal `subPath: work/<runID>` を焼く）。棚（封印済み run の一覧）が欲しいマウント
    だけが `subPath: results` と明示する。ADR-0002 の「readOnly には焼かない」だと、自分の run を
-   読むだけのサイドカー（cnp-check の notify）が root を見せられ、runID を env で引き込む写経 —
+   読むだけのサイドカー（通知役）が root を見せられ、runID を env で引き込む写経 —
    この設計が書き込み側から消したもの — が読み取り側で復活していた。規則は
    「黙っていれば自分の run、棚が欲しければ棚と言う」
 2. **残骸掃除**: prepare は work/ を 1 階層上でマウントして自分の run ディレクトリを作り
