@@ -72,7 +72,16 @@
 
 **未解決**: 注入経路の literal subPath 下で prepare の語彙強制の再実測（8/30 実測は
 subPathExpr + 手書き Job で行ったもので、コントローラが焼く literal subPath 経由ではまだ確認して
-いない）/ qnap-nfs 上での rename 封印の実測（注入経路。work/ → results/ の rename が NFS でも
-原子的に振る舞うか、まだ手書き Job・注入経路のどちらでも確認していない）/ cnp-check への 報告
-フェーズ追加（home-cluster 側）/ `local-storage`（no-provisioner）を使う flow が出たときの PV 整備
+いない）/ `local-storage`（no-provisioner）を使う flow が出たときの PV 整備
 （クラスは既にある。動的プロビジョニングが無いので PV を手で切る必要がある）
+
+**解決済み（2026-09-05）**:
+
+- *qnap-nfs 上での rename 封印*: 成立する。`taskflow-smoke-workspace` flow が注入経路で
+  一周し、`results/<runID>` のモードが `*555` のまま保たれることを読み側の `stat` で確認した。
+  Kata のゲストからも同じ順（0755 に開ける → rename → 0555 に閉じる）で成立する
+- *cnp-check への 報告 フェーズ追加*: home-cluster 側で入った。棚は `/shelf`
+  （`subPath: results`, `readOnly: true`）としてマウントし、`/shelf/1/ok/report.md` を読む
+- *Kata + NFS の書き戻し*: 成立するが**作法が 1 つ増える**。handler は exit 前に `sync` する
+  必要がある（design.md §15-5 に実測表つきで記載）。8/30 の実測は語彙強制の成否を見たもので、
+  コンテナの終了コードまでは見ていなかった

@@ -1539,6 +1539,30 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
 4. **CRD が肥大する。** `template.spec`（`corev1.PodSpec`）を標準のまま埋め込むため、生成される CRD YAML は CronJob 並みになる。
    `kubectl apply` の last-applied-configuration 注釈は 262144 バイト上限なので素朴に apply すると失敗する。
    ArgoCD 側で `ServerSideApply=true`（または `Replace=true`）を Application に付けておく
+5. **Kata + NFS の workspace では、handler が exit する前に `sync` する。** ゲストは NFS 上の
+   workspace を virtio-fs 越しに見ており、**書き戻しが残ったままコンテナが exit すると
+   ゲストエージェントが応答を失う**。shim は終了コードを取れず、Pod 内の**全**コンテナに 255 を
+   付ける — ファイルは落ちているのに Job は Failed になり、infra retry を焼いてから Task が
+   Failed で終わる。判定ディレクトリは正しく書かれているので、**書けたのに落ちる**という
+   最も紛らわしい壊れ方をする。
+
+   **2026-09-05 実測（wn-03 / kata-containers 3.30.0 / qnap-nfs RWX）**:
+
+   | 中身 | 結果 |
+   |---|---|
+   | NFS PVC に 1 ファイル書いて即 exit | exit 255（5/5 再現） |
+   | 同じ書き込みのあと `sync` | exit 0 |
+   | 同じ書き込みのあと `sleep 1` | exit 0 |
+   | 書いたファイルを消してから exit | exit 0 |
+   | 読むだけ（`ls` / `cat`） | exit 0 |
+   | mkdir だけ（メタデータのみ） | exit 0 |
+   | runc で同じ書き込み | exit 0 |
+
+   **これは framework 側では手当てできない。** 巻き添えは同じサンドボックス全体に及ぶので、
+   `flow-publish` サイドカーが後から `sync` しても間に合わない（サイドカー自身も 255 になる）。
+   main コンテナ 1 つ + native sidecar 1 つの構成で再現済み。したがって
+   **handler の最後の 1 行が `sync` である**ことを、workspace を持つ flow の作法として要求する。
+   emptyDir だけの handler には要らない（ページキャッシュがホストのメモリで閉じるため）。
 
 ---
 
