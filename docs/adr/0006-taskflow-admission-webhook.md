@@ -36,11 +36,20 @@
 
 **未解決**:
 
-- ~~`failurePolicy` を `Fail` にするか~~ → **`Fail`**（実装時、#17）。コントローラは replica 1 なので
-  rollout 中は TaskFlow の書き込みが数秒拒否される。それでも `Ignore` を採らないのは、コントローラが
-  落ちている間だけ検査が黙って消える形になるからで、これは「設定は書いてあるが効いていない」層
-  そのものになる。ArgoCD の retry で吸収される想定は**まだ実測していない** — 本番で TaskFlow の
-  apply が rollout と衝突したら、ここが最初に見る場所
+- ~~`failurePolicy` を `Fail` にするか~~ → **`Fail`**（実装時、#17）。`Ignore` を採らないのは、
+  コントローラが落ちている間だけ検査が黙って消える形になるからで、これは「設定は書いてあるが
+  効いていない」層そのものになる。
+
+  **「コントローラは replica 1 なので rollout 中は数秒拒否される」という当初の懸念は、配置側が
+  引き取った**（home-cluster PR #803）。webhook を入れたことで「コントローラが落ちる」の意味が
+  reconcile の遅延から TaskFlow の書き込み拒否へ変わるので、あちらが `replicas: 2` +
+  `PodDisruptionBudget(minAvailable: 1)` + ノードをまたぐ `podAntiAffinity` + `maxSurge: 0` /
+  `maxUnavailable: 1` を入れている。可用性は配置側の持ち物であって、この ADR が決めることでは
+  なかった。
+
+  **残る窓は 2 つで、どちらも実測していない**: cert を注入する側（home-cluster では cainjector）が
+  `caBundle` を埋めるまでの間と、drain と rollout が重なった場合。2026-09-05 の初回投入では
+  どちらも踏まずに通ったが、**1 回通っただけで、意図的に起こして測ってはいない**
 - **Task にも webhook を掛けるかは決めない。** Task を作るのは cron / Argo Events / エージェントで、
   TaskFlow を作る GitOps とは経路も頻度も違う。まとめて決める根拠がまだない
 - profile の必須フェーズ（#18）は機構の問題ではなく未決。profile はフェーズ**名**を要求する形で
