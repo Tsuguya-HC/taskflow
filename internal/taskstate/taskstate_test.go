@@ -115,7 +115,7 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 		CurrentRun:   &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
 	}
 	res := transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 1}
-	Advance(s, spec(), dirMore, res, "s3://bucket/task/2/", at)
+	Advance(s, spec(), dirMore, res, at)
 
 	if len(s.History) != 1 {
 		t.Fatalf("history has %d entries, want 1", len(s.History))
@@ -123,9 +123,6 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 	h := s.History[0]
 	if h.Phase != phaseReport || h.RunID != 2 || h.Directory != dirMore {
 		t.Fatalf("history recorded %+v, want the run that just finished", h)
-	}
-	if h.Ref != "s3://bucket/task/2/" {
-		t.Fatalf("ref = %q, want the store location", h.Ref)
 	}
 	if s.Phase != phaseInvestigate {
 		t.Fatalf("phase = %q, want Planning", s.Phase)
@@ -147,7 +144,7 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 		RunID:      1,
 		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
 	}
-	Advance(s, spec(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, "", at)
+	Advance(s, spec(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, at)
 	if s.CurrentRun != nil {
 		t.Fatal("a finished task has nothing in flight; a stale currentRun would make a late verdict look owned")
 	}
@@ -170,7 +167,7 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 		Outcome: transition.OutcomeStructural,
 		Detail:  "directory ok selects more than one status",
 	}
-	Advance(s, spec(), dirOK, res, "", at)
+	Advance(s, spec(), dirOK, res, at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
@@ -205,7 +202,7 @@ func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	res := transition.Result{Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeDeclined, Detail: "handler declined"}
-	Advance(s, specOf(bindings, nil, ttl(time.Hour, 168*time.Hour)), dirSent, res, "", now)
+	Advance(s, specOf(bindings, nil, ttl(time.Hour, 168*time.Hour)), dirSent, res, now)
 
 	if s.CurrentRun != nil {
 		t.Fatal("a task that landed on Escalated has nothing in flight")
@@ -253,7 +250,7 @@ func TestAdvanceToADeclaredFailureNeedsAHuman(t *testing.T) {
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	res := transition.Result{Next: phaseGave, Outcome: transition.OutcomeDeclared, Detail: "the policy does not cover 3 namespaces"}
-	Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, "", now)
+	Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, now)
 
 	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
 	if cond == nil || cond.Status != metav1.ConditionFalse {
@@ -292,7 +289,7 @@ func TestAdvanceToADeclaredSuccessSaysNothing(t *testing.T) {
 			CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
 		}
 		res := transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}
-		Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, "", now)
+		Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, now)
 
 		if cond := meta.FindStatusCondition(s.Conditions, ConditionReady); cond != nil {
 			t.Fatalf("%s: Ready condition = %+v, want none — nobody has to look at this", name, cond)
@@ -392,7 +389,7 @@ func TestCountersBoundACycle(t *testing.T) {
 			Visited:   Visited(s, flow()),
 			Budget:    s.ReworkBudget,
 		})
-		Advance(s, spec(), dir, res, "", at)
+		Advance(s, spec(), dir, res, at)
 		if transition.IsTerminal(flow(), s.Phase) {
 			if s.Phase != flowv1alpha1.PhaseEscalated {
 				t.Fatalf("ended at %q, want Escalated once the budget was spent", s.Phase)
@@ -516,12 +513,12 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 
 	Advance(s, spec(), dirMore, transition.Result{
 		Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 0,
-	}, "", at)
+	}, at)
 	agrees(t, "Advance on a rework", s)
 
 	Advance(s, spec(), dirOK, transition.Result{
 		Next: phaseReport, Outcome: transition.OutcomeDeclared, Budget: 0,
-	}, "", at)
+	}, at)
 	agrees(t, "Advance on a declared edge", s)
 
 	// The three ways a task stops. Each is run from its own copy of the state
@@ -529,7 +526,7 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	stopped := *s
 	Advance(&stopped, spec(), dirSent, transition.Result{
 		Next: phaseDone, Outcome: transition.OutcomeDeclared, Budget: 0,
-	}, "", at)
+	}, at)
 	agrees(t, "Advance to a terminal the flow declared", &stopped)
 	if stopped.CurrentRun != nil {
 		t.Fatalf("a task that stopped still has currentRun %+v", stopped.CurrentRun)
@@ -538,7 +535,7 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	escalated := *s
 	Advance(&escalated, spec(), dirMore, transition.Result{
 		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer, Budget: 0,
-	}, "", at)
+	}, at)
 	agrees(t, "Advance to Escalated", &escalated)
 	if escalated.CurrentRun != nil {
 		t.Fatalf("a task that stopped still has currentRun %+v", escalated.CurrentRun)

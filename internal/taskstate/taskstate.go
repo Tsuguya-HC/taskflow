@@ -109,7 +109,6 @@ func Advance(
 	flow *flowv1alpha1.TaskFlowSpec,
 	directory string,
 	res transition.Result,
-	ref string,
 	now metav1.Time,
 ) {
 	status.History = append(status.History, flowv1alpha1.HistoryEntry{
@@ -118,7 +117,6 @@ func Advance(
 		Directory:  directory,
 		Outcome:    string(res.Outcome),
 		Reason:     res.Detail,
-		Ref:        ref,
 		FinishedAt: &now,
 	})
 
