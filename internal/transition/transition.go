@@ -201,10 +201,12 @@ func Next(in Input) Result {
 
 	// Failed is not. It means the definition is broken, which is never
 	// something the work gets to conclude, so a flow naming it as a
-	// destination is itself the defect. Admission is meant to refuse that
-	// flow at creation (#17); until it does — and for a flow edited after a
-	// task started — the task stops here rather than reaching Failed under
-	// an outcome that would read like a declared edge.
+	// destination is itself the defect. Admission now refuses that flow at
+	// creation (#17 / ADR-0006), but this check stays anyway: nothing here
+	// may depend on admission having run (ADR-0006 decision 5), and a flow
+	// can still be edited after a task has already started (#19). So the
+	// task stops here rather than reaching Failed under an outcome that
+	// would read like a declared edge.
 	if dest == flowv1alpha1.PhaseFailed {
 		return Result{
 			Next:    flowv1alpha1.PhaseFailed,

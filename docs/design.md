@@ -521,7 +521,10 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 上の 5 種は型からフィールドが消えているので、CRD の validation で「拒否する」対象がそもそも
 存在しない。CEL で書けているのは `phase` に `Escalated` / `Failed` を予約するルールだけ
 （`taskflows` 側の CEL validation は 0 件）で、`restartPolicy` を admission で落とす仕組みは無い。
-admission での拒否（`TaskHandler` の作成自体を止める）は #17 の範囲。
+#17 で入った admission webhook は TaskFlow のみが対象（ADR-0006 決定1、`config/webhook/manifests.yaml`
+の `resources: [taskflows]`）で、`TaskHandler` 用の webhook も CustomValidator も無い。この
+`restartPolicy` を admission で止めるかどうかは未決のままで、`TaskHandler` の作成自体を防ぐ
+手段は今も無く、上記の reconcile 時チェックが唯一の担保。
 
 書き間違いが何になるかは fieldValidation 次第（envtest 実測 2026-08-24）: Strict（kubectl の
 既定）では `unknown field "spec.jobTemplate.backoffLimit"` の明示エラー。Warn / Ignore では
@@ -711,25 +714,42 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 
 デフォルト値も暗黙のマージも持たない（P8）。以下はすべて **create 時に拒否**する。
 
-| 条件 | 拒否理由 |
-|---|---|
-| `next` が無い binding がある | 必須。デフォルトの行き先を推測しない |
-| profile に含まれるフェーズに binding が無い | 実行中に「行き先はあるが担い手が無い」で止まる |
-| profile に無いフェーズの binding がある | 意図の取り違え。黙って無視しない |
-| `next` の行き先が未束縛でも終端でもない | 実行時の停止を作成時のエラーに変える |
-| `next` のキーに `Failed` が現れる | 予約語。flow の破損は handler の言い分ではない（`Escalated` は行き先としてなら可） |
-| `terminals` のキーが束縛のあるフェーズ | 終端ではないものを終端と言っている（**CEL で実装済み**） |
-| `terminals` のキーが `Escalated` / `Failed` | 予約語。framework 自身の終端の意味は flow のものではない（**CEL で実装済み**） |
-| 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない |
-| ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない |
-| ディレクトリ名が `.prepared-by` | 予約語。prepare が Pod マークを置く場所（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)） |
-| handler の `spec.phase` と binding のキーが不一致 | 取り違え |
-| 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない |
-| 束縛の無いステータス（＝終端）に到達する経路が 1 本も無い（`Escalated` / `Failed` 自体は除く） | 成功しえないタスク |
-| jobTemplate の予約フィールド（§4 の表） | 不変条件を壊す |
+どこで拒否するかは [ADR-0006](adr/0006-taskflow-admission-webhook.md) が決めた。**1 つの TaskFlow の中で
+閉じるものは ValidatingAdmissionWebhook**（`internal/flowcheck` が純関数、`internal/webhook` が配線）、
+1 行で書けるものは型に置いた CEL、**別オブジェクトを見なければ分からないものは admission に入れない**。
+
+| 条件 | 拒否理由 | どこ |
+|---|---|---|
+| `next` が無い binding がある | 必須。デフォルトの行き先を推測しない | スキーマ（`MinProperties=1`） |
+| profile に含まれるフェーズに binding が無い | 実行中に「行き先はあるが担い手が無い」で止まる | 未実装（#18。profile はフェーズ**名**を要求する形のまま未決） |
+| profile に無いフェーズの binding がある | 意図の取り違え。黙って無視しない | 同上 |
+| `next` の行き先が未束縛でも終端でもない | 実行時の停止を作成時のエラーに変える | 該当なし。束縛の無いフェーズが終端そのもの（§5「終端の意味は flow が宣言する」）なので、この条件を満たす行き先は存在しない |
+| `next` のキーに `Failed` が現れる | 予約語。flow の破損は handler の言い分ではない（`Escalated` は行き先としてなら可） | webhook |
+| `terminals` のキーが束縛のあるフェーズ | 終端ではないものを終端と言っている | CEL |
+| `terminals` のキーが `Escalated` / `Failed` | 予約語。framework 自身の終端の意味は flow のものではない | CEL |
+| 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない | webhook |
+| ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない | webhook（`contract.CheckDirectoryName`。sidecar も同じ関数で再検査する） |
+| ディレクトリ名が `.prepared-by` | 予約語。prepare が Pod マークを置く場所（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)） | 同上 |
+| `bindings` のキーが `Escalated` / `Failed` | 予約語。「答えが無い」が成功経路の 1 行隣にあってはならない | webhook |
+| フェーズ名が空（`bindings` のキー、`next` の行き先） | 名前の無いフェーズは終端として素通りする。`spec.start` は `MinLength=1` で弾けるが、map のキーはスキーマで縛れない | webhook |
+| handler の `spec.phase` と binding のキーが不一致 | 取り違え | **入れない**。ArgoCD は TaskFlow と TaskHandler を同じ sync で撒くので、handler 未着を理由に拒否すると適用順で詰む（ADR-0006 決定4）。実行時の `brokenFlow` → `Failed` のまま |
+| 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない | webhook |
+| 束縛の無いステータス（＝終端）に到達する経路が 1 本も無い（`Escalated` / `Failed` 自体は除く） | 成功しえないタスク | webhook |
+| jobTemplate の予約フィールド（§4 の表） | 不変条件を壊す | §4「予約フィールド」の表が担保の実態を持つ |
+
+`spec.start` が束縛されていないときは、そこで報告を打ち切る — グラフを歩けない以上「どのフェーズも
+到達不能」が全部くっついてくるが、間違いは 1 個だからである。それ以外は**見つかったものを全部
+一度に返す**。拒否のコストが commit 1 回である以上、1 回の apply で言えることは 1 回で言う。
 
 **`Task.spec` は作成後 immutable**（CEL の `oldSelf` で拒否）。
 実行中にグラフが書き換わる race を丸ごと消す。変更したければ作り直す。
+
+**証明書は配置側から与える。** taskflow が配る `ValidatingWebhookConfiguration` は `caBundle` が空で、
+コントローラは `--webhook-cert-path` の下のファイルを読むだけ（cert-manager を知らない）。
+cert と caBundle をどう供給するかは home-cluster の裁量 — §14 の分担そのもの。
+`failurePolicy` は `Fail`。コントローラが落ちている間に矛盾した flow が入る方が、
+TaskFlow の書き込みが rollout 中の数秒拒否されるより悪い（ADR-0006 の未解決だったもの。
+ArgoCD の retry で吸収される想定で、実測はまだ）。
 
 ### 実行時の矛盾は修復せず `Failed`
 

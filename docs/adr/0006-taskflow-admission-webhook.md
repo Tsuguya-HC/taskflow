@@ -36,8 +36,11 @@
 
 **未解決**:
 
-- `failurePolicy` を `Fail` にするか。コントローラは replica 1 なので、rollout 中は TaskFlow の
-  書き込みが数秒拒否される（ArgoCD の retry で吸収される想定だが未実測）
+- ~~`failurePolicy` を `Fail` にするか~~ → **`Fail`**（実装時、#17）。コントローラは replica 1 なので
+  rollout 中は TaskFlow の書き込みが数秒拒否される。それでも `Ignore` を採らないのは、コントローラが
+  落ちている間だけ検査が黙って消える形になるからで、これは「設定は書いてあるが効いていない」層
+  そのものになる。ArgoCD の retry で吸収される想定は**まだ実測していない** — 本番で TaskFlow の
+  apply が rollout と衝突したら、ここが最初に見る場所
 - **Task にも webhook を掛けるかは決めない。** Task を作るのは cron / Argo Events / エージェントで、
   TaskFlow を作る GitOps とは経路も頻度も違う。まとめて決める根拠がまだない
 - profile の必須フェーズ（#18）は機構の問題ではなく未決。profile はフェーズ**名**を要求する形で

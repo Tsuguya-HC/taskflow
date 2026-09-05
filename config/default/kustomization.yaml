@@ -20,9 +20,10 @@ resources:
 - ../manager
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
-#- ../webhook
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
-#- ../certmanager
+- ../webhook
+# [CERTMANAGER] taskflow does not ship cert-manager objects: the webhook's serving certificate and
+# the ValidatingWebhookConfiguration's caBundle come from whoever deploys this (ADR-0006 決定3). The
+# manifest here is written with an empty caBundle, and the manager only reads --webhook-cert-path.
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
 #- ../prometheus
 # [METRICS] Expose the controller manager metrics service.
@@ -50,9 +51,9 @@ patches:
 
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
-#- path: manager_webhook_patch.yaml
-#  target:
-#    kind: Deployment
+- path: manager_webhook_patch.yaml
+  target:
+    kind: Deployment
 
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
 # Uncomment the following replacements to add the cert-manager CA injection annotations
