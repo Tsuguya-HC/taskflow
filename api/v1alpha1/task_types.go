@@ -28,6 +28,13 @@ import (
 //
 // The spec is immutable after creation. Editing what a running task was asked
 // to do would leave its history describing a question nobody asked.
+//
+// The rule covers input as well, which is not obvious: input is
+// x-kubernetes-preserve-unknown-fields, and CEL cannot address what is inside
+// it. Comparing the whole spec still works — measured, with the rule removed
+// as a control, in api_shapes_test.go.
+//
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="a task's spec is fixed at creation; make a new task rather than changing what this one was asked to do"
 type TaskSpec struct {
 	// Flow is resolved in this namespace, always. There is no field naming
 	// another namespace, so "which flows may I start" collapses into "which

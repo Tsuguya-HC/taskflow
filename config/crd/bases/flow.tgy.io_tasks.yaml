@@ -60,6 +60,11 @@ spec:
 
               The spec is immutable after creation. Editing what a running task was asked
               to do would leave its history describing a question nobody asked.
+
+              The rule covers input as well, which is not obvious: input is
+              x-kubernetes-preserve-unknown-fields, and CEL cannot address what is inside
+              it. Comparing the whole spec still works — measured, with the rule removed
+              as a control, in api_shapes_test.go.
             properties:
               dedupKey:
                 description: |-
@@ -84,6 +89,10 @@ spec:
             required:
             - flow
             type: object
+            x-kubernetes-validations:
+            - message: a task's spec is fixed at creation; make a new task rather
+                than changing what this one was asked to do
+              rule: self == oldSelf
           status:
             description: |-
               TaskStatus holds control state only. Logs, reports and results are
