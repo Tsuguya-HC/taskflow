@@ -27,6 +27,13 @@ limitations under the License.
 // any business linking against.
 package contract
 
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
 const (
 	// LabelTaskUID is the only label the controller sets, and it sets it on
 	// the Job and on the pods that Job makes. The controller needs it on the
@@ -133,3 +140,31 @@ const (
 	// prepare's alone.
 	FlagSweep = "sweep"
 )
+
+// MarkName is the file prepare writes its own pod's UID into, in the run's
+// directory beside the declared directories, and that publish reads back
+// before it seals (ADR-0004). It is here rather than in the sidecar because
+// the controller has to know it too: a flow may not declare a judgement
+// directory under this name, and refusing that at creation is the
+// controller's side of the same rule the sidecar enforces at runtime.
+const MarkName = ".prepared-by"
+
+// ErrBadDirectoryName reports a declared judgement directory that cannot be
+// made: not a single path element, or MarkName, which prepare would then
+// find already occupied by the mark it just wrote.
+var ErrBadDirectoryName = errors.New("directory name is not a single path element")
+
+// CheckDirectoryName refuses a name the flow cannot have as a judgement
+// directory. Both ends run it: admission so a flow that would fail every run
+// is refused when it is written, and the sidecar so that refusal does not
+// depend on admission having run (ADR-0006 決定5).
+func CheckDirectoryName(name string) error {
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(name, "/\x00") || filepath.Base(name) != name {
+		return fmt.Errorf("%w: %q", ErrBadDirectoryName, name)
+	}
+	if name == MarkName {
+		return fmt.Errorf("%w: %q is reserved for the pod's mark", ErrBadDirectoryName, name)
+	}
+	return nil
+}

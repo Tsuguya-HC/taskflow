@@ -40,6 +40,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
 const (
@@ -71,7 +73,10 @@ const (
 	// dotfile, so a plain ls shows the vocabulary and nothing else. It
 	// travels with the run onto results/, where it says which pod produced
 	// what is there.
-	markName = ".prepared-by"
+	//
+	// The name itself lives in contract, because admission has to refuse a
+	// flow that declares it (ADR-0006) and the two ends must not drift.
+	markName = contract.MarkName
 )
 
 // ErrMark reports a run directory whose mark is not this pod's — it was
@@ -79,9 +84,11 @@ const (
 var ErrMark = errors.New("run directory was prepared by another pod")
 
 // ErrBadName reports a declared directory name that cannot be a single path
-// element. Admission is meant to refuse these at creation; the sidecar refuses
-// them again because it must not depend on admission having run.
-var ErrBadName = errors.New("directory name is not a single path element")
+// element. Admission refuses these at creation (ADR-0006); the sidecar refuses
+// them again because it must not depend on admission having run, and it does
+// so by the same rule — contract.CheckDirectoryName — so the two cannot
+// disagree about what a name may be.
+var ErrBadName = contract.ErrBadDirectoryName
 
 // ErrNotADirectory reports a declared name whose entry already exists but is
 // not itself a directory — most concerningly a symlink. Prepare's own uid can
@@ -106,14 +113,7 @@ type Answer struct {
 // on the file Mark already put there, failing every run with
 // ErrNotADirectory.
 func checkName(name string) error {
-	if name == "" || name == "." || name == ".." ||
-		strings.ContainsAny(name, "/\x00") || filepath.Base(name) != name {
-		return fmt.Errorf("%w: %q", ErrBadName, name)
-	}
-	if name == markName {
-		return fmt.Errorf("%w: %q is reserved for the pod's mark", ErrBadName, name)
-	}
-	return nil
+	return contract.CheckDirectoryName(name)
 }
 
 // checkRealDir refuses anything at path that is not itself a directory —
