@@ -281,7 +281,7 @@ spec:
         runtimeClassName: kata
         serviceAccountName: agent-readonly   # 既存 SA を参照するだけ（生成しない）
         restartPolicy: Never
-        securityContext: {runAsUser: 65533}  # 必須。out/ はこの uid に対して閉じられる
+        securityContext: {runAsUser: 65533}  # 必須。run ディレクトリはこの uid に対して閉じられる
         volumes:
           - {name: work, emptyDir: {}}
         containers:
@@ -293,13 +293,13 @@ spec:
 ```
 
 **フィールドはこれで全部。** プロンプト・モデル・API キー・store・通知先は 1 つも無い。
-`out/` を敷く init コンテナと判定を読み戻すサイドカーは**コントローラが Job 生成時に足す**ので、
+宣言ディレクトリを敷く init コンテナと判定を読み戻すサイドカーは**コントローラが Job 生成時に足す**ので、
 handler の作者はその存在を知らなくてよい（§7）。
 
 ### handler は AI 専用ではない（P7 の見返り）
 
 `jobTemplate` を丸ごと持つので、**lint / test / 任意のスクリプトがそのまま handler になる**。
-`golangci-lint` を走らせて `out/pass/` か `out/attention/` に書くコンテナと、
+`golangci-lint` を走らせて `/workspace/pass/` か `/workspace/attention/` に書くコンテナと、
 LLM エージェントとの間に、コントローラから見た区別は存在しない。
 
 `runner` は 3 種類:
@@ -517,7 +517,7 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 | `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化 | 同上 |
 | `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） | 同上 |
 | `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる | 同上 |
-| `restartPolicy: OnFailure` | 同上（Pod 内再起動で out/ に前回の残骸が残る）。`Never` のみ許可 | **reconcile 時に Go コードで拒否**（`internal/runner/job.go` の `checkReserved`）。Task が動く時点で `Failed` になるのであって、`TaskHandler` の作成自体は防げていない |
+| `restartPolicy: OnFailure` | 同上（Pod 内再起動で run ディレクトリに前回の残骸が残る）。`Never` のみ許可 | **reconcile 時に Go コードで拒否**（`internal/runner/job.go` の `checkReserved`）。Task が動く時点で `Failed` になるのであって、`TaskHandler` の作成自体は防げていない |
 
 上の 5 種は型からフィールドが消えているので、CRD の validation で「拒否する」対象がそもそも
 存在しない。CEL で書けているのは `phase` に `Escalated` / `Failed` を予約するルールだけ
@@ -781,13 +781,16 @@ next: {報告: ok, 調査: more}
 ```
 
 ```
-out/
-  ok/       ← 空
+/workspace/            ← handler のマウント直下 = この run のディレクトリ。語彙はここに並ぶ
+  ok/                  ← 空
   more/
-    report.md        必須（自由記述）
-    findings.json    任意。あれば使う、壊れていても判定は覆らない
-    _done            最後に書く。これが無いディレクトリは無視
+    report.md          必須（自由記述）
+    findings.json      任意。あれば使う、壊れていても判定は覆らない
+    _done              最後に書く。これが無いディレクトリは無視
 ```
+
+マウントと語彙の間に階層は置かない（[ADR-0005](adr/0005-vocabulary-at-the-mount-root.md)。
+初版は `out/` を挟んでいて、棚を読む側がそれを落として Escalated を踏んだ）。
 
 - **宣言が 3 つの役目を同時に果たす** — ①辺 ②作るディレクトリ ③エージェントの語彙
 - **非空がちょうど 1 つ**でなければ直接 Escalated。0 個も 2 個以上も同じ扱い
@@ -798,12 +801,12 @@ out/
 ### パーミッションで語彙を強制する
 
 ```
-out/           root:root  0555   ← 書けない
-out/ok/        agent      0755   ← next の宣言から生成
-out/more/      agent      0755
+/workspace/        prepare の uid  0555   ← 書けない
+/workspace/ok/     prepare の uid  0777   ← next の宣言から生成
+/workspace/more/   prepare の uid  0777
 ```
 
-`mkdir out/NG` が EACCES で失敗する。**バリデーションがカーネルに降りる。**
+`mkdir /workspace/NG` が EACCES で失敗する。**バリデーションがカーネルに降りる。**
 
 そして語彙外のトークンは**そもそも表現できない**。宣言に無いディレクトリは存在しないので、
 「未知のトークンを出す」という事象が起こらない。初版は `pass` / `rework` / `escalate` を
@@ -828,7 +831,7 @@ pod の中身が全部ユーザー定義になるため、**コントローラ�
 
 | 区間 | 手段 | その区間で守りたい性質 |
 |---|---|---|
-| エージェント → サイドカー | **ディレクトリ**（`next` の宣言から生成、例: `out/{ok,more}/`） | LLM の散文・フォーマット崩れに耐える。パーミッションで語彙を強制 |
+| エージェント → サイドカー | **ディレクトリ**（`next` の宣言から生成、例: `/workspace/{ok,more}/`） | LLM の散文・フォーマット崩れに耐える。パーミッションで語彙を強制 |
 | サイドカー → コントローラ | **termination message**（`/dev/termination-log`） | K8s ネイティブ。認証情報も store 依存も不要。両端が決定論的プログラム |
 
 サイドカーは書かれたディレクトリを検証して、その名前を `/dev/termination-log` に書く。
@@ -903,8 +906,9 @@ handler が書くのは `spec.workspace: {volume, mountPath}` — 判定の回�
 - **コントローラが渡すのは語彙**: `next` の宣言から取ったディレクトリ名を `FLOW_DIRECTORIES`
   （JSON 配列、ソート済み）として全コンテナに注入する。`FLOW_PHASE` と同じ扱いで、run 番号と違って
   エージェントが見てよい情報（どのみちファイルシステムに見えている）
-- **コントローラが足すのは両端**: `flow-prepare`（init、`<mountPath>/out` を敷く）と `flow-publish`
-  （ネイティブサイドカー、読み取り専用マウント、SIGTERM で封じて termination log に書く）を
+- **コントローラが足すのは両端**: `flow-prepare`（init、run ディレクトリ `work/<runID>/` を作って
+  宣言ディレクトリを敷き、閉じる）と `flow-publish`（ネイティブサイドカー、SIGTERM で封じて
+  termination log に書く）を
   initContainers の先頭に置く。イメージは controller のフラグ `--sidecar-image`。template が同名の
   コンテナを持っていたら framework ラベルと同じく**上書きせず拒否**する。この 2 本だけが
   `FLOW_POD_UID`（downward API `metadata.uid`）を持つ — prepare が run に刻み publish が照合する
@@ -937,7 +941,8 @@ flow が `spec.workspace.volumeClaimTemplate`（corev1 の **spec のみ**。省
 マウントは readOnly でも「この run のビュー」**として、生成時に literal `subPath: work/<runID>` が
 焼かれる（[ADR-0003](adr/0003-run-view-and-sweep.md)。自分の run を読むだけの notify のような
 サイドカーも runID を知らずに済む）。書き込み可マウントに handler が自分で SubPath / SubPathExpr を
-書くのは拒否。走行中の書き込み先は `work/<runID>/out/...`。publish が seal で
+書くのは拒否。走行中の書き込み先は `work/<runID>/<宣言ディレクトリ>/`（handler からは
+`/workspace/ok/` 等、マウント直下）。publish が seal で
 verdict を確定させた後、同一ボリューム内の rename で `work/<runID>` を `results/<runID>` に移す —
 別ボリュームを跨がないので原子的。**`results/` には封印済みの run だけが並ぶ**、というのが読み側の
 意味論。publish は flow-workspace モードでは唯一 volume の root を書き込み可でマウントする（rename
@@ -946,7 +951,7 @@ verdict を確定させた後、同一ボリューム内の rename で `work/<ru
 落ちる（移動できていないのに verdict だけ通ると下流が読めないディレクトリを指すことになるため）。
 再試行は同じ runID に戻ってくるので（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)）、
 Pod オブジェクトが消えたあとも生きているゾンビ publish が、次の attempt の書きかけを同じパスから
-棚へ運びうる。prepare が `out/.prepared-by` に自分の Pod UID を刻み（downward API、注入 sidecar
+棚へ運びうる。prepare が run 直下の `.prepared-by` に自分の Pod UID を刻み（downward API、注入 sidecar
 だけに渡る）、publish は SIGTERM 後・封印前に照合して、他 Pod の run なら封印も rename もせず
 失敗を報告する。
 孤児の窓（rename 成功後・message 送信前のクラッシュで History に無い完了 run が results/ に残る）は
@@ -992,17 +997,28 @@ sidecar イメージを再ビルドしなくて済む。
 > **宣言が見えるのはファイルシステムそのもの。** `ok/` と `more/` が存在して、それ以外は無い。
 > 語彙外のトークンを出せないのは、禁じているからではなく**存在しないから**。
 
-`prepare` が敷くもの（Step 0 の `cnp-check-cwf.yaml` で実証した形をそのまま Go に移した）:
+`prepare` が敷くもの（Step 0 の `cnp-check-cwf.yaml` で実証した形を Go に移し、ADR-0005 で
+`out/` の階層を外した）。run ディレクトリ `work/<runID>/` を prepare 自身が作り、そこが handler の
+マウント直下になる — template 持ち込みの emptyDir でも flow の PVC でも同じ:
 
 ```
-<out>/           prepare の uid   0555   ← 閉じる。宣言に無い mkdir は EACCES
-<out>/ok/        prepare の uid   0777   ← 誰でも書ける。「誰でも」= 同じ Pod のコンテナ
-<out>/more/      prepare の uid   0777
+<run>/           prepare の uid   0555   ← 閉じる。宣言に無い mkdir は EACCES
+<run>/ok/        prepare の uid   0777   ← 誰でも書ける。「誰でも」= 同じ Pod のコンテナ
+<run>/more/      prepare の uid   0777
+<run>/.prepared-by                       ← Pod UID（ADR-0004）。閉じた中に一緒に封じる
 ```
+
+prepare が volume を `subPath: work` でマウントして `<runID>/` を自分で作るのは、kubelet が作った
+subPath ディレクトリは root 所有で chmod が EPERM になるため（2026-08-30 実測）。自分で作れば
+閉じられる。handler のマウントは `subPath: work/<runID>` に焼かれ、init が main より先に走るので
+kubelet はその時点で存在するディレクトリを作り直さない（2026-09-05 実測、runc / kata とも
+handler から見た root は `dr-xr-xr-x prepare-uid`）。閉じた run を publish が棚へ rename するときは
+ディレクトリ自身への書き込み権限が要る（`..` の書き換え）ので、publish は同 uid で 0755 に開けて
+rename し、棚の上で 0555 に閉じ直す（owner のみなので agent には開かない）。
 
 閉じるのは uid で、**prepare の uid はコントローラが選ぶ**。同じ uid なら chmod で開け直せるので
-閉じたことにならない（2026-08-30 実測: agent を prepare と同じ 65532 で走らせると `chmod 0775 out/`
-も `mkdir out/evil` も通り、65533 なら EPERM / EACCES）。だから runner は template が名乗る uid
+閉じたことにならない（2026-08-30 実測: agent を prepare と同じ 65532 で走らせると閉じた
+ディレクトリの `chmod 0775` も `mkdir evil` も通り、65533 なら EPERM / EACCES）。だから runner は template が名乗る uid
 （Pod レベルと各コンテナ）を全部避けて 65532 から下へ探し、注入コンテナの `runAsUser` に書く。
 handler の作者に「65532 を使うな」と覚えさせない。宣言ディレクトリを group 書き込みではなく
 0777 にしたのも同じ理由 — fsGroup を prepare の group に合わせる規則を消すため。emptyDir は Pod で
@@ -1023,14 +1039,14 @@ handler の作者に「65532 を使うな」と覚えさせない。宣言ディ
 
 root で走る handler を runner が拒否することはない — それは Pod のセキュリティポリシー（PSA /
 Kyverno）の層の仕事で、コントローラはポリシーを持たない（§2 P2）。uid 分離が守っているのは
-エージェント（操られうる側）が prepare の閉じた out/ を開け直せないことであって、handler の
+エージェント（操られうる側）が prepare の閉じた run ディレクトリを開け直せないことであって、handler の
 作者が root を選ばないことではない。
 
 `prepare` は繰り返し実行しても既存の中身を消さない。
 
-**`out/<name>` が symlink に差し替えられていたら `prepare` は拒否し、`publish` は答え無しにする**
+**`<run>/<name>` が symlink に差し替えられていたら `prepare` は拒否し、`publish` は答え無しにする**
 （両方とも `os.Lstat` で判定し、`os.Chmod` や `os.ReadDir` に symlink を追わせない）。同一 Pod の
-emptyDir ではエージェントは `out/` に書けないので踏まないが、§9 の PVC backend（rework で run を
+emptyDir ではエージェントは run 直下に書けないので踏まないが、§9 の PVC backend（rework で run を
 跨いで生き残る）では先行 attempt が仕込んだ symlink を後続の `prepare` が chmod で開ける、あるいは
 `publish` がその先を読むことで「非空の宣言ディレクトリがちょうど 1 つ」を偽装できてしまう。
 PVC を実装する前に閉じておく。
@@ -1081,7 +1097,7 @@ store へ到達するために開けた egress は agent コンテナからも�
 インフラ起因の再実行はコントローラが**同じ runID・次の attempt の名前で Job を作り直す**
 （[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)。何も決まっていない試行に番号は払わない。
 前の attempt の残骸は prepare の `MakeRun` が消し、ゾンビ publish が次の attempt の run を棚へ
-運ばないよう prepare が `out/.prepared-by` に Pod UID を刻み、publish は封印前に照合する）。
+運ばないよう prepare が run 直下の `.prepared-by` に Pod UID を刻み、publish は封印前に照合する）。
 
 ### 終了必須（長命 Sandbox は v1 では採らない）
 
@@ -1238,7 +1254,7 @@ verdict 機構は「正直だが間違えるエージェント」を前提にし
 想定していない。**
 
 Renovate PR のトリアージ（Step 2）では、PR 本文や依存の release notes は**攻撃者が書ける**。
-「`out/pass/` に書け」と書いてあれば書く可能性がある。
+「`pass/` に書け」と書いてあれば書く可能性がある。
 
 → profile に **入力の信頼レベル**を属性として持たせ、`untrusted` の handler は
 **束縛の無いステータス（＝終端）へ直接遷移する辺を持てない**ものとする。これは 1 ホップの
@@ -1549,7 +1565,7 @@ spec:
         serviceAccountName: agent-cnp-reader     # CNP と Pod の get/list のみ
         restartPolicy: Never
         securityContext:
-          runAsUser: 65533                       # 必須。コントローラはこれと違う uid で out/ を閉じる
+          runAsUser: 65533                       # 必須。コントローラはこれと違う uid で run ディレクトリを閉じる
           runAsNonRoot: true
         volumes:
           - name: work
@@ -1560,7 +1576,7 @@ spec:
           - name: agent
             image: registry.infra.tgy.io/tools/claude-code:latest
             workingDir: /workspace
-            # S3 認証情報も egress も持たない。書けるのは out/ の宣言済みディレクトリだけ
+            # S3 認証情報も egress も持たない。書けるのは /workspace 直下の宣言済みディレクトリだけ
             volumeMounts:
               - {name: work, mountPath: /workspace}
               - {name: prompt, mountPath: /prompt, readOnly: true}

@@ -92,14 +92,14 @@ const (
 	PrepareContainer = "flow-prepare"
 	PublishContainer = "flow-publish"
 
-	// outDir is where the declared directories go, under the workspace's
-	// mount path. The layout is the framework's; the place is the handler's.
-	outDir = "out"
-
-	// workDir is where a run writes while it is in flight. The injected
-	// containers' own mounts and every writable mount of the flow workspace
-	// among the handler's own containers are pinned to workDir/<runID>, so
-	// nothing but this one attempt ever lands there (§ADR-0002 決定5).
+	// workDir is where a run writes while it is in flight. Every mount of
+	// the workspace volume that names no subPath of its own — the handler's
+	// containers' and the injected ones' alike, a flow workspace or the
+	// template's own volume alike — is pinned to workDir/<runID>, so nothing
+	// but this one attempt ever lands there (§ADR-0002 決定5, ADR-0005), and
+	// so the run's directory — the vocabulary, closed by prepare — is what
+	// every one of those mounts shows at its root. There is no layer
+	// between the mount and the declared directories.
 	workDir = "work"
 	// resultsDir is the shelf publish moves a run's directory onto once it
 	// has sealed — a rename from workDir/<runID> to resultsDir/<runID>,
@@ -111,12 +111,12 @@ const (
 
 	// preferredSidecarUID is the uid the injected containers run as when
 	// nothing of the handler's does: distroless' nonroot, which is also the
-	// image's own USER. prepare creates out/ under its uid and closes it to
-	// 0555, and that is a closed door only if no other container in the pod
-	// can chmod it back open — which is to say, only if none shares the
-	// uid. So the uid is chosen per Job, stepping down from here past any
-	// the template names, rather than being a number the handler's author
-	// has to know to avoid.
+	// image's own USER. prepare creates the run's directory under its uid
+	// and closes it to 0555, and that is a closed door only if no other
+	// container in the pod can chmod it back open — which is to say, only
+	// if none shares the uid. So the uid is chosen per Job, stepping down
+	// from here past any the template names, rather than being a number
+	// the handler's author has to know to avoid.
 	preferredSidecarUID int64 = 65532
 )
 
@@ -157,7 +157,9 @@ type Input struct {
 	// today, with runs strictly serial, it is every run before this one.
 	// Sealed runs left work/ when their rename shelved them, so what this
 	// actually removes is the debris of attempts that died before sealing
-	// (ADR-0003).
+	// (ADR-0003). Only a flow workspace carries anything over from one
+	// run to the next; on a template volume, new with every pod, the list
+	// is not passed.
 	SweepRuns []int32
 }
 
@@ -396,8 +398,8 @@ func checkReserved(t *flowv1alpha1.JobTemplate) error {
 // not have, a handler container that never mounts it writably, a container
 // already wearing an injected name, a volume wearing the injected volume's
 // name, a handler writing its own SubPath or SubPathExpr onto a writable
-// mount of the reserved flow-workspace volume, or a uid arrangement under
-// which prepare's closing of out/ would not hold. hasFlowWorkspace says
+// mount of the workspace volume, or a uid arrangement under which prepare's
+// closing of the run's directory would not hold. hasFlowWorkspace says
 // whether the task's flow brings a claim of its own, which is what the
 // reserved flow-workspace volume mounts — a handler naming it under a flow
 // that declares none would run against a volume that does not exist, and is
@@ -411,10 +413,10 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler, hasFlowWorkspace bool) error {
 	if slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == contract.WorkspaceVolume }) {
 		return fmt.Errorf("%w: volume %q is the framework's to add", ErrReservedField, contract.WorkspaceVolume)
 	}
-	// Only the reserved flow-workspace volume gets a per-run layout pinned
-	// onto it (injectSidecars/pinSubPath) — a handler's own template volume
-	// keeps the flat layout it always had, so nothing of the handler's own
-	// SubPath there is the framework's business.
+	// The reserved flow-workspace volume is the controller's to add, backed
+	// by the task's claim; any other name has to be a volume the template
+	// brings. Both get the same per-run layout pinned onto them
+	// (injectSidecars/pinSubPath).
 	isFlowWorkspace := ws.Volume == contract.WorkspaceVolume
 	if isFlowWorkspace {
 		if !hasFlowWorkspace {
@@ -444,14 +446,16 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler, hasFlowWorkspace bool) error {
 				continue
 			}
 			mounted = true
-			// The per-run subPath under a writable flow-workspace mount is
-			// pinned by pinSubPath, not read from the template: a handler
+			// The per-run subPath under a writable mount of the workspace
+			// is pinned by pinSubPath, not read from the template: a handler
 			// that already sets one here would have it silently overwritten
 			// on every run, and a handler that sets a SubPathExpr expecting
 			// $(FLOW_RUN_ID) would run against a variable this design does
 			// not inject at all (§ADR-0002 決定5) — either way, refused
-			// rather than merged, same as every other reserved field.
-			if isFlowWorkspace && (m.SubPath != "" || m.SubPathExpr != "") {
+			// rather than merged, same as every other reserved field. A
+			// template volume is no different here since ADR-0005: its
+			// mounts are pinned the same way.
+			if m.SubPath != "" || m.SubPathExpr != "" {
 				return fmt.Errorf("%w: container %q's mount of %s sets its own SubPath or SubPathExpr; the per-run layout there is the framework's to set",
 					ErrReservedField, c.Name, ws.Volume)
 			}
@@ -462,7 +466,7 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler, hasFlowWorkspace bool) error {
 	// handler's own containers mounting it writably: a read-only mount ends
 	// the same way an absent one does, since prepare's declared directories
 	// exist but nothing of the handler's can write an answer into them; and
-	// with no writable mount at all, prepare would still lay out/ down and
+	// with no writable mount at all, prepare would still lay the run down and
 	// publish would still seal it, but no container of the handler's could
 	// read the declared directories or write an answer into them either — so
 	// either way the run could only ever come back with nothing to say.
@@ -473,11 +477,11 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler, hasFlowWorkspace bool) error {
 }
 
 // checkUID makes sure the pod says what uid its containers run as. The
-// injected containers close out/ against that uid by running as a different
+// injected containers close the run's directory against that uid by running as a different
 // one, and a uid left to each image is not one they can be sure to differ
 // from — an image built on the same base as the sidecar's runs as the same
 // nonroot user, and the handler would not show it anywhere. Measured, not
-// assumed (2026-08-30): at the same uid, chmod and mkdir under out/ both
+// assumed (2026-08-30): at the same uid, chmod and mkdir at the closed directory both
 // succeed.
 func checkUID(pod *corev1.PodSpec) error {
 	if pod.SecurityContext == nil || pod.SecurityContext.RunAsUser == nil {
@@ -509,32 +513,36 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 }
 
 // injectSidecars puts prepare and publish in front of the template's own
-// init containers, so out/ is laid down before anything of the handler's
-// runs, and so publish — a native sidecar, kept alive until the main
-// containers are done and then stopped — is already waiting when they start.
+// init containers, so the run's directory is laid down before anything of
+// the handler's runs, and so publish — a native sidecar, kept alive until
+// the main containers are done and then stopped — is already waiting when
+// they start.
 //
-// Both mount only the workspace. In the template-volume case publish mounts
-// it read-only: sealing reads which directories are non-empty and touches
-// nothing (measured 2026-08-30 with the mount read-only). The termination
-// log the answer is written to is the kubelet's, not the volume's.
+// The layout is the same whichever volume the workspace is (ADR-0005). Every
+// mount of it that names no subPath of its own — the handler's containers'
+// and the injected ones' alike — is pinned to work/<runID> (pinSubPath), so
+// the run's directory is what each of them sees at its mount's root, and
+// nothing but this attempt is there while it is in flight. prepare alone
+// mounts work/ itself, one level above: it makes the run's directory, so
+// that what it closes is its own — a path the kubelet's subPath machinery
+// made is root's, and a chmod on it comes back EPERM (measured 2026-08-30;
+// and again 2026-09-05 with the run's directory itself as the pinned
+// target, on runc and kata alike: prepare's 0555 holds at the handler's
+// root) — and it clears away the debris of abandoned runs, which needs the
+// same parent.
 //
-// A flow workspace changes both ends of that. The reserved volume itself,
-// backed by the task's claim, gets a per-run subPath under workDir, pinned
-// literally onto every writable mount of it — the injected containers' own
-// and every one of the handler's own containers that mounts it writably
-// (pinSubPath) — so this run's out/ lands under work/<runID> and nothing but
-// this attempt is there while it is in flight. The subPath names the run's
-// directory, not out/ itself: what prepare chmods must be something prepare
-// created, and a path the kubelet made is not (measured 2026-08-30 — a
-// subPath aimed at the chmod target itself comes back EPERM).
-//
-// publish's own mount stops being pinned or read-only: sealing a flow
-// workspace's run ends with a move from work/<runID> to results/<runID>
-// (§ADR-0002 決定5), and a rename spanning both shelves needs a mount that
-// can see the volume's root, writably, rather than one subPath pins under
-// either. Its --out and the --seal-from/--seal-to it moves between are
-// spelled out in full against that root, since nothing about its own mount
-// narrows the path for it the way prepare's subPath does.
+// What differs between a flow workspace and a template volume is only the
+// volume itself and what publish does once sealed. The reserved volume is
+// added here, backed by the task's claim, and its run ends with a move from
+// work/<runID> to results/<runID> (§ADR-0002 決定5): a rename spanning both
+// shelves needs a mount that can see the volume's root, writably, so
+// publish's own mount is neither pinned nor read-only there, and its --out
+// and --seal-to are spelled out in full against that root. A template
+// volume has no shelf: publish mounts its root read-only and only seals —
+// sealing reads which directories are non-empty and touches nothing
+// (measured 2026-08-30 with the mount read-only); the termination log the
+// answer is written to is the kubelet's, not the volume's. Nor is there
+// anything to sweep on a volume new with every pod.
 //
 // The literal runID is pinned rather than left for the handler's own
 // containers to resolve at $(FLOW_RUN_ID): the run number is generation-time
@@ -544,67 +552,51 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 // agent's own environment, the same as the annotation it is read from
 // stays out of reach of anything but the downward API (§ADR-0002 決定5).
 func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image string, uid int64, pvcName string, runID int32, sweep []int32) {
-	prepareSubPath := ""
-	prepareOut := path.Join(ws.MountPath, outDir)
-	publishOut := prepareOut
-	publishReadOnly := true
-	var prepareArgs, sealArgs []string
+	run := strconv.Itoa(int(runID))
+	pinSubPath(pod, ws.Volume, path.Join(workDir, run))
 
-	if ws.Volume == contract.WorkspaceVolume {
+	isFlowWorkspace := ws.Volume == contract.WorkspaceVolume
+	var prepareArgs, publishArgs []string
+	if isFlowWorkspace {
 		pod.Volumes = append(pod.Volumes, corev1.Volume{
 			Name: contract.WorkspaceVolume,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
 			},
 		})
-		run := strconv.Itoa(int(runID))
-		pinSubPath(pod, ws.Volume, path.Join(workDir, run))
-
-		// prepare mounts work/ itself, one level above its own run: it
-		// makes the run's directory (so the mode is chosen, not left to
-		// the kubelet's subPath machinery) and it clears away the debris
-		// of abandoned runs — both need the parent, neither needs the
-		// shelf, which stays out of its reach.
-		prepareSubPath = workDir
-		prepareOut = path.Join(ws.MountPath, run, outDir)
-		prepareArgs = []string{"--" + contract.FlagRunDir, path.Join(ws.MountPath, run)}
 		if len(sweep) > 0 {
 			ids := make([]string, len(sweep))
 			for i, id := range sweep {
 				ids[i] = strconv.Itoa(int(id))
 			}
-			prepareArgs = append(prepareArgs, "--"+contract.FlagSweep, strings.Join(ids, ","))
+			prepareArgs = []string{"--" + contract.FlagSweep, strings.Join(ids, ",")}
 		}
-
-		publishReadOnly = false
-		workAt := path.Join(ws.MountPath, workDir, run)
-		publishOut = path.Join(workAt, outDir)
-		sealArgs = []string{
-			"--" + contract.FlagSealFrom, workAt,
-			"--" + contract.FlagSealTo, path.Join(ws.MountPath, resultsDir, run),
-		}
+		publishArgs = []string{"--" + contract.FlagSealTo, path.Join(ws.MountPath, resultsDir, run)}
 	}
 
-	prepare := sidecarContainer(PrepareContainer, image, contract.SubcommandPrepare, prepareOut, ws, uid, prepareSubPath, false)
+	// prepare's mount is work/, so its run is <mountPath>/<runID>; publish
+	// mounts the volume's root, so the same directory is
+	// <mountPath>/work/<runID> from where it stands.
+	prepare := sidecarContainer(PrepareContainer, image, contract.SubcommandPrepare, path.Join(ws.MountPath, run), ws, uid, workDir, false)
 	prepare.Args = append(prepare.Args, prepareArgs...)
-	publish := sidecarContainer(PublishContainer, image, contract.SubcommandPublish, publishOut, ws, uid, "", publishReadOnly)
-	publish.Args = append(publish.Args, sealArgs...)
+	publish := sidecarContainer(PublishContainer, image, contract.SubcommandPublish, path.Join(ws.MountPath, workDir, run), ws, uid, "", !isFlowWorkspace)
+	publish.Args = append(publish.Args, publishArgs...)
 	publish.RestartPolicy = ptr(corev1.ContainerRestartPolicyAlways)
 	pod.InitContainers = append([]corev1.Container{prepare, publish}, pod.InitContainers...)
 }
 
-// pinSubPath aims every handler mount of the flow-workspace volume that does
-// not say otherwise at this run's directory — writable or read-only alike:
-// no subPath means "this run", and the shelf of finished runs is asked for
+// pinSubPath aims every handler mount of the workspace volume that does not
+// say otherwise at this run's directory — writable or read-only alike: no
+// subPath means "this run", and the shelf of finished runs is asked for
 // explicitly with subPath: results (ADR-0003; the first cut pinned only
 // writable mounts, which left a sidecar that merely reads its own run's
-// out/ — cnp-check's notify — staring at the volume root, unable to find
-// its run without the very wiring this design removed). Called before the
-// injected containers are prepended, so pod.InitContainers here still holds
-// only the handler's own. checkWorkspace has already refused a handler that
-// set its own SubPath or SubPathExpr on a writable mount, so nothing here
-// overwrites a value the handler wrote; a read-only mount carrying an
-// explicit subPath is the handler's own view and left alone.
+// directory — cnp-check's notify — staring at the volume root, unable to
+// find its run without the very wiring this design removed). Called before
+// the injected containers are prepended, so pod.InitContainers here still
+// holds only the handler's own. checkWorkspace has already refused a
+// handler that set its own SubPath or SubPathExpr on a writable mount, so
+// nothing here overwrites a value the handler wrote; a read-only mount
+// carrying an explicit subPath is the handler's own view and left alone.
 func pinSubPath(pod *corev1.PodSpec, volume, subPath string) {
 	pin := func(containers []corev1.Container) {
 		for i := range containers {
@@ -620,8 +612,9 @@ func pinSubPath(pod *corev1.PodSpec, volume, subPath string) {
 	pin(pod.Containers)
 }
 
-// sidecarContainer is one of the two, differing only in subcommand and in
-// whether it may write. The security context is the whole restricted set,
+// sidecarContainer is one of the two, differing in subcommand, in where the
+// run's directory is from its own mount, and in whether it may write. The
+// security context is the whole restricted set,
 // spelled out rather than inherited: the pod's is the handler's choice for
 // its own containers, and the uid in it is exactly what these must not share.
 func sidecarContainer(name, image, subcommand, out string, ws flowv1alpha1.WorkspaceSpec, uid int64, subPath string, readOnly bool) corev1.Container {

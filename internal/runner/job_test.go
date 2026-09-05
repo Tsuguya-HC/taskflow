@@ -19,6 +19,7 @@ package runner
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -544,9 +545,15 @@ func TestNoDirectoriesIsAnEmptyList(t *testing.T) {
 
 // The two ends of the verdict protocol are one program, and the end inside
 // the pod is put there by the end that reads it back — not copied into
-// every handler. prepare goes first so out/ exists before anything of the
-// handler's runs; publish is a native sidecar so it is stopped, and answers,
-// once the main containers are done.
+// every handler. prepare goes first so the run's directory exists before
+// anything of the handler's runs; publish is a native sidecar so it is
+// stopped, and answers, once the main containers are done.
+//
+// The run's directory is work/<runID> on the volume, and each sidecar names
+// it from where its own mount stands: prepare mounts work/ (one level above,
+// so the directory is its own to make and close) and says <mountPath>/1;
+// publish mounts the volume's root and says <mountPath>/work/1. Neither path
+// has an out/ in it — the run's directory is the vocabulary (ADR-0005).
 func TestInjectsPrepareAndPublish(t *testing.T) {
 	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
 	inits := job.Spec.Template.Spec.InitContainers
@@ -567,9 +574,6 @@ func TestInjectsPrepareAndPublish(t *testing.T) {
 		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != workspaceVol || c.VolumeMounts[0].MountPath != workspaceAt {
 			t.Fatalf("%s mounts = %v; want only the workspace at its declared path", c.Name, c.VolumeMounts)
 		}
-		if got := c.Args[len(c.Args)-1]; got != workspaceAt+"/out" {
-			t.Fatalf("%s --out = %q; the layout is the framework's, under the handler's path", c.Name, got)
-		}
 		if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != preferredSidecarUID {
 			t.Fatalf("%s runs as %v, want %d", c.Name, c.SecurityContext, preferredSidecarUID)
 		}
@@ -589,8 +593,19 @@ func TestInjectsPrepareAndPublish(t *testing.T) {
 			t.Fatalf("%s sets a cpu limit; a throttled sidecar could stall the run it is meant to seal", c.Name)
 		}
 	}
-	if prepare.Args[0] != "prepare" || publish.Args[0] != "publish" {
-		t.Fatalf("subcommands = %q / %q", prepare.Args[0], publish.Args[0])
+	wantPrepare := []string{contract.SubcommandPrepare, "--" + contract.FlagOut, workspaceAt + "/1"}
+	if !reflect.DeepEqual(prepare.Args, wantPrepare) {
+		t.Fatalf("prepare args = %v, want %v: the run's directory, seen from a mount of work/", prepare.Args, wantPrepare)
+	}
+	if got := prepare.VolumeMounts[0].SubPath; got != "work" {
+		t.Fatalf("prepare subPath = %q; prepare works one level above its run, where the directory it closes is its own to make", got)
+	}
+	wantPublish := []string{contract.SubcommandPublish, "--" + contract.FlagOut, workspaceAt + "/work/1"}
+	if !reflect.DeepEqual(publish.Args, wantPublish) {
+		t.Fatalf("publish args = %v, want %v: the same directory seen from the volume's root, and no shelf to move it onto", publish.Args, wantPublish)
+	}
+	if got := publish.VolumeMounts[0].SubPath; got != "" {
+		t.Fatalf("publish subPath = %q; publish stands at the volume's root", got)
 	}
 	if prepare.RestartPolicy != nil {
 		t.Fatal("prepare must run to completion, not restart")
@@ -604,8 +619,40 @@ func TestInjectsPrepareAndPublish(t *testing.T) {
 	if !publish.VolumeMounts[0].ReadOnly {
 		t.Fatal("publish only reads; give it no more")
 	}
-	if len(publish.Args) != 3 {
-		t.Fatalf("publish args = %v; a template-backed workspace has no results/ shelf to move a run onto", publish.Args)
+}
+
+// What the handler's own containers see at their mount's root is the run's
+// directory itself — the declared directories, and nothing between: a
+// template volume is pinned to work/<runID> the same as a flow workspace
+// (ADR-0005), read-only mounts included, so the handler's `ls /workspace`
+// is the vocabulary whichever volume it brought.
+func TestPinsTheHandlersMountsToTheRun(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		spec := &h.Spec.JobTemplate.Template.Spec
+		spec.Containers = append(spec.Containers, corev1.Container{
+			Name: "watcher", Image: "example.invalid/watcher:v0",
+			VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: "/watch", ReadOnly: true}},
+		})
+	})
+	job := build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 2})
+	spec := job.Spec.Template.Spec
+	for _, c := range append(spec.InitContainers[2:], spec.Containers...) {
+		for _, m := range c.VolumeMounts {
+			if m.Name != workspaceVol {
+				continue
+			}
+			if m.SubPath != "work/2" {
+				t.Fatalf("%s mount of %s subPath = %q; no subPath means this run, on a template volume too", c.Name, m.MountPath, m.SubPath)
+			}
+		}
+	}
+	for _, v := range spec.Volumes {
+		if v.Name == contract.WorkspaceVolume {
+			t.Fatal("the reserved volume was added though nothing mounts it")
+		}
+	}
+	if got := spec.InitContainers[0].Args; slices.Contains(got, "--"+contract.FlagSweep) {
+		t.Fatalf("prepare args = %v; a template volume is new with every pod and has nothing to sweep", got)
 	}
 }
 
@@ -658,8 +705,8 @@ func TestInjectedContainersKnowTheirOwnPod(t *testing.T) {
 	}
 }
 
-// out/ is closed by uid: prepare owns it and leaves it 0555, and only a
-// container running as that same uid could chmod it open again. So the uid
+// The run's directory is closed by uid: prepare owns it and leaves it 0555,
+// and only a container running as that same uid could chmod it open again. So the uid
 // is picked around whatever the handler uses, rather than being a number
 // the handler's author has to know to avoid.
 func TestSidecarUIDStepsPastTheHandlers(t *testing.T) {
@@ -678,7 +725,7 @@ func TestSidecarUIDStepsPastTheHandlers(t *testing.T) {
 
 // A pod that does not say its uid runs as whatever each image was built
 // with, which the sidecar cannot be sure to differ from. Refused rather
-// than guessed: the closing of out/ is the whole enforcement.
+// than guessed: the closing of the run's directory is the whole enforcement.
 func TestRefusesAPodWithNoUID(t *testing.T) {
 	cases := map[string]func(*flowv1alpha1.TaskHandler){
 		"no securityContext at all": func(h *flowv1alpha1.TaskHandler) { h.Spec.JobTemplate.Template.Spec.SecurityContext = nil },
@@ -691,7 +738,7 @@ func TestRefusesAPodWithNoUID(t *testing.T) {
 			h := handler(mut)
 			_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage})
 			if !errors.Is(err, ErrWorkspace) {
-				t.Fatalf("err = %v; want a refusal to close out/ against an unknown uid", err)
+				t.Fatalf("err = %v; want a refusal to close the run against an unknown uid", err)
 			}
 		})
 	}
@@ -820,8 +867,8 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 		t.Fatal("prepare has to write the directories")
 	}
 	wantPrepare := []string{
-		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/3/out",
-		"--" + contract.FlagRunDir, "/workspace/3", "--" + contract.FlagSweep, "1,2",
+		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/3",
+		"--" + contract.FlagSweep, "1,2",
 	}
 	if !reflect.DeepEqual(prepare.Args, wantPrepare) {
 		t.Fatalf("prepare args = %v, want %v", prepare.Args, wantPrepare)
@@ -840,8 +887,7 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 		t.Fatal("publish must be able to write, to move the run onto the results/ shelf")
 	}
 	wantArgs := []string{
-		"publish", "--out", "/workspace/work/3/out",
-		"--seal-from", "/workspace/work/3", "--seal-to", "/workspace/results/3",
+		"publish", "--out", "/workspace/work/3", "--seal-to", "/workspace/results/3",
 	}
 	if !reflect.DeepEqual(publish.Args, wantArgs) {
 		t.Fatalf("publish args = %v, want %v", publish.Args, wantArgs)
@@ -850,7 +896,7 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 
 // A mount of the flow workspace that names no subPath of its own means
 // "this run", read-only or not: a sidecar that only reads its own run's
-// out/ — cnp-check's notify — should find it where it always was, without
+// directory — cnp-check's notify — should find it where it always was, without
 // resolving a run number first. The shelf of finished runs is asked for
 // explicitly, with subPath: results, and that mount is the handler's own
 // view: left exactly as written (ADR-0003).
@@ -887,22 +933,20 @@ func TestFlowWorkspacePinsMountsThatNameNoView(t *testing.T) {
 func TestFirstRunHasNothingToSweep(t *testing.T) {
 	job := build(t, Input{Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 1, WorkspacePVC: "run-one-claim"})
 	prepare := job.Spec.Template.Spec.InitContainers[0]
-	want := []string{
-		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1/out",
-		"--" + contract.FlagRunDir, "/workspace/1",
-	}
+	want := []string{contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1"}
 	if !reflect.DeepEqual(prepare.Args, want) {
 		t.Fatalf("prepare args = %v, want %v", prepare.Args, want)
 	}
 }
 
-// The per-run layout under a writable flow-workspace mount is the
+// The per-run layout under a writable mount of the workspace is the
 // controller's to pin, at generation time; a handler that already wrote a
 // SubPath or SubPathExpr there would either have it silently overwritten
 // every run, or — for a SubPathExpr expecting $(FLOW_RUN_ID) — run against a
 // variable this design deliberately never injects. Refused rather than
-// merged, same as every other reserved field.
-func TestRefusesAHandlerSettingItsOwnLayoutOnAWritableFlowWorkspaceMount(t *testing.T) {
+// merged, same as every other reserved field — on a template volume as
+// much as on the flow workspace, since both are pinned (ADR-0005).
+func TestRefusesAHandlerSettingItsOwnLayoutOnAWritableMount(t *testing.T) {
 	cases := map[string]func(*flowv1alpha1.TaskHandler){
 		"subPath": func(h *flowv1alpha1.TaskHandler) {
 			h.Spec.JobTemplate.Template.Spec.Containers[0].VolumeMounts[0].SubPath = "mine"
@@ -911,35 +955,39 @@ func TestRefusesAHandlerSettingItsOwnLayoutOnAWritableFlowWorkspaceMount(t *test
 			h.Spec.JobTemplate.Template.Spec.Containers[0].VolumeMounts[0].SubPathExpr = "$(SOME_VAR)"
 		},
 	}
-	for name, mut := range cases {
-		t.Run(name, func(t *testing.T) {
-			h := handler(flowWorkspace, mut)
-			_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage, WorkspacePVC: "x"})
-			if !errors.Is(err, ErrReservedField) {
-				t.Fatalf("err = %v; the per-run layout under a writable flow-workspace mount is the framework's to set", err)
-			}
-		})
+	volumes := map[string]func(*flowv1alpha1.TaskHandler){
+		"flow workspace":  flowWorkspace,
+		"template volume": func(*flowv1alpha1.TaskHandler) {},
+	}
+	for vname, vol := range volumes {
+		for name, mut := range cases {
+			t.Run(vname+"/"+name, func(t *testing.T) {
+				h := handler(vol, mut)
+				_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1, SidecarImage: sidecarImage, WorkspacePVC: "x"})
+				if !errors.Is(err, ErrReservedField) {
+					t.Fatalf("err = %v; the per-run layout under a writable mount is the framework's to set", err)
+				}
+			})
+		}
 	}
 }
 
 // A phase may stay on its own template volume even when the flow brings a
-// claim: nothing forces every handler through the shared workspace, and the
-// flat layout it has today must not change underneath it.
-func TestATemplateVolumeKeepsTheFlatLayout(t *testing.T) {
+// claim: nothing forces every handler through the shared workspace. It gets
+// the same run layout — but not the claim, which nothing of its mounts.
+func TestATemplateVolumeStaysOffTheClaim(t *testing.T) {
 	job := build(t, Input{
 		Task: task(), Handler: handler(), Phase: phaseInvestigate,
 		RunID: 2, WorkspacePVC: "some-claim",
 	})
 	spec := job.Spec.Template.Spec
-	for _, c := range spec.InitContainers[:2] {
-		if got := c.VolumeMounts[0].SubPath; got != "" {
-			t.Fatalf("%s subPath = %q; a template-backed workspace has no run layout", c.Name, got)
-		}
-	}
 	for _, v := range spec.Volumes {
 		if v.Name == contract.WorkspaceVolume {
 			t.Fatal("the reserved volume was added though nothing mounts it")
 		}
+	}
+	if got := spec.Containers[0].VolumeMounts[0].SubPath; got != "work/2" {
+		t.Fatalf("agent subPath = %q; the template volume is pinned to this run the same as a flow workspace would be", got)
 	}
 }
 

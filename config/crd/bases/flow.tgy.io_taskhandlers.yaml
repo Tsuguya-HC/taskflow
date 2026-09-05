@@ -9019,16 +9019,21 @@ spec:
                 properties:
                   mountPath:
                     description: |-
-                      MountPath is where the injected containers mount that volume, and lay
-                      the declared directories down under <mountPath>/out. The handler's own
-                      containers are free to mount the same volume at any path — it is the
-                      same underlying volume either way — as long as at least one of them
-                      mounts it writably; the directory names under out/ are what the
-                      contract shares, not the path they are reached through.
+                      MountPath is where the injected containers mount that volume. The
+                      handler's own containers are free to mount the same volume at any
+                      path — it is the same underlying volume either way — as long as at
+                      least one of them mounts it writably. Every such mount that names no
+                      subPath of its own shows this run's directory at its root: the
+                      declared directories, directly under the mount point, and nothing
+                      else. Their names are what the contract shares, not the path they are
+                      reached through.
                     pattern: ^/
                     type: string
                   volume:
-                    description: Volume is the name of an entry in jobTemplate.template.spec.volumes.
+                    description: |-
+                      Volume is the name of an entry in jobTemplate.template.spec.volumes,
+                      or the reserved name flow-workspace to join the claim the task's flow
+                      brings.
                     minLength: 1
                     type: string
                 required:

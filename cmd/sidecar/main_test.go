@@ -50,15 +50,39 @@ func readFile(t *testing.T, path string) string {
 }
 
 // runArgs builds the argument list run() takes for one subcommand, so the
-// flag names are spelled once rather than at every call site.
+// flag names are spelled once rather than at every call site. out is the
+// run's own directory — what the handler sees at its mount's root.
 func runArgs(cmd, out, log string) []string {
 	return []string{cmd, "-out", out, "-termination-log", log}
 }
 
-// publishArgs is runArgs for publish plus the two flags a flow-workspace one
-// takes, so a run's directory moves from sealFrom to sealTo once sealed.
-func publishArgs(out, log, sealFrom, sealTo string) []string {
-	return append(runArgs(cmdPublish, out, log), "-seal-from", sealFrom, "-seal-to", sealTo)
+// publishArgs is runArgs for publish plus the flag a flow-workspace one
+// takes, so the run's directory moves to sealTo once sealed.
+func publishArgs(out, log, sealTo string) []string {
+	return append(runArgs(cmdPublish, out, log), "-seal-to", sealTo)
+}
+
+// prepareArgs is runArgs for prepare plus, optionally, the abandoned runs to
+// sweep beside this one first.
+func prepareArgs(out, log, sweep string) []string {
+	args := runArgs(cmdPrepare, out, log)
+	if sweep != "" {
+		args = append(args, "-sweep", sweep)
+	}
+	return args
+}
+
+// podA and podB are the identities the tests run as; pod sets the one every
+// subcommand needs, prepare to mark the run with and publish to check the
+// mark against.
+const (
+	podA = "pod-a"
+	podB = "pod-b"
+)
+
+func pod(t *testing.T, uid string) {
+	t.Helper()
+	t.Setenv(contract.EnvPodUID, uid)
 }
 
 func TestRunWithNoArgsIsAnError(t *testing.T) {
@@ -74,8 +98,9 @@ func TestRunWithAnUnknownSubcommandIsAnError(t *testing.T) {
 }
 
 func TestPrepareWithoutFlowDirectoriesFailsAndReportsIt(t *testing.T) {
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
+	out := filepath.Join(t.TempDir(), "3")
 
 	err := run(runArgs(cmdPrepare, out, log))
 	if err == nil {
@@ -88,8 +113,9 @@ func TestPrepareWithoutFlowDirectoriesFailsAndReportsIt(t *testing.T) {
 
 func TestPrepareWithInvalidJSONFailsAndReportsIt(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, "not json")
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
+	out := filepath.Join(t.TempDir(), "3")
 
 	err := run(runArgs(cmdPrepare, out, log))
 	if err == nil {
@@ -101,8 +127,9 @@ func TestPrepareWithInvalidJSONFailsAndReportsIt(t *testing.T) {
 }
 
 func TestPublishWithoutFlowDirectoriesFailsAndReportsIt(t *testing.T) {
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
+	out := filepath.Join(t.TempDir(), "3")
 
 	err := run(runArgs(cmdPublish, out, log))
 	if err == nil {
@@ -115,8 +142,9 @@ func TestPublishWithoutFlowDirectoriesFailsAndReportsIt(t *testing.T) {
 
 func TestPublishWithInvalidJSONFailsAndReportsIt(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, "not json")
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
+	out := filepath.Join(t.TempDir(), "3")
 
 	err := run(runArgs(cmdPublish, out, log))
 	if err == nil {
@@ -127,12 +155,16 @@ func TestPublishWithInvalidJSONFailsAndReportsIt(t *testing.T) {
 	}
 }
 
+// The declared directories land directly in the run's directory — the one
+// the handler's mount is pinned to — with nothing between (ADR-0005): what
+// prepare makes here is exactly what `ls /workspace` shows the agent.
 func TestPrepareLaysDownTheDeclaredDirectories(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok", "more"]`)
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
-	// prepare closes out to 0o555 on success; reopen it so TempDir's cleanup
-	// can remove what is inside.
+	out := filepath.Join(t.TempDir(), "3")
+	// prepare closes the run to 0o555 on success; reopen it so TempDir's
+	// cleanup can remove what is inside.
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
 
 	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
@@ -140,15 +172,22 @@ func TestPrepareLaysDownTheDeclaredDirectories(t *testing.T) {
 	}
 	for _, name := range []string{"ok", "more"} {
 		if st, err := os.Stat(filepath.Join(out, name)); err != nil || !st.IsDir() {
-			t.Fatalf("out/%s was not created: %v", name, err)
+			t.Fatalf("%s/ was not created in the run: %v", name, err)
 		}
+	}
+	if st, err := os.Stat(out); err != nil || st.Mode().Perm() != 0o555 {
+		t.Fatalf("run = %v (%v); the run's directory itself is what is closed, there is no out/ under it", st, err)
+	}
+	if got := readFile(t, filepath.Join(out, ".prepared-by")); got != podA {
+		t.Fatalf("mark = %q, want this pod's identity closed in with the vocabulary", got)
 	}
 }
 
 func TestPrepareWithABadNameFailsAndReportsIt(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["a/b"]`)
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
+	out := filepath.Join(t.TempDir(), "3")
 
 	err := run(runArgs(cmdPrepare, out, log))
 	if err == nil {
@@ -165,10 +204,11 @@ func TestPrepareWithABadNameFailsAndReportsIt(t *testing.T) {
 // kubelet-stopped container takes, rather than a stand-in for it.
 func TestPublishSealsAndReportsOnSIGTERM(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
-	// prepare closes out to 0o555 on success; reopen it so TempDir's cleanup
-	// can remove what is inside.
+	out := filepath.Join(t.TempDir(), "3")
+	// prepare closes the run to 0o555 on success; reopen it so TempDir's
+	// cleanup can remove what is inside.
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
 	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
 		t.Fatalf("run(prepare): %v", err)
@@ -201,82 +241,71 @@ func TestPublishSealsAndReportsOnSIGTERM(t *testing.T) {
 	}
 }
 
-// One seal flag without the other is refused outright, before publish even
-// waits for SIGTERM — a controller-built Job always sets both together
-// (runner.injectSidecars), so reaching this at all means something else
-// wrote the command line, and silently sealing only would strand the run in
-// work/ forever with nothing to say why it never reached results/.
-func TestPublishWithOnlyOneSealFlagIsRefused(t *testing.T) {
-	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
-
-	err := run(append(runArgs(cmdPublish, out, log), "-seal-from", "/somewhere"))
-	if err == nil {
-		t.Fatal("publish with only -seal-from set must be refused")
-	}
-	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
-		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
-	}
-}
-
-// -seal-from must be -out's parent, the same shape prepare's own -run-dir
-// check enforces from the other end: a controller-built Job always sets
-// -out under -seal-from (runner.injectSidecars), so a mismatch here is a
-// mangled command line, not a run to attempt sealing.
-func TestPublishSealFromMustParentOut(t *testing.T) {
-	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
-
-	err := run(append(runArgs(cmdPublish, out, log), "-seal-from", "/somewhere-else", "-seal-to", "/somewhere-else-2"))
-	if err == nil {
-		t.Fatal("publish with a -seal-from that is not -out's parent must be refused")
-	}
-	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
-		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
-	}
-}
-
-// The seal flags are publish's alone; prepare never moves anything, so a
-// prepare command line naming either is a misconfiguration to fail on, the
+// The seal flag is publish's alone; prepare never moves anything, so a
+// prepare command line naming it is a misconfiguration to fail on, the
 // same as any other flag mixup at that end of the run.
-func TestPrepareWithSealFlagsIsRefused(t *testing.T) {
+func TestPrepareWithTheSealFlagIsRefused(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
 	log := termLog(t)
-	out := filepath.Join(t.TempDir(), "out")
+	out := filepath.Join(t.TempDir(), "3")
 
-	err := run(append(runArgs(cmdPrepare, out, log), "-seal-from", "/somewhere"))
+	err := run(append(runArgs(cmdPrepare, out, log), "-seal-to", "/somewhere"))
 	if err == nil {
-		t.Fatal("prepare with a seal flag set must be refused")
+		t.Fatal("prepare with the seal flag set must be refused")
 	}
 	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
 		t.Fatalf("termination log = %q, want it to contain %q", got, "prepare failed:")
 	}
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
+		t.Fatalf("the run directory was made before the command line was checked: %v", err)
+	}
+}
+
+// There is no default run directory to fall back on: a controller-built Job
+// always spells -out out, and a default would only hide one built without.
+func TestRunWithoutOutIsRefused(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
+	for _, cmd := range []string{cmdPrepare, cmdPublish} {
+		t.Run(cmd, func(t *testing.T) {
+			log := termLog(t)
+			if err := run([]string{cmd, "-termination-log", log}); err == nil {
+				t.Fatalf("%s without -out must be refused", cmd)
+			}
+			if got := readFile(t, log); !strings.Contains(got, cmd+" failed:") || !strings.Contains(got, "-out") {
+				t.Fatalf("termination log = %q; startup validation names the missing flag", got)
+			}
+		})
+	}
 }
 
 // A flow-workspace publish moves the sealed run from work/<runID> to
-// results/<runID> before it reports anything, once -seal-from and -seal-to
-// are both given.
+// results/<runID> before it reports anything, once -seal-to is given. What
+// arrives on the shelf is the run's directory as the handler saw it: the
+// declared directories at its root, results/<runID>/ok/report.md and no
+// layer between (ADR-0005).
 func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	t.Setenv(contract.EnvPodUID, "pod-a")
+	pod(t, podA)
 	log := termLog(t)
 	root := t.TempDir()
-	sealFrom := filepath.Join(root, "work", "3")
+	out := filepath.Join(root, "work", "3")
 	sealTo := filepath.Join(root, "results", "3")
-	out := filepath.Join(sealFrom, "out")
-	// prepare closes out to 0o555 on success; a successful move relocates it
-	// to sealTo/out, so it is that path, not the original, TempDir's cleanup
+	// prepare closes the run to 0o555 on success; a successful move relocates
+	// it to sealTo, so it is that path, not the original, TempDir's cleanup
 	// needs reopened.
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(sealTo, "out"), 0o755) })
-	if err := run(prepareArgs(out, log, sealFrom, "")); err != nil {
+	t.Cleanup(func() { _ = os.Chmod(sealTo, 0o755) })
+	if err := run(prepareArgs(out, log, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "ok", "report.md"), []byte("the answer"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- run(publishArgs(out, log, sealFrom, sealTo))
+		done <- run(publishArgs(out, log, sealTo))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -292,16 +321,19 @@ func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 		t.Fatal("run(publish) did not return after SIGTERM")
 	}
 
-	if _, err := os.Stat(sealFrom); !os.IsNotExist(err) {
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Fatalf("work/3 still exists after publish moved it: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(sealTo, "out")); err != nil {
-		t.Fatalf("results/3 does not hold the moved out/: %v", err)
+	if got := readFile(t, filepath.Join(sealTo, "ok", "report.md")); got != "the answer" {
+		t.Fatalf("results/3/ok/report.md = %q; the shelf holds the run exactly as the handler wrote it, ok/ at its root", got)
 	}
-	if got := readFile(t, log); got == "" {
-		t.Fatal("termination log is empty; a successful move must still report the answer")
+	if got := readFile(t, log); !strings.HasPrefix(got, "ok\n") {
+		t.Fatalf("termination log = %q; a successful move must still report the answer", got)
 	}
-	if got := readFile(t, filepath.Join(sealTo, "out", ".prepared-by")); got != "pod-a" {
+	if st, err := os.Stat(sealTo); err != nil || st.Mode().Perm() != 0o555 {
+		t.Fatalf("results/3 = %v (%v); the shelved run is closed, as the handler saw it", st, err)
+	}
+	if got := readFile(t, filepath.Join(sealTo, ".prepared-by")); got != podA {
 		t.Fatalf("the shelved run's mark = %q, want the pod that prepared it to travel with it", got)
 	}
 }
@@ -313,14 +345,13 @@ func TestPublishMovesTheRunOntoResultsOnSIGTERM(t *testing.T) {
 // other infrastructure failure, rather than as an answer collect would trust.
 func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	t.Setenv(contract.EnvPodUID, "pod-a")
+	pod(t, podA)
 	log := termLog(t)
 	root := t.TempDir()
-	sealFrom := filepath.Join(root, "work", "3")
+	out := filepath.Join(root, "work", "3")
 	sealTo := filepath.Join(root, "results", "3")
-	out := filepath.Join(sealFrom, "out")
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
-	if err := run(prepareArgs(out, log, sealFrom, "")); err != nil {
+	if err := run(prepareArgs(out, log, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 	// results/3 already exists, so Move must refuse rather than overwrite it.
@@ -330,7 +361,7 @@ func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- run(publishArgs(out, log, sealFrom, sealTo))
+		done <- run(publishArgs(out, log, sealTo))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -351,33 +382,22 @@ func TestPublishMoveFailureLeavesNoTerminationMessage(t *testing.T) {
 	}
 }
 
-// prepareArgs is runArgs for prepare plus the flags a flow-workspace one takes:
-// its own run directory, and optionally the abandoned runs to sweep first.
-func prepareArgs(out, log, runDir, sweep string) []string {
-	args := append(runArgs(cmdPrepare, out, log), "-run-dir", runDir)
-	if sweep != "" {
-		args = append(args, "-sweep", sweep)
-	}
-	return args
-}
-
 func TestPrepareMakesItsRunAndSweepsTheAbandoned(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	t.Setenv(contract.EnvPodUID, "pod-a")
+	pod(t, podA)
 	work := t.TempDir()
 	for _, d := range []string{"1", "2"} {
-		if err := os.MkdirAll(filepath.Join(work, d, "out", "ok"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(work, d, "ok"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	log := termLog(t)
-	runDir := filepath.Join(work, "3")
-	out := filepath.Join(runDir, "out")
-	// Prepare closes out/ to 0555; open it back up so TempDir's own cleanup
-	// can remove what the test made.
+	out := filepath.Join(work, "3")
+	// Prepare closes the run to 0555; open it back up so TempDir's own
+	// cleanup can remove what the test made.
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
 
-	if err := run(prepareArgs(out, log, runDir, "1,2")); err != nil {
+	if err := run(prepareArgs(out, log, "1,2")); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -386,50 +406,47 @@ func TestPrepareMakesItsRunAndSweepsTheAbandoned(t *testing.T) {
 			t.Fatalf("abandoned run %s survived the sweep", d)
 		}
 	}
-	info, err := os.Stat(runDir)
-	if err != nil || info.Mode().Perm() != 0o777 {
-		t.Fatalf("run dir = %v (%v); the agent must be able to write beside out/", info, err)
+	info, err := os.Stat(out)
+	if err != nil || info.Mode().Perm() != 0o555 {
+		t.Fatalf("run dir = %v (%v); the run's directory is the vocabulary, closed once laid down", info, err)
 	}
 	if _, err := os.Stat(filepath.Join(out, "ok")); err != nil {
 		t.Fatalf("the vocabulary was not laid down: %v", err)
 	}
-	if got := readFile(t, filepath.Join(out, ".prepared-by")); got != "pod-a" {
+	if got := readFile(t, filepath.Join(out, ".prepared-by")); got != podA {
 		t.Fatalf("mark = %q, want this pod's identity closed in with the vocabulary", got)
 	}
 }
 
-// The identity is needed the moment there is a run to mark, and its absence
-// is a misbuilt Job rather than something to carry on without: a run left
-// unmarked could never be shelved by its own publish.
-func TestPrepareWithARunButNoPodIdentityFailsAndReportsIt(t *testing.T) {
+// The identity is needed on both ends, and its absence is a misbuilt Job
+// rather than something to carry on without: a run left unmarked could never
+// be sealed by its own publish.
+func TestPrepareWithNoPodIdentityFailsAndReportsIt(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
 	work := t.TempDir()
 	log := termLog(t)
-	runDir := filepath.Join(work, "3")
-	out := filepath.Join(runDir, "out")
+	out := filepath.Join(work, "3")
 
-	err := run(prepareArgs(out, log, runDir, ""))
+	err := run(prepareArgs(out, log, ""))
 	if err == nil {
-		t.Fatal("prepare with -run-dir but no pod identity must fail")
+		t.Fatal("prepare with no pod identity must fail")
 	}
 	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") || !strings.Contains(got, contract.EnvPodUID) {
 		t.Fatalf("termination log = %q, want it to name %s", got, contract.EnvPodUID)
 	}
-	if _, err := os.Lstat(runDir); !os.IsNotExist(err) {
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
 		t.Fatalf("the run directory was made before the identity was checked: %v", err)
 	}
 }
 
-func TestPublishWithSealButNoPodIdentityFailsAndReportsIt(t *testing.T) {
+func TestPublishWithNoPodIdentityFailsAndReportsIt(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
 	log := termLog(t)
-	root := t.TempDir()
-	sealFrom := filepath.Join(root, "work", "3")
-	out := filepath.Join(sealFrom, "out")
+	out := filepath.Join(t.TempDir(), "work", "3")
 
-	err := run(publishArgs(out, log, sealFrom, filepath.Join(root, "results", "3")))
+	err := run(runArgs(cmdPublish, out, log))
 	if err == nil {
-		t.Fatal("publish with seal flags but no pod identity must fail")
+		t.Fatal("publish with no pod identity must fail")
 	}
 	if got := readFile(t, log); !strings.Contains(got, "publish failed:") || !strings.Contains(got, contract.EnvPodUID) {
 		t.Fatalf("termination log = %q, want it to name %s", got, contract.EnvPodUID)
@@ -443,14 +460,13 @@ func TestPublishWithSealButNoPodIdentityFailsAndReportsIt(t *testing.T) {
 // attempt left it.
 func TestPublishRefusesAnotherPodsRunWithoutSealing(t *testing.T) {
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	t.Setenv(contract.EnvPodUID, "pod-b")
+	pod(t, podB)
 	log := termLog(t)
 	root := t.TempDir()
-	sealFrom := filepath.Join(root, "work", "3")
+	out := filepath.Join(root, "work", "3")
 	sealTo := filepath.Join(root, "results", "3")
-	out := filepath.Join(sealFrom, "out")
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
-	if err := run(prepareArgs(out, log, sealFrom, "")); err != nil {
+	if err := run(prepareArgs(out, log, "")); err != nil {
 		t.Fatalf("run(prepare): %v", err)
 	}
 	// The live attempt has answered; the zombie must not carry that off.
@@ -461,10 +477,10 @@ func TestPublishRefusesAnotherPodsRunWithoutSealing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv(contract.EnvPodUID, "pod-a")
+	pod(t, podA)
 	done := make(chan error, 1)
 	go func() {
-		done <- run(publishArgs(out, log, sealFrom, sealTo))
+		done <- run(publishArgs(out, log, sealTo))
 	}()
 	time.Sleep(100 * time.Millisecond)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
@@ -491,16 +507,66 @@ func TestPublishRefusesAnotherPodsRunWithoutSealing(t *testing.T) {
 	}
 }
 
+// A template volume has no -seal-to and so no shelf, but publish must still
+// refuse another pod's run before sealing: CheckMark is called unconditionally
+// in publish(), ahead of the -seal-to branch, and this pins that down so a
+// regression that made it conditional on sealTo != "" would fail here even
+// though TestPublishRefusesAnotherPodsRunWithoutSealing only exercises the
+// flow-workspace path.
+func TestPublishOnATemplateVolumeStillChecksTheMark(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podB)
+	log := termLog(t)
+	out := filepath.Join(t.TempDir(), "3")
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+	if err := run(prepareArgs(out, log, "")); err != nil {
+		t.Fatalf("run(prepare): %v", err)
+	}
+	// The live attempt has answered; the zombie must not carry that off.
+	if err := os.WriteFile(filepath.Join(out, "ok", "report.md"), []byte("the live attempt's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(log, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pod(t, podA)
+	done := make(chan error, 1)
+	go func() {
+		done <- run(runArgs(cmdPublish, out, log))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, sidecar.ErrMark) {
+			t.Fatalf("run(publish) as another pod on a template volume: err = %v, want ErrMark", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run(publish) did not return after SIGTERM")
+	}
+
+	if got := readFile(t, log); !strings.HasPrefix(got, "publish failed:") || strings.HasPrefix(got, "ok") {
+		t.Fatalf("termination log = %q; the refusal must be reported, never the other run's answer", got)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ok", "report.md")); err != nil {
+		t.Fatalf("the live attempt's run was disturbed: %v", err)
+	}
+}
+
 // Making the run's own directory failing must fail prepare outright, wired
 // end to end through run() rather than sidecar.MakeRun in isolation: work is
-// closed off before -run-dir is ever created, so MakeRun's own MkdirAll is
-// what fails, ahead of anything sweep or Prepare could do.
+// closed off before -out is ever created, so MakeRun's own MkdirAll is what
+// fails, ahead of anything sweep or Prepare could do.
 func TestPrepareMakeRunFailureIsReported(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	t.Setenv(contract.EnvPodUID, "pod-a")
+	pod(t, podA)
 	work := t.TempDir()
 	if err := os.Chmod(work, 0o555); err != nil {
 		t.Fatal(err)
@@ -508,9 +574,8 @@ func TestPrepareMakeRunFailureIsReported(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(work, 0o755) })
 
 	log := termLog(t)
-	runDir := filepath.Join(work, "3") // never created
-	out := filepath.Join(runDir, "out")
-	err := run(prepareArgs(out, log, runDir, ""))
+	out := filepath.Join(work, "3") // never created
+	err := run(prepareArgs(out, log, ""))
 	if err == nil {
 		t.Fatal("prepare must fail when the run's own directory cannot be created")
 	}
@@ -524,31 +589,30 @@ func TestPrepareMakeRunFailureIsReported(t *testing.T) {
 // run's own directory (work/3) is made first and must survive, only the
 // abandoned one (work/1) is left behind. work itself stays writable — closing
 // it off would make MakeRun's own RemoveAll of the pre-existing work/3 fail
-// first, never reaching the sweep — so it is work/1/out that is closed
-// instead, refusing the removal of what it holds.
+// first, never reaching the sweep — so it is work/1 that is closed instead,
+// refusing the removal of what it holds.
 func TestPrepareSweepFailureIsReported(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
 	t.Setenv(contract.EnvDirectories, `["ok"]`)
-	t.Setenv(contract.EnvPodUID, "pod-a")
+	pod(t, podA)
 	work := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(work, "1", "out", "ok"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(work, "1", "ok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	runDir := filepath.Join(work, "3")
-	if err := os.Mkdir(runDir, 0o755); err != nil {
+	out := filepath.Join(work, "3")
+	if err := os.Mkdir(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	abandonedOut := filepath.Join(work, "1", "out")
-	if err := os.Chmod(abandonedOut, 0o555); err != nil {
+	abandoned := filepath.Join(work, "1")
+	if err := os.Chmod(abandoned, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(abandonedOut, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(abandoned, 0o755) })
 
 	log := termLog(t)
-	out := filepath.Join(runDir, "out")
-	err := run(prepareArgs(out, log, runDir, "1"))
+	err := run(prepareArgs(out, log, "1"))
 	if err == nil {
 		t.Fatal("prepare must fail when a swept run cannot be removed")
 	}
@@ -560,42 +624,13 @@ func TestPrepareSweepFailureIsReported(t *testing.T) {
 	}
 }
 
-func TestPrepareSweepWithoutARunDirIsRefused(t *testing.T) {
-	log := termLog(t)
-	if err := run(append(runArgs(cmdPrepare, "/x/3/out", log), "-sweep", "1")); err == nil {
-		t.Fatal("a sweep with no run-dir has no work/ to operate under and must be refused")
-	}
-	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
-		t.Fatalf("termination log = %q; startup validation reports its cause", got)
-	}
-}
-
-func TestPrepareRunDirMustParentOut(t *testing.T) {
-	log := termLog(t)
-	if err := run(append(runArgs(cmdPrepare, "/x/other/out", log), "-run-dir", "/x/3")); err == nil {
-		t.Fatal("a run-dir that is not out's parent is a mangled command line and must be refused")
-	}
-	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
-		t.Fatalf("termination log = %q; startup validation reports its cause", got)
-	}
-}
-
-func TestPublishWithPrepareFlagsIsRefused(t *testing.T) {
-	log := termLog(t)
-	if err := run(append(runArgs(cmdPublish, "/x/out", log), "-run-dir", "/x/3")); err == nil {
-		t.Fatal("run-dir is prepare's; publish must refuse it")
-	}
-	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
-		t.Fatalf("termination log = %q; startup validation reports its cause", got)
-	}
-}
-
-// -sweep alone, with no -run-dir, must be just as refused as -run-dir was
-// above: the two are checked with an OR, and a test only ever setting
-// -run-dir never touches the -sweep side of it.
+// -sweep is prepare's; publish never clears anything, so a publish command
+// line naming it is a mangled one to fail on.
 func TestPublishWithSweepFlagIsRefused(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
 	log := termLog(t)
-	if err := run(append(runArgs(cmdPublish, "/x/out", log), "-sweep", "1")); err == nil {
+	if err := run(append(runArgs(cmdPublish, "/x/work/3", log), "-sweep", "1")); err == nil {
 		t.Fatal("sweep is prepare's; publish must refuse it")
 	}
 	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {

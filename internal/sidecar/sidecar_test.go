@@ -30,15 +30,17 @@ import (
 
 var declared = []string{"ok", "more"}
 
+// prepared is a run directory Prepare has laid the vocabulary down in and
+// closed — what the handler sees at the root of its mount.
 func prepared(t *testing.T) string {
 	t.Helper()
-	out := filepath.Join(t.TempDir(), "out")
-	if err := Prepare(out, declared); err != nil {
+	run := filepath.Join(t.TempDir(), "3")
+	if err := Prepare(run, declared); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	// The closed out directory cannot be removed by TempDir's cleanup as is.
-	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
-	return out
+	// The closed run directory cannot be removed by TempDir's cleanup as is.
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+	return run
 }
 
 func write(t *testing.T, out, dir, file string) {
@@ -63,19 +65,19 @@ func TestPrepareLaysDownExactlyTheDeclaration(t *testing.T) {
 		}
 	}
 	if strings.Join(names, ",") != "more,ok" {
-		t.Fatalf("out holds %v, want exactly the declaration", names)
+		t.Fatalf("the run directory holds %v, want exactly the declaration", names)
 	}
 }
 
-func TestPrepareClosesOutAndOpensTheChildren(t *testing.T) {
+func TestPrepareClosesTheRunAndOpensTheChildren(t *testing.T) {
 	out := prepared(t)
 
 	st, err := os.Stat(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := st.Mode().Perm(); got != modeOut {
-		t.Fatalf("out mode = %o, want %o so nothing else can be created there", got, modeOut)
+	if got := st.Mode().Perm(); got != modeRun {
+		t.Fatalf("run mode = %o, want %o so nothing else can be created there", got, modeRun)
 	}
 	for _, name := range declared {
 		st, err := os.Stat(filepath.Join(out, name))
@@ -99,7 +101,7 @@ func TestClosedOutRefusesAnUndeclaredDirectory(t *testing.T) {
 	out := prepared(t)
 	err := os.Mkdir(filepath.Join(out, "escalate"), 0o755)
 	if !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("mkdir out/escalate: err = %v, want permission denied", err)
+		t.Fatalf("mkdir escalate/ in the closed run: err = %v, want permission denied", err)
 	}
 }
 
@@ -114,14 +116,14 @@ func TestPrepareIsRepeatable(t *testing.T) {
 		t.Fatalf("a second prepare must not remove what is there: %v", err)
 	}
 	st, _ := os.Stat(out)
-	if st.Mode().Perm() != modeOut {
-		t.Fatalf("out was left at %o after the second prepare", st.Mode().Perm())
+	if st.Mode().Perm() != modeRun {
+		t.Fatalf("the run was left at %o after the second prepare", st.Mode().Perm())
 	}
 }
 
 func TestPrepareRefusesANameThatIsNotOnePathElement(t *testing.T) {
 	for _, bad := range []string{"", ".", "..", "a/b", "../x", "a\x00b"} {
-		err := Prepare(filepath.Join(t.TempDir(), "out"), []string{"ok", bad})
+		err := Prepare(filepath.Join(t.TempDir(), "3"), []string{"ok", bad})
 		if !errors.Is(err, ErrBadName) {
 			t.Fatalf("Prepare with %q: err = %v, want ErrBadName", bad, err)
 		}
@@ -132,7 +134,7 @@ func TestPrepareRefusesANameThatIsNotOnePathElement(t *testing.T) {
 // Mkdir land on the file Mark already wrote there — ErrNotADirectory on every
 // run. checkName has to refuse the name outright, ahead of that collision.
 func TestPrepareRefusesTheMarkNameAsADeclaration(t *testing.T) {
-	err := Prepare(filepath.Join(t.TempDir(), "out"), []string{"ok", markName})
+	err := Prepare(filepath.Join(t.TempDir(), "3"), []string{"ok", markName})
 	if !errors.Is(err, ErrBadName) {
 		t.Fatalf("Prepare with %q declared: err = %v, want ErrBadName", markName, err)
 	}
@@ -238,7 +240,7 @@ func TestSealWithoutPrepareIsNoAnswer(t *testing.T) {
 // link points at.
 func TestPrepareRefusesASymlinkStandingInForADeclaredDirectory(t *testing.T) {
 	root := t.TempDir()
-	out := filepath.Join(root, "out")
+	out := filepath.Join(root, "3")
 	elsewhere := filepath.Join(root, "elsewhere")
 	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
 		t.Fatal(err)
@@ -283,25 +285,99 @@ func TestSealTreatsASymlinkDeclaredDirectoryAsNoAnswer(t *testing.T) {
 	}
 }
 
-func TestMoveRelocatesTheDirectory(t *testing.T) {
+// What Move shelves is the run exactly as prepare closed it: the declared
+// directories at its root, and the directory closed. A closed directory
+// cannot be renamed to another parent as is (its own ".." is rewritten,
+// which needs write permission on it), so Move has to open it for the
+// rename — and what the shelf must then show is a run closed again.
+func TestMoveRelocatesTheDirectoryAndKeepsItClosed(t *testing.T) {
 	root := t.TempDir()
 	from := filepath.Join(root, "work", "3")
 	to := filepath.Join(root, "results", "3")
-	if err := os.MkdirAll(filepath.Join(from, "out", "ok"), 0o755); err != nil {
-		t.Fatal(err)
+	if err := Prepare(from, declared); err != nil {
+		t.Fatalf("Prepare: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(from, "out", "ok", "report.md"), []byte("x"), 0o644); err != nil {
+	t.Cleanup(func() { _ = os.Chmod(to, 0o755); _ = os.Chmod(from, 0o755) })
+	if err := os.WriteFile(filepath.Join(from, "ok", "report.md"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := Move(from, to); err != nil {
 		t.Fatalf("Move: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(to, "out", "ok", "report.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(to, "ok", "report.md")); err != nil {
 		t.Fatalf("results/3 does not hold what work/3 wrote: %v", err)
 	}
 	if _, err := os.Lstat(from); !os.IsNotExist(err) {
 		t.Fatalf("work/3 still exists after the move: %v", err)
+	}
+	st, err := os.Stat(to)
+	if err != nil || st.Mode().Perm() != modeRun {
+		t.Fatalf("results/3 = %v (%v); the shelved run must be closed, the same %o prepare left it at", st, err, modeRun)
+	}
+}
+
+// A rename that fails outright — not the existing-destination check above,
+// which returns before os.Rename is ever called — must still leave the run
+// as it was found: closed, and on work/, rather than opened by the attempt
+// and left that way for the next one. work/ itself is closed to force the
+// rename to fail there rather than at the Lstat(to) early return.
+func TestMoveRenameFailureLeavesTheRunClosed(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	from := filepath.Join(work, "3")
+	to := filepath.Join(root, "results", "3")
+	if err := Prepare(from, declared); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(work, 0o755); _ = os.Chmod(from, 0o755) })
+	// os.Rename needs write permission on the source's parent to remove its
+	// entry there; closing work/ itself denies exactly that, ahead of
+	// anything Move's own from-side chmod opens.
+	if err := os.Chmod(work, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Move(from, to); err == nil {
+		t.Fatal("Move must fail when the rename itself is refused")
+	}
+	st, err := os.Stat(from)
+	if err != nil || st.Mode().Perm() != modeRun {
+		t.Fatalf("work/3 = %v (%v); a failed rename must leave the run closed where it was", st, err)
+	}
+	if _, err := os.Lstat(to); !os.IsNotExist(err) {
+		t.Fatalf("results/3 must not exist after a failed rename: %v", err)
+	}
+}
+
+// A shelf that cannot even be created must fail Move before it ever touches
+// the run: results/ has never been made, and closing root itself denies the
+// MkdirAll that would make it. from must be left exactly as Prepare closed
+// it, since nothing past the shelf's creation was reached.
+func TestMoveFailsWhenTheShelfCannotBeCreated(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	from := filepath.Join(root, "work", "3")
+	to := filepath.Join(root, "results", "3")
+	if err := Prepare(from, declared); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755); _ = os.Chmod(from, 0o755) })
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Move(from, to); err == nil {
+		t.Fatal("Move must fail when the shelf cannot be created")
+	}
+	st, err := os.Stat(from)
+	if err != nil || st.Mode().Perm() != modeRun {
+		t.Fatalf("work/3 = %v (%v); a failed Move must leave the run closed and untouched", st, err)
 	}
 }
 
@@ -378,8 +454,8 @@ func TestMakeRunCreatesAnOpenDirectory(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("stat %s: %v", dir, err)
 	}
-	if got := info.Mode().Perm(); got != 0o777 {
-		t.Fatalf("mode = %o; the run's directory is the agent's scratch space, whatever uid it runs as", got)
+	if got := info.Mode().Perm(); got != modeOpen {
+		t.Fatalf("mode = %o; the run's directory is open for Mark and Prepare to fill in, and Prepare closes it", got)
 	}
 	if err := MakeRun(dir); err != nil {
 		t.Fatalf("MakeRun must tolerate a directory that already exists: %v", err)
@@ -390,7 +466,7 @@ func TestMakeRunCreatesAnOpenDirectory(t *testing.T) {
 // MkdirAll finds it already "exists" (Stat follows the link), so it is
 // checkRealDir's Lstat that has to catch it — the same attack
 // TestPrepareRefusesASymlinkStandingInForADeclaredDirectory catches from the
-// other end, on out's own children rather than the run directory itself.
+// other end, on the run's own children rather than the run directory itself.
 func TestMakeRunRefusesASymlinkStandingInForTheRunDirectory(t *testing.T) {
 	root := t.TempDir()
 	elsewhere := filepath.Join(root, "elsewhere")
@@ -415,10 +491,10 @@ func TestMakeRunRefusesASymlinkStandingInForTheRunDirectory(t *testing.T) {
 func TestMakeRunClearsWhatTheLastAttemptLeft(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "3")
-	if err := os.MkdirAll(filepath.Join(dir, "out", "ok"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "ok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	stale := filepath.Join(dir, "out", "ok", "report.md")
+	stale := filepath.Join(dir, "ok", "report.md")
 	if err := os.WriteFile(stale, []byte("the last attempt's answer"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +525,7 @@ func TestMakeRunFailsWhenTheExistingDirectoryCannotBeRemoved(t *testing.T) {
 	}
 	root := t.TempDir()
 	dir := filepath.Join(root, "3")
-	if err := os.MkdirAll(filepath.Join(dir, "out", "ok"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "ok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(root, 0o555); err != nil {
@@ -471,12 +547,12 @@ func TestMakeRunFailsWhenTheExistingDirectoryCannotBeRemoved(t *testing.T) {
 // stays out of Seal's way, which reads only the declared names.
 func TestMarkIsClosedInWithTheVocabulary(t *testing.T) {
 	root := t.TempDir()
-	out := filepath.Join(root, "3", "out")
+	out := filepath.Join(root, "3")
 	if err := Mark(out, "pod-a"); err != nil {
 		t.Fatalf("Mark: %v", err)
 	}
 	if err := Prepare(out, declared); err != nil {
-		t.Fatalf("Prepare over a marked out/: %v", err)
+		t.Fatalf("Prepare over a marked run: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
 
@@ -488,11 +564,11 @@ func TestMarkIsClosedInWithTheVocabulary(t *testing.T) {
 		t.Fatalf("mark = %v (%v); want a regular file nobody but its owner can write", info, err)
 	}
 	if got := Seal(out, declared); got.Directory != "" || !strings.Contains(got.Reason, "nothing was written") {
-		t.Fatalf("Seal over a marked out/ = %+v; the mark must not count as an answer", got)
+		t.Fatalf("Seal over a marked run = %+v; the mark must not count as an answer", got)
 	}
 	if os.Getuid() != 0 {
 		if err := os.Remove(filepath.Join(out, markName)); err == nil {
-			t.Fatal("the mark could be removed through the closed out/")
+			t.Fatal("the mark could be removed through the closed run directory")
 		}
 	}
 }
@@ -501,7 +577,7 @@ func TestMarkIsClosedInWithTheVocabulary(t *testing.T) {
 // another attempt's run at its path, and must not touch it.
 func TestCheckMarkRefusesAnotherPodsRun(t *testing.T) {
 	root := t.TempDir()
-	out := filepath.Join(root, "3", "out")
+	out := filepath.Join(root, "3")
 	if err := Mark(out, "pod-a"); err != nil {
 		t.Fatalf("Mark: %v", err)
 	}
@@ -520,13 +596,13 @@ func TestCheckMarkRefusesAnotherPodsRun(t *testing.T) {
 // Neither is this pod's to shelve.
 func TestCheckMarkRefusesAnUnmarkedRun(t *testing.T) {
 	root := t.TempDir()
-	out := filepath.Join(root, "3", "out")
+	out := filepath.Join(root, "3")
 	if err := os.MkdirAll(filepath.Join(out, "ok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := CheckMark(out, "pod-a"); !errors.Is(err, ErrMark) {
-		t.Fatalf("CheckMark over an unmarked out/: err = %v, want ErrMark", err)
+		t.Fatalf("CheckMark over an unmarked run: err = %v, want ErrMark", err)
 	}
 }
 
@@ -535,7 +611,7 @@ func TestCheckMarkRefusesAnUnmarkedRun(t *testing.T) {
 // creation is what refuses it — WriteFile would truncate and carry on.
 func TestMarkRefusesToOverwrite(t *testing.T) {
 	root := t.TempDir()
-	out := filepath.Join(root, "3", "out")
+	out := filepath.Join(root, "3")
 	if err := Mark(out, "pod-a"); err != nil {
 		t.Fatalf("Mark: %v", err)
 	}
@@ -548,16 +624,16 @@ func TestMarkRefusesToOverwrite(t *testing.T) {
 	}
 }
 
-// A symlink standing in for out/ would carry Mark's write, and Prepare's
+// A symlink standing in for the run would carry Mark's write, and Prepare's
 // chmod after it, wherever the link points — the same substitution
 // MakeRun and Prepare refuse on their own targets.
-func TestMarkRefusesASymlinkStandingInForOut(t *testing.T) {
+func TestMarkRefusesASymlinkStandingInForTheRun(t *testing.T) {
 	root := t.TempDir()
 	elsewhere := filepath.Join(root, "elsewhere")
 	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out := filepath.Join(root, "3", "out")
+	out := filepath.Join(root, "3")
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +654,7 @@ func TestMarkRefusesASymlinkStandingInForOut(t *testing.T) {
 // whatever the link points at — even a file naming the right pod.
 func TestCheckMarkRefusesASymlinkStandingInForTheMark(t *testing.T) {
 	root := t.TempDir()
-	out := filepath.Join(root, "3", "out")
+	out := filepath.Join(root, "3")
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +674,7 @@ func TestCheckMarkRefusesASymlinkStandingInForTheMark(t *testing.T) {
 func TestSweepRemovesOnlyTheListed(t *testing.T) {
 	root := t.TempDir()
 	for _, d := range []string{"1", "2", "3"} {
-		if err := os.MkdirAll(filepath.Join(root, d, "out", "ok"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, d, "ok"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -629,7 +705,7 @@ func TestSweepFailsWhenARunCannotBeRemoved(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "1", "out", "ok"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "1", "ok"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(root, 0o555); err != nil {

@@ -53,8 +53,8 @@ const (
 	// at generation time (runner.injectSidecars), never by reading this
 	// back. A handler's own author can still pull it into a container of
 	// their own via a fieldRef, the way any other annotation would be. The
-	// agent has no use for it — it opens work/1/ok while the run is in
-	// flight and reads — and there is reason to keep it away from one: a run
+	// agent has no use for it — its mount is pinned to the run, so it opens
+	// ok/ and writes — and there is reason to keep it away from one: a run
 	// count suggests how much rope is left, the same way a remaining-rework
 	// count would.
 	AnnotationRunID = "flow.tgy.io/run-id"
@@ -79,13 +79,13 @@ const (
 	EnvDirectories = "FLOW_DIRECTORIES"
 	// EnvPodUID is the injected containers' own, not every container's: the
 	// UID of the pod they run in, from the downward API. prepare writes it
-	// into the run's out/ and publish reads it back before it moves the run
-	// onto the results/ shelf, so a publish whose pod is already gone from
-	// the apiserver — but still running, and still due its SIGTERM — cannot
-	// shelve the directory a later attempt at the same runID is working in
-	// (ADR-0004). It is not generation-time information the way the run's
-	// paths are, so it is the one thing the sidecars take from the pod
-	// rather than from their arguments.
+	// into the run's directory and publish reads it back before it seals,
+	// so a publish whose pod is already gone from the apiserver — but still
+	// running, and still due its SIGTERM — cannot seal or shelve the
+	// directory a later attempt at the same runID is working in (ADR-0004).
+	// It is not generation-time information the way the run's paths are, so
+	// it is the one thing the sidecars take from the pod rather than from
+	// their arguments.
 	EnvPodUID = "FLOW_POD_UID"
 
 	// WorkspaceVolume is the name of the volume the controller adds to a Job
@@ -104,34 +104,32 @@ const (
 	SubcommandPublish = "publish"
 
 	// FlagOut is the name of the flag both the injected Args and the
-	// sidecar's flag set use for the directory the declared directories are
-	// created under.
+	// sidecar's flag set use for the run's own directory: the one prepare
+	// makes, lays the declared directories down in directly, and closes;
+	// the one publish seals. It is the same directory the handler's own
+	// containers see at their mount's root (ADR-0005) — there is no layer
+	// between the mount and the vocabulary. prepare reaches it through a
+	// mount of its parent, work/, so the directory is prepare's to create
+	// and close rather than whatever the kubelet's subPath machinery would
+	// have left there.
 	FlagOut = "out"
 
-	// FlagSealFrom and FlagSealTo name the flags publish takes when the
-	// task's flow brings a workspace: once sealing has decided the run's
-	// answer, publish moves its own directory from the work/ shelf it wrote
-	// into onto the results/ shelf a later phase reads back, one rename
-	// within the same volume (§ADR-0002 決定5). Both absent means publish
-	// only seals — the template-volume case, where there is no shelf to
-	// move between. One without the other is refused rather than treated as
-	// neither: a run silently left sealing-only in a flow workspace would
-	// never reach the results/ shelf a later phase reads, with nothing to
-	// say why. prepare refuses both outright — they are publish's alone.
-	FlagSealFrom = "seal-from"
-	FlagSealTo   = "seal-to"
+	// FlagSealTo names the flag publish takes when the task's flow brings a
+	// workspace: once sealing has decided the run's answer, publish moves
+	// the run's directory from where it is (FlagOut, on the work/ shelf)
+	// onto the results/ shelf a later phase reads back, one rename within
+	// the same volume (§ADR-0002 決定5). Absent means publish only seals —
+	// the template-volume case, where there is no shelf to move onto.
+	// prepare refuses it outright — it is publish's alone.
+	FlagSealTo = "seal-to"
 
-	// FlagRunDir is prepare's own run directory under a flow workspace —
-	// prepare mounts work/ itself and makes this run's directory inside it,
-	// so the directory is prepare's to create and open up rather than
-	// whatever the kubelet's subPath machinery would have left there.
-	// Absent for a template-backed workspace, which has no run layout.
-	FlagRunDir = "run-dir"
 	// FlagSweep is the comma-separated runIDs whose work/ leftovers prepare
 	// clears away before this run starts. The controller computes the list —
 	// only it knows which runs are live — and prepare deletes exactly what
 	// it is told (ADR-0003). Sealed runs left work/ when their rename moved
 	// them, so what this actually removes is the debris of attempts that
-	// died before sealing. Meaningful only with FlagRunDir.
+	// died before sealing. Only a flow workspace has anything to sweep: a
+	// template volume is new with every pod. publish refuses it — it is
+	// prepare's alone.
 	FlagSweep = "sweep"
 )
