@@ -43,6 +43,23 @@ const (
 	dirEscalate = "escalate"
 )
 
+// What the broken flows below are made of: a handler nobody wrote, a
+// directory declared to reach Failed, and a name that is a path rather than
+// a path element.
+const (
+	handlerNobody = "nobody"
+	dirBroken     = "broken"
+	dirNested     = "nested/sent"
+)
+
+// The field 報告's edge to おわり is reported under, and the reason a name
+// that cannot be a directory is refused. Several cases break that one edge,
+// each in a different way.
+const (
+	fieldReportToDone = `spec.bindings[報告].next[おわり]`
+	notAPathElement   = "single path element"
+)
+
 // cnpCheck is a flow that should be accepted: 調査 either reports or asks for
 // another round, 報告 ends at a phase nothing binds.
 func cnpCheck() *flowv1alpha1.TaskFlowSpec {
@@ -151,7 +168,7 @@ func TestRefuses(t *testing.T) {
 			name: "a binding under no name at all",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[""] = flowv1alpha1.PhaseBinding{
-					Handler: "nobody",
+					Handler: handlerNobody,
 					Next:    map[flowv1alpha1.Phase]string{phaseDone: "done"},
 				}
 			},
@@ -161,7 +178,7 @@ func TestRefuses(t *testing.T) {
 		{
 			name: "an edge to Failed",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
-				s.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
+				s.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
 			},
 			field:   `spec.bindings[調査].next[Failed]`,
 			mention: "not something a run gets to conclude",
@@ -185,40 +202,40 @@ func TestRefuses(t *testing.T) {
 		{
 			name: "a directory that is a path rather than a name",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
-				s.Bindings[phaseReport].Next[phaseDone] = "nested/sent"
+				s.Bindings[phaseReport].Next[phaseDone] = dirNested
 			},
-			field:   `spec.bindings[報告].next[おわり]`,
-			mention: "single path element",
+			field:   fieldReportToDone,
+			mention: notAPathElement,
 		},
 		{
 			name: "a directory that climbs out of the run",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phaseReport].Next[phaseDone] = ".."
 			},
-			field:   `spec.bindings[報告].next[おわり]`,
-			mention: "single path element",
+			field:   fieldReportToDone,
+			mention: notAPathElement,
 		},
 		{
 			name: "a directory with no name",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phaseReport].Next[phaseDone] = ""
 			},
-			field:   `spec.bindings[報告].next[おわり]`,
-			mention: "single path element",
+			field:   fieldReportToDone,
+			mention: notAPathElement,
 		},
 		{
 			name: "a directory wearing the pod's mark",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phaseReport].Next[phaseDone] = contract.MarkName
 			},
-			field:   `spec.bindings[報告].next[おわり]`,
+			field:   fieldReportToDone,
 			mention: "reserved for the pod's mark",
 		},
 		{
 			name: "a phase nothing can reach",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
-					Handler: "nobody",
+					Handler: handlerNobody,
 					Next:    map[flowv1alpha1.Phase]string{phaseDone: "shelved"},
 				}
 			},
@@ -276,8 +293,8 @@ func TestAnUnboundStartIsReportedOnce(t *testing.T) {
 // the author is told everything at once rather than one apply at a time.
 func TestReportsEveryMistakeAtOnce(t *testing.T) {
 	spec := cnpCheck()
-	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
-	spec.Bindings[phaseReport].Next[phaseDone] = "nested/sent"
+	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
+	spec.Bindings[phaseReport].Next[phaseDone] = dirNested
 	if got := check(spec); len(got) != 2 {
 		t.Fatalf("wanted both mistakes, got %v", got)
 	}
@@ -288,12 +305,12 @@ func TestReportsEveryMistakeAtOnce(t *testing.T) {
 // what is wrong with it.
 func TestTheReportIsStable(t *testing.T) {
 	first := ""
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		spec := cnpCheck()
-		spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
-		spec.Bindings[phaseReport].Next[phaseDone] = "nested/sent"
+		spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
+		spec.Bindings[phaseReport].Next[phaseDone] = dirNested
 		spec.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
-			Handler: "nobody",
+			Handler: handlerNobody,
 			Next:    map[flowv1alpha1.Phase]string{phaseDone: "shelved"},
 		}
 		got := strings.Join(check(spec), "\n")

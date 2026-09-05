@@ -97,10 +97,10 @@ func checkNext(binding flowv1alpha1.PhaseBinding, path *field.Path) field.ErrorL
 		dir := binding.Next[dest]
 		key := path.Key(string(dest))
 
-		switch {
-		case dest == "":
+		switch dest {
+		case "":
 			errs = append(errs, field.Invalid(key, dir, "an edge must say which phase it leads to"))
-		case dest == flowv1alpha1.PhaseFailed:
+		case flowv1alpha1.PhaseFailed:
 			errs = append(errs, field.Forbidden(key,
 				"Failed means the definition is broken, which is not something a run gets to conclude about "+
 					"the flow it is running; Escalated is the reserved name an edge may name"))
