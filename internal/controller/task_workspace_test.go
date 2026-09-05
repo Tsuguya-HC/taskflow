@@ -205,8 +205,7 @@ var _ = Describe("a flow with a workspace", func() {
 		second := fx.job(2)
 		prepare := second.Spec.Template.Spec.InitContainers[0]
 		Expect(prepare.Args).To(Equal([]string{
-			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/2/out",
-			"--" + contract.FlagRunDir, "/workspace/2",
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/2",
 			"--" + contract.FlagSweep, "1",
 		}), "run 1 sealed, but the sweep list names every run before this one either way")
 	})
@@ -256,8 +255,7 @@ var _ = Describe("a flow with a workspace", func() {
 		Expect(second.Name).NotTo(Equal(job.Name), "the failed attempt's Job is still there to collide with")
 		prepare := second.Spec.Template.Spec.InitContainers[0]
 		Expect(prepare.Args).To(Equal([]string{
-			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1/out",
-			"--" + contract.FlagRunDir, "/workspace/1",
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1",
 		}), "the retry returns to run 1's own directory, with nothing before it to sweep")
 	})
 

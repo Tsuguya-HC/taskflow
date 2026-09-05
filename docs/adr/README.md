@@ -14,3 +14,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | [0002](0002-per-task-workspace-pvc.md) | accepted | フェーズ間の引き渡しは Task ごとの PVC、claim は flow が書く |
 | [0003](0003-run-view-and-sweep.md) | accepted | subPath 無し = この run のビュー、残骸は prepare が明示リストで掃除 |
 | [0004](0004-run-id-counts-runs-not-attempts.md) | accepted | runID は決着した run を数える。インフラ再試行では動かない |
+| [0005](0005-vocabulary-at-the-mount-root.md) | accepted | 語彙はマウント直下。`out/` という中間階層は置かない |
