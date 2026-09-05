@@ -33,7 +33,7 @@ date: 2026-08-21
 | P2 | **コントローラはポリシーを持たない** | SA / Role / CNP を生成しない。既存のものを名前で参照するだけ。生成すると全権限の和集合を持つ最大の攻撃対象になる |
 | P3 | **Pod は使い捨て、ボリュームが真実** | プロセス状態に耐久性を賭けない。ノード再起動が日常的に起きる前提 |
 | P4 | **制御フローの入力は成果物であって発話ではない** | 最終メッセージは切れる・拒否される・ドリフトする。ファイルの有無だけを見る |
-| P5 | **etcd には制御状態だけ。中身は入れない** | ログ・結果・レポートは S3 / PG。status は参照のみ。etcd 障害を 2 回踏んでいる |
+| P5 | **etcd には制御状態だけ。中身は入れない** | ログ・結果・レポートは S3 / PG。status には中身も参照も置かない（[ADR-0008](adr/0008-no-store-pointers-in-status.md)）。etcd 障害を 2 回踏んでいる |
 | P6 | **判定不能は絶対に pass に倒さない** | 答えが 1 つに定まらないなら直接 Escalated |
 | P7 | **コントローラは LLM を知らない** | プロンプト・モデル・API キー・store は全てユーザーの pod spec の話。コントローラの語彙は「フェーズ・Job・verdict」だけ |
 | P8 | **厳格に検証し、矛盾したら即座に終わる** | デフォルト値・暗黙のマージ・推測による修復をしない。構造的な矛盾は修復せず `Failed`。曖昧なまま進むより止まる方が安い |
@@ -255,7 +255,6 @@ status:
   runID: 3                    # 単調増加。パスと子リソース名に使う
   reworkBudget: 1
   currentRun: {phase: Review, runID: 3, deadline: ..., workflowName: ...}
-  artifacts: {store: "s3://.../<task-uid>/", pr: "..."}
   history: [...]              # 上限付きリングバッファ
   conditions: [...]
 ```
@@ -1322,7 +1321,7 @@ CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける
 | ワークスペース | 作業ツリー・plan.md・diff | S3 prefix または PVC | タスク中 |
 | 経緯・メモ（対人） | 各フェーズの報告・判断理由 | horenso posts | 永続 |
 | 横断知識 | 過去タスクの教訓 | Qdrant（memory.infra） | 永続 |
-| 制御状態 | phase / bindings / 参照 URL | Task.status | タスク中 |
+| 制御状態 | phase / runID / reworkBudget | Task.status | タスク中 |
 
 ### 「人間への報連相」と「フェーズ間の引き継ぎ」は別物
 
@@ -1344,6 +1343,10 @@ CNP / Kyverno は「利用側が自分で決めた名前」に対して書ける
 | implement | PVC | git ツリーが要る。rework で生き残る必要がある |
 
 レイアウトに runID を含める：`<path>/results/<runID>/<directory>/report.md`（`<path>` は handler が決める）
+
+**その `<path>` は status に出てこない**（[ADR-0008](adr/0008-no-store-pointers-in-status.md)）。コントローラは
+workspace にも store にも触れず（§6「2 ホップ」、egress は apiserver だけ）、置き場所を知る道が無い。
+辿りたい側は `metadata.uid` と `status.history[].runID` から自分の規則で組み立てる。
 （`<directory>` は宣言した `next` の値が選ぶ、その run のディレクトリ名）
 → 遅れて到着した古い run が書いても別の場所になり、現在の判定を汚染しない。
 
@@ -1764,10 +1767,8 @@ status:
     runID: 2
     jobName: cnp-check-x7f2-2-64442e2b      # <task>-<runID>-<フェーズ名のハッシュ 8 桁>（§4）
     deadline: "2026-08-21T12:20:00Z"
-  artifacts:
-    store: "s3://agent-tasks/cnp-check-x7f2/"
   history:
-    - {phase: 調査, runID: 1, directory: ok, outcome: Declared, ref: "s3://.../1/"}
+    - {phase: 調査, runID: 1, directory: ok, outcome: Declared, reason: "declared edge to 報告"}
   conditions:
     - {type: Ready, status: "True", reason: HandlerResolved}
 ```

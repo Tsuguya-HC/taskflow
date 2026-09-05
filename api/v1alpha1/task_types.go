@@ -83,8 +83,10 @@ type RunRef struct {
 	InfraRetries int32 `json:"infraRetries,omitempty"`
 }
 
-// HistoryEntry records a completed run. This is the audit trail; the artifacts
-// it points at live in object storage, never in etcd.
+// HistoryEntry records a completed run. This is the audit trail, and it is
+// the whole of what the framework knows: what the run decided and why. Where
+// the run's output ended up is not here, because the controller never learns
+// it — it does not touch the workspace or any store (ADR-0008).
 type HistoryEntry struct {
 	Phase Phase `json:"phase"`
 	RunID int32 `json:"runID"`
@@ -101,21 +103,15 @@ type HistoryEntry struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=2048
 	Reason string `json:"reason,omitempty"`
-	// Ref points at the run's output in the store.
-	// +optional
-	Ref string `json:"ref,omitempty"`
 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
 }
 
-type ArtifactsRef struct {
-	// +optional
-	Store string `json:"store,omitempty"`
-}
-
-// TaskStatus holds control state only. Logs, reports and results are
-// references — etcd has been lost twice here, and a design that puts payloads
-// in it turns that from an outage into data loss.
+// TaskStatus holds control state only. Logs, reports and results are not here
+// — etcd has been lost twice here, and a design that puts payloads in it turns
+// that from an outage into data loss. Nor are pointers to them: where a run's
+// output was put is the deployment's arrangement, and this status is written
+// by a controller that has no part in it (ADR-0008).
 type TaskStatus struct {
 	// +optional
 	Phase Phase `json:"phase,omitempty"`
@@ -134,9 +130,6 @@ type TaskStatus struct {
 
 	// +optional
 	CurrentRun *RunRef `json:"currentRun,omitempty"`
-
-	// +optional
-	Artifacts *ArtifactsRef `json:"artifacts,omitempty"`
 
 	// ExpiresAt is when the controller deletes this task, set once it stops.
 	// The moment is fixed here rather than derived from the flow's ttl each

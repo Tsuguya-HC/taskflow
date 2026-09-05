@@ -95,15 +95,12 @@ spec:
               rule: self == oldSelf
           status:
             description: |-
-              TaskStatus holds control state only. Logs, reports and results are
-              references — etcd has been lost twice here, and a design that puts payloads
-              in it turns that from an outage into data loss.
+              TaskStatus holds control state only. Logs, reports and results are not here
+              — etcd has been lost twice here, and a design that puts payloads in it turns
+              that from an outage into data loss. Nor are pointers to them: where a run's
+              output was put is the deployment's arrangement, and this status is written
+              by a controller that has no part in it (ADR-0008).
             properties:
-              artifacts:
-                properties:
-                  store:
-                    type: string
-                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -218,8 +215,10 @@ spec:
               history:
                 items:
                   description: |-
-                    HistoryEntry records a completed run. This is the audit trail; the artifacts
-                    it points at live in object storage, never in etcd.
+                    HistoryEntry records a completed run. This is the audit trail, and it is
+                    the whole of what the framework knows: what the run decided and why. Where
+                    the run's output ended up is not here, because the controller never learns
+                    it — it does not touch the workspace or any store (ADR-0008).
                   properties:
                     directory:
                       description: |-
@@ -249,9 +248,6 @@ spec:
                         followed, or why no answer counted, or what the handler said after
                         naming its directory. The transition never reads it.
                       maxLength: 2048
-                      type: string
-                    ref:
-                      description: Ref points at the run's output in the store.
                       type: string
                     runID:
                       format: int32

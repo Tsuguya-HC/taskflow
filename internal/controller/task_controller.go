@@ -310,7 +310,7 @@ func (r *TaskReconciler) settle(
 		"phase", run.Phase, "runID", run.RunID, "directory", in.Directory,
 		"outcome", res.Outcome, "next", res.Next)
 	now := metav1.NewTime(r.now())
-	taskstate.Advance(&task.Status, &flow.Spec, in.Directory, res, "", now)
+	taskstate.Advance(&task.Status, &flow.Spec, in.Directory, res, now)
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
