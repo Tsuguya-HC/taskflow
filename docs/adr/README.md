@@ -15,3 +15,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | [0003](0003-run-view-and-sweep.md) | accepted | subPath 無し = この run のビュー、残骸は prepare が明示リストで掃除 |
 | [0004](0004-run-id-counts-runs-not-attempts.md) | accepted | runID は決着した run を数える。インフラ再試行では動かない |
 | [0005](0005-vocabulary-at-the-mount-root.md) | accepted | 語彙はマウント直下。`out/` という中間階層は置かない |
+| [0006](0006-taskflow-admission-webhook.md) | accepted | TaskFlow の構造検査は admission webhook。証明書は配置側から与える |
