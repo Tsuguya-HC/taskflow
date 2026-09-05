@@ -16,3 +16,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | [0004](0004-run-id-counts-runs-not-attempts.md) | accepted | runID は決着した run を数える。インフラ再試行では動かない |
 | [0005](0005-vocabulary-at-the-mount-root.md) | accepted | 語彙はマウント直下。`out/` という中間階層は置かない |
 | [0006](0006-taskflow-admission-webhook.md) | accepted | TaskFlow の構造検査は admission webhook。証明書は配置側から与える |
+| [0007](0007-no-resolved-spec-hashes.md) | accepted | 解決済み spec のハッシュを持たない。走行中の run は Job の immutability が守る |

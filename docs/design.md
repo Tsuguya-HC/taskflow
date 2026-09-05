@@ -248,9 +248,8 @@ framework の外になる。独立した 2 本の Task になり親子関係が�
 — 誰が使ってよいかを絞れない、RBAC の見通しが悪くなる、GitOps でどのアプリが所有するのか
 決まらない。手元に先例があるので繰り返さない。
 
-実体は `status.currentRun.flowHash` に解決済み型のハッシュを持つ。
-走行中に型が変わったら `Failed`（P8）。以下の旧 `spec` フィールドは TaskFlow 側へ移動:
-`profile` / `bindings` / `reworkBudget`
+以下の旧 `spec` フィールドは TaskFlow 側へ移動: `profile` / `bindings` / `reworkBudget`。
+参照は毎 reconcile で解決し直す（走行中の flow をスナップショットしない — [ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。
 status:
   phase: Review
   runID: 3                    # 単調増加。パスと子リソース名に使う
@@ -739,10 +738,14 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | 種類 | 例 | 結果 |
 |---|---|---|
 | エージェント起因 | verdict が無い / ディレクトリが 2 つ / 未知のトークン | 直接 **Escalated**（人間が見る） |
-| 構造起因 | handler が実行中に編集・削除された / 束縛の無いフェーズを指した | **Failed**（修復を試みない） |
+| 構造起因 | handler が実行中に削除された / 束縛の無いフェーズを指した / 1 つのディレクトリが 2 ステータスを指す | **Failed**（修復を試みない） |
 
-handler の変更検知は `status.currentRun.handlerHash` に解決済み spec のハッシュを置く。
-不一致なら即 `Failed`。実行中のタスクの足元で定義が変わったなら、それはもう別のタスク。
+**実行中の handler の「編集」は検出しない**（[ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。走行中の run は
+Job の `spec.template` が作成後 immutable であることに守られており、コントローラが handler を読むのは
+Job を新規作成する時だけ。編集が効くのは次の run からで、それは GitOps でロールアウトした定義が
+次から使われるという普通の挙動。**削除**の方は検出する（`handlerFor` → `brokenFlow` → `Failed`）。
+
+flow の編集も同じく毎 reconcile で読み直す。矛盾は上の表のとおり、遷移の瞬間に構造として捕まえる。
 
 ### 循環に必要なもの
 
