@@ -89,12 +89,18 @@ type Result struct {
 //
 // The framework's own answers are built in and cannot be declared away:
 //
-//	a phase with no binding        -> Failed     (the flow is broken)
-//	two statuses, one directory    -> Failed     (likewise; undecidable)
-//	Failed named as a destination  -> Failed     (likewise; not an answer)
+//	two statuses, one directory    -> Failed     (undecidable)
+//	Failed named as a destination  -> Failed     (not an answer)
 //	no single directory written    -> Escalated  (nothing was decided)
-//	a directory the flow omits     -> Escalated  (it cannot explain what arrived)
 //	a rework with no budget left   -> Escalated
+//
+// Two further cases are answered below that the controller never actually
+// asks about, because Reconcile and collect settle them before a run gets
+// here: a phase with no binding, and a directory the flow omits. They are
+// guards rather than paths, and the comment on each says what removing it
+// would cost. Both are exercised by this package's tests, which call Next
+// directly and are therefore not bound by what the controller happens to
+// pass — the reason those tests are not proof that the branch is live.
 //
 // Every other move follows the flow's own table — including an edge the flow
 // declared to Escalated, which is the one reserved name it may name as a
@@ -102,8 +108,17 @@ type Result struct {
 func Next(in Input) Result {
 	binding, bound := in.Bindings[in.Phase]
 	if !bound {
-		// Reachable when a flow is edited under a running task, which the
-		// design treats as a different task rather than something to repair.
+		// The controller never presents this: Reconcile checks the same
+		// thing before it has a run to settle, and answers it better than
+		// this can — it can see whether a run was in flight, which is what
+		// separates a flow edited under a running task from one that simply
+		// stopped here. Removing this guard would not remove the case,
+		// only the answer: the lookup above hands back a zero binding, and
+		// the task would leave as NoAnswer — a broken definition reported
+		// as something a human should read the handler's output about.
+		// Why the controller's check makes this one unreachable is written
+		// down in the taskstate package, next to the invariant it depends
+		// on.
 		return Result{
 			Next:    flowv1alpha1.PhaseFailed,
 			Outcome: OutcomeStructural,
@@ -146,6 +161,17 @@ func Next(in Input) Result {
 			Detail:  "directory " + in.Directory + " selects more than one status",
 		}
 	case found == 0:
+		// Also never presented by the controller: collect is handed this
+		// same binding's directories in the same reconcile and refuses
+		// anything outside them, so a directory that reaches here is always
+		// one of these. Unlike the guard above, removing this one fails
+		// silently rather than loudly — dest stays empty, an empty phase
+		// binds nothing, and a phase nothing binds is where a flow ends, so
+		// the task would stop as though it had finished — and for a flow
+		// that somehow has no ttl at all, which the schema's default
+		// normally prevents, worse still: an empty phase reads as a task
+		// that never started, and the next reconcile begins it again from
+		// the flow's start.
 		return Result{
 			Next:    flowv1alpha1.PhaseEscalated,
 			Outcome: OutcomeNoAnswer,

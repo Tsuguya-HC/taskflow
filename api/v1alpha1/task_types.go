@@ -62,6 +62,9 @@ type TaskSpec struct {
 // run left behind. It does not separate two attempts at starting one run —
 // an infrastructure retry comes back with the same number (ADR-0004), and
 // infraRetries is what tells those apart.
+//
+// A task's currentRun, when it has one, always names the phase the task is
+// on. A task that has stopped has no currentRun at all.
 type RunRef struct {
 	Phase Phase `json:"phase"`
 	RunID int32 `json:"runID"`
