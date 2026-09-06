@@ -46,7 +46,7 @@ ADR-0003 で prepare は run ディレクトリを自分で作るようになっ
 run ディレクトリ自体でよい。emptyDir 経路も同じ手が使える — init container は main より先に走り、
 kubelet は既に存在する subPath ディレクトリを作り直さない。
 
-**実測（runc とサンドボックス VM の両方）**: prepare 役（uid 65532、
+**実測（2026-09-05、runc とサンドボックス VM の両方）**: prepare 役（uid 65532、
 `subPath: work`）が `work/1/ok` を作って `work/1` を 0555 に閉じ、handler 役（uid 65533、
 `subPath: work/1`）から見ると root が `dr-xr-xr-x 65532`。`mkdir /workspace/evil` は EACCES、
 `chmod 777 /workspace` は EPERM、`ok/` への書き込みは成功。kubelet が作った `work` 自体への

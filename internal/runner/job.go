@@ -527,9 +527,9 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 // that what it closes is its own — a path the kubelet's subPath machinery
 // made is root's, and a chmod on it comes back EPERM (measured 2026-08-30;
 // and again 2026-09-05 with the run's directory itself as the pinned
-// target, on runc and kata alike: prepare's 0555 holds at the handler's
-// root) — and it clears away the debris of abandoned runs, which needs the
-// same parent.
+// target, on runc and inside a sandbox VM alike: prepare's 0555 holds at
+// the handler's root) — and it clears away the debris of abandoned runs,
+// which needs the same parent.
 //
 // What differs between a flow workspace and a template volume is only the
 // volume itself and what publish does once sealed. The reserved volume is
@@ -590,8 +590,8 @@ func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image st
 // subPath means "this run", and the shelf of finished runs is asked for
 // explicitly with subPath: results (ADR-0003; the first cut pinned only
 // writable mounts, which left a sidecar that merely reads its own run's
-// directory — cnp-check's notify — staring at the volume root, unable to
-// find its run without the very wiring this design removed). Called before
+// directory staring at the volume root, unable to find its run without the
+// very wiring this design removed). Called before
 // the injected containers are prepended, so pod.InitContainers here still
 // holds only the handler's own. checkWorkspace has already refused a
 // handler that set its own SubPath or SubPathExpr on a writable mount, so

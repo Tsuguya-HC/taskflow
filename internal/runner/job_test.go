@@ -36,7 +36,7 @@ const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 
 	taskUID      = "7f2a-uid"
-	handlerName  = "cnp-reader"
+	handlerName  = "sample-handler"
 	sidecarImage = "example.invalid/agent-sidecar:v0"
 	workspaceVol = "work"
 	workspaceAt  = "/workspace"
@@ -45,9 +45,9 @@ const (
 
 func task() *flowv1alpha1.Task {
 	return &flowv1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "cnp-check-x7f2", Namespace: "claude-code", UID: taskUID},
+		ObjectMeta: metav1.ObjectMeta{Name: "sample-flow-x7f2", Namespace: "agent-tasks", UID: taskUID},
 		Spec: flowv1alpha1.TaskSpec{
-			Flow:  "cnp-check",
+			Flow:  "sample-flow",
 			Input: &apiextensionsv1.JSON{Raw: []byte(`{"scope":"all namespaces"}`)},
 		},
 	}
@@ -55,7 +55,7 @@ func task() *flowv1alpha1.Task {
 
 func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 	h := &flowv1alpha1.TaskHandler{
-		ObjectMeta: metav1.ObjectMeta{Name: handlerName, Namespace: "claude-code"},
+		ObjectMeta: metav1.ObjectMeta{Name: handlerName, Namespace: "agent-tasks"},
 		Spec: flowv1alpha1.TaskHandlerSpec{
 			Phase:     phaseInvestigate,
 			Runner:    flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
@@ -68,7 +68,7 @@ func handler(mut ...func(*flowv1alpha1.TaskHandler)) *flowv1alpha1.TaskHandler {
 					Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyNever,
-						ServiceAccountName: "agent-cnp-reader",
+						ServiceAccountName: "agent-sample",
 						SecurityContext:    &corev1.PodSecurityContext{RunAsUser: ptr(agentUID)},
 						Volumes:            []corev1.Volume{{Name: workspaceVol}},
 						InitContainers: []corev1.Container{{
@@ -107,7 +107,7 @@ func TestCarriesTheTemplateThrough(t *testing.T) {
 	job := build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})
 
 	pod := job.Spec.Template.Spec
-	if pod.ServiceAccountName != "agent-cnp-reader" {
+	if pod.ServiceAccountName != "agent-sample" {
 		t.Fatalf("serviceAccountName = %q; the handler's choice must survive", pod.ServiceAccountName)
 	}
 	if got := job.Spec.Template.Labels["role"]; got != handlerName {
@@ -317,8 +317,8 @@ func TestExecutionMechanics(t *testing.T) {
 }
 
 func TestNameIsDeterministicAndLegal(t *testing.T) {
-	a := JobName("cnp-check-x7f2", phaseInvestigate, 2, 0)
-	b := JobName("cnp-check-x7f2", phaseInvestigate, 2, 0)
+	a := JobName("sample-flow-x7f2", phaseInvestigate, 2, 0)
+	b := JobName("sample-flow-x7f2", phaseInvestigate, 2, 0)
 	if a != b {
 		t.Fatalf("%q != %q; creating twice must conflict rather than make a second Job", a, b)
 	}
@@ -332,10 +332,10 @@ func TestNameIsDeterministicAndLegal(t *testing.T) {
 			t.Fatalf("name %q contains %q, which RFC 1123 does not allow", a, r)
 		}
 	}
-	if JobName("cnp-check-x7f2", "報告", 2, 0) == a {
+	if JobName("sample-flow-x7f2", "報告", 2, 0) == a {
 		t.Fatal("two phases produced the same name")
 	}
-	if JobName("cnp-check-x7f2", phaseInvestigate, 3, 0) == a {
+	if JobName("sample-flow-x7f2", phaseInvestigate, 3, 0) == a {
 		t.Fatal("two runs produced the same name")
 	}
 }
@@ -344,18 +344,18 @@ func TestNameIsDeterministicAndLegal(t *testing.T) {
 // no longer separates two attempts at starting it — and the Job the last
 // attempt left behind is still there to collide with.
 func TestRetriesOfOneRunGetDistinctNames(t *testing.T) {
-	first := JobName("cnp-check-x7f2", phaseInvestigate, 2, 0)
-	second := JobName("cnp-check-x7f2", phaseInvestigate, 2, 1)
-	third := JobName("cnp-check-x7f2", phaseInvestigate, 2, 2)
+	first := JobName("sample-flow-x7f2", phaseInvestigate, 2, 0)
+	second := JobName("sample-flow-x7f2", phaseInvestigate, 2, 1)
+	third := JobName("sample-flow-x7f2", phaseInvestigate, 2, 2)
 	if first == second || second == third || first == third {
 		t.Fatalf("attempts at run 2 collided: %q, %q, %q", first, second, third)
 	}
 	// The first attempt is spelled the way it always was, so only a run that
 	// actually retried carries the extra segment.
-	if !strings.HasPrefix(first, "cnp-check-x7f2-2-") || strings.Contains(first, "-r") {
+	if !strings.HasPrefix(first, "sample-flow-x7f2-2-") || strings.Contains(first, "-r") {
 		t.Fatalf("first attempt = %q, want the bare run-and-phase form", first)
 	}
-	if !strings.HasPrefix(second, "cnp-check-x7f2-2-r1-") {
+	if !strings.HasPrefix(second, "sample-flow-x7f2-2-r1-") {
 		t.Fatalf("second attempt = %q, want the run's name with the attempt in it", second)
 	}
 	for _, name := range []string{second, third} {
@@ -399,8 +399,8 @@ func TestNameStaysWithinTheLimit(t *testing.T) {
 // generateName tends to put the part that tells two objects apart at the
 // end of the name, exactly where truncation would otherwise chop it off.
 func TestTruncatedNamesStayDistinct(t *testing.T) {
-	a := "cnp-check-" + strings.Repeat("a", 60) + "-x7f2a"
-	b := "cnp-check-" + strings.Repeat("a", 60) + "-q91zz"
+	a := "sample-flow-" + strings.Repeat("a", 60) + "-x7f2a"
+	b := "sample-flow-" + strings.Repeat("a", 60) + "-q91zz"
 	nameA := JobName(a, phaseInvestigate, 1, 0)
 	nameB := JobName(b, phaseInvestigate, 1, 0)
 	if nameA == nameB {
@@ -845,7 +845,7 @@ func flowWorkspace(h *flowv1alpha1.TaskHandler) {
 func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 	job := build(t, Input{
 		Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate,
-		RunID: 3, WorkspacePVC: "cnp-check-x7f2-ws-abcd1234", SweepRuns: []int32{1, 2},
+		RunID: 3, WorkspacePVC: "sample-flow-x7f2-ws-abcd1234", SweepRuns: []int32{1, 2},
 	})
 	spec := job.Spec.Template.Spec
 
@@ -855,7 +855,7 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 			claim = v.PersistentVolumeClaim
 		}
 	}
-	if claim == nil || claim.ClaimName != "cnp-check-x7f2-ws-abcd1234" {
+	if claim == nil || claim.ClaimName != "sample-flow-x7f2-ws-abcd1234" {
 		t.Fatalf("volumes = %v; want flow-workspace backed by the task's claim", spec.Volumes)
 	}
 
@@ -896,7 +896,7 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 
 // A mount of the flow workspace that names no subPath of its own means
 // "this run", read-only or not: a sidecar that only reads its own run's
-// directory — cnp-check's notify — should find it where it always was, without
+// directory — sample-flow's notify — should find it where it always was, without
 // resolving a run number first. The shelf of finished runs is asked for
 // explicitly, with subPath: results, and that mount is the handler's own
 // view: left exactly as written (ADR-0003).
@@ -1011,11 +1011,11 @@ func TestRefusesFlowWorkspaceUnderAFlowWithoutOne(t *testing.T) {
 }
 
 func TestWorkspacePVCNameIsUIDDerived(t *testing.T) {
-	a := WorkspacePVCName("cnp-check", "uid-1")
-	if a != WorkspacePVCName("cnp-check", "uid-1") {
+	a := WorkspacePVCName("sample-flow", "uid-1")
+	if a != WorkspacePVCName("sample-flow", "uid-1") {
 		t.Fatal("not deterministic")
 	}
-	if a == WorkspacePVCName("cnp-check", "uid-2") {
+	if a == WorkspacePVCName("sample-flow", "uid-2") {
 		t.Fatal("two tasks under one name must not share a claim")
 	}
 	long := WorkspacePVCName(strings.Repeat("x", 80), "uid-1")

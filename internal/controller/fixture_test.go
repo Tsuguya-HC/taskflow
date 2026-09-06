@@ -45,7 +45,7 @@ const (
 )
 
 const (
-	handlerName   = "cnp-reader"
+	handlerName   = "sample-handler"
 	sidecarImage  = "example.invalid/agent-sidecar:v0"
 	workspaceVol  = "work"
 	workspacePath = "/workspace"

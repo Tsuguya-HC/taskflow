@@ -35,7 +35,7 @@ import (
 
 // The flow name used across these examples.
 const (
-	exampleFlow = "cnp-check"
+	exampleFlow = "sample-flow"
 	agentName   = "agent"
 	nextMore    = "more"
 	labelKeeper = "label-keeper"
@@ -62,7 +62,7 @@ const phaseGave flowv1alpha1.Phase = "失敗"
 var _ = Describe("the API accepts the shapes design.md documents", func() {
 	ctx := context.Background()
 
-	It("accepts the cnp-check TaskFlow", func() {
+	It("accepts the sample-flow TaskFlow", func() {
 		flow := &flowv1alpha1.TaskFlow{
 			ObjectMeta: metav1.ObjectMeta{Name: exampleFlow, Namespace: resourceNamespace},
 			Spec: flowv1alpha1.TaskFlowSpec{
@@ -72,14 +72,14 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 				// named by them too. Nothing here comes from the framework.
 				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 					"調査": {
-						Handler: "claude-planner",
+						Handler: "plan-handler",
 						Next: map[flowv1alpha1.Phase]string{
 							"報告": "ok",
 							"調査": nextMore,
 						},
 					},
 					"報告": {
-						Handler: "claude-reviewer",
+						Handler: "review-handler",
 						Next:    map[flowv1alpha1.Phase]string{phaseDone: dirSent},
 					},
 				},
@@ -95,7 +95,7 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 
 	It("accepts a TaskHandler carrying a whole jobTemplate", func() {
 		h := &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: "claude-reviewer", Namespace: resourceNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "review-handler", Namespace: resourceNamespace},
 			Spec: flowv1alpha1.TaskHandlerSpec{
 				Phase:  "報告",
 				Runner: flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
@@ -105,7 +105,7 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 						// here, by the handler author. Nothing in the
 						// controller puts it there — that is the whole point
 						// of taking a template at all.
-						Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"claude-code": "true"}},
+						Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"agent": "true"}},
 						Spec: corev1.PodSpec{
 							RestartPolicy:      corev1.RestartPolicyNever,
 							ServiceAccountName: "agent-readonly",
@@ -150,7 +150,7 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 				JobTemplate: &flowv1alpha1.JobTemplate{
 					Template: flowv1alpha1.PodTemplate{
 						Metadata: flowv1alpha1.EmbeddedObjectMeta{
-							Labels:      map[string]string{"role": "cnp-reader"},
+							Labels:      map[string]string{"role": "repo-reader"},
 							Annotations: map[string]string{"note": "keep me"},
 						},
 						Spec: corev1.PodSpec{
@@ -174,13 +174,13 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 
 		var got flowv1alpha1.TaskHandler
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: labelKeeper, Namespace: resourceNamespace}, &got)).To(Succeed())
-		Expect(got.Spec.JobTemplate.Template.Metadata.Labels).To(HaveKeyWithValue("role", "cnp-reader"))
+		Expect(got.Spec.JobTemplate.Template.Metadata.Labels).To(HaveKeyWithValue("role", "repo-reader"))
 		Expect(got.Spec.JobTemplate.Template.Metadata.Annotations).To(HaveKeyWithValue("note", "keep me"))
 	})
 
 	It("accepts a Task of four lines, with arbitrary input", func() {
 		task := &flowv1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Name: "cnp-check-x7f2", Namespace: resourceNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "sample-flow-x7f2", Namespace: resourceNamespace},
 			Spec: flowv1alpha1.TaskSpec{
 				Flow:     exampleFlow,
 				Input:    &apiextensionsv1.JSON{Raw: []byte(`{"scope":"all namespaces"}`)},
@@ -452,13 +452,14 @@ var _ = Describe("the API refuses what the design forbids", func() {
 			return k8sClient.Create(ctx, flow)
 		}, "maxInFlight"),
 		Entry("TaskHandler.runner.type outside the enum", func() error {
-			// Job and External are the only runners this design admits — Argo
-			// was deliberately not made a third (§4 "Argo を runner に採らない").
+			// Job and External are the only runners this design admits — a
+			// workflow engine was deliberately not made a third (design.md §4
+			// "ワークフローエンジンを runner に採らない").
 			h := &flowv1alpha1.TaskHandler{
 				ObjectMeta: metav1.ObjectMeta{Name: "bad-runner-type", Namespace: resourceNamespace},
 				Spec: flowv1alpha1.TaskHandlerSpec{
 					Phase:  "報告",
-					Runner: flowv1alpha1.RunnerSpec{Type: "Argo"},
+					Runner: flowv1alpha1.RunnerSpec{Type: "Unknown"},
 				},
 			}
 			return k8sClient.Create(ctx, h)

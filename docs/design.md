@@ -1058,8 +1058,8 @@ sidecar イメージを再ビルドしなくて済む。
 prepare が volume を `subPath: work` でマウントして `<runID>/` を自分で作るのは、kubelet が作った
 subPath ディレクトリは root 所有で chmod が EPERM になるため（2026-08-30 実測）。自分で作れば
 閉じられる。handler のマウントは `subPath: work/<runID>` に焼かれ、init が main より先に走るので
-kubelet はその時点で存在するディレクトリを作り直さない（2026-09-05 実測、runc / kata とも
-handler から見た root は `dr-xr-xr-x prepare-uid`）。閉じた run を publish が棚へ rename するときは
+kubelet はその時点で存在するディレクトリを作り直さない（2026-09-05 実測。runc とサンドボックス
+VM のどちらでも、handler から見た root は `dr-xr-xr-x prepare-uid`）。閉じた run を publish が棚へ rename するときは
 ディレクトリ自身への書き込み権限が要る（`..` の書き換え）ので、publish は同 uid で 0755 に開けて
 rename し、棚の上で 0555 に閉じ直す（owner のみなので agent には開かない）。
 
@@ -1585,7 +1585,7 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
    Failed で終わる。判定ディレクトリは正しく書かれているので、**書けたのに落ちる**という
    最も紛らわしい壊れ方をする。
 
-   **実測**:
+   **2026-09-05 実測**:
 
    | 中身 | 結果 |
    |---|---|
