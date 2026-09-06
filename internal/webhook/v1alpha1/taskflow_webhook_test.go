@@ -47,14 +47,14 @@ var _ = Describe("TaskFlow validating webhook", func() {
 				Start:   phaseInvestigate,
 				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 					phaseInvestigate: {
-						Handler: "cnp-reader",
+						Handler: "sample-handler",
 						Next: map[flowv1alpha1.Phase]string{
 							phaseReport:      "ok",
 							phaseInvestigate: "more",
 						},
 					},
 					phaseReport: {
-						Handler: "discord",
+						Handler: "notify",
 						Next:    map[flowv1alpha1.Phase]string{phaseDone: "sent"},
 					},
 				},

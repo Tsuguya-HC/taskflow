@@ -73,7 +73,7 @@ spec:
                   place to say it — a pod template as CronJob users know it, but with only
                   template and no job-level spec (no backoffLimit, no completions, no
                   parallelism) — rather than the two locations with differing semantics
-                  that Argo requires.
+                  that a workflow engine's own template would ask for.
 
                   Required when runner.type is Job; ignored when it is External.
                 properties:
@@ -8990,10 +8990,11 @@ spec:
                     description: |-
                       RunnerType selects how a phase is executed.
 
-                      Argo Workflows is deliberately absent. Multi-step work fits in one pod with
-                      shared volumes, so an Argo runner would buy only the reuse of existing
-                      WorkflowTemplates — not worth the dependency, and a single pod structurally
-                      avoids the "emptyDir is not shared between steps" trap that cost a day.
+                      A workflow engine is deliberately absent. Multi-step work fits in one pod
+                      with shared volumes, so an engine-backed runner would buy only the reuse of
+                      definitions already written for it — not worth the dependency, and a single
+                      pod structurally avoids the class of trap where a volume the steps are meant
+                      to share turns out to be scoped to one pod.
                     enum:
                     - Job
                     - External

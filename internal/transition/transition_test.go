@@ -33,17 +33,17 @@ const (
 	phaseGave        flowv1alpha1.Phase = "失敗"
 )
 
-func cnpCheck() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
+func sampleFlow() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	return map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 		phaseInvestigate: {
-			Handler: "cnp-reader",
+			Handler: "sample-handler",
 			Next: map[flowv1alpha1.Phase]string{
 				phaseReport:      dirOK,
 				phaseInvestigate: dirMore,
 			},
 		},
 		phaseReport: {
-			Handler: "discord",
+			Handler: "notify",
 			Next:    map[flowv1alpha1.Phase]string{phaseDone: dirSent},
 		},
 	}
@@ -61,7 +61,7 @@ const (
 // for a run that will not conclude to say so, rather than only being able to
 // write nothing.
 func withEscalate() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
-	b := cnpCheck()
+	b := sampleFlow()
 	b[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = dirEscalate
 	return b
 }
@@ -75,7 +75,7 @@ func visited(phases ...flowv1alpha1.Phase) map[flowv1alpha1.Phase]bool {
 }
 
 func TestDeclaredEdges(t *testing.T) {
-	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 2})
 	if got.Next != phaseReport || got.Outcome != OutcomeDeclared {
 		t.Fatalf("got %q/%q, want 報告/Declared (%s)", got.Next, got.Outcome, got.Detail)
 	}
@@ -88,7 +88,7 @@ func TestDeclaredEdges(t *testing.T) {
 // and there is no reserved name for success — "おわり" is just a status with
 // nowhere to go.
 func TestUnboundStatusIsWhereItStops(t *testing.T) {
-	b := cnpCheck()
+	b := sampleFlow()
 	if !IsTerminal(b, phaseDone) {
 		t.Fatal("a status with no binding is the end of the flow")
 	}
@@ -105,12 +105,12 @@ func TestUnboundStatusIsWhereItStops(t *testing.T) {
 // The declaration is also the mount list: these are the only directories that
 // will exist, so they are the only answers a handler can give.
 func TestDirectoriesComeFromTheDeclaration(t *testing.T) {
-	dirs := Directories(cnpCheck(), phaseInvestigate)
+	dirs := Directories(sampleFlow(), phaseInvestigate)
 	slices.Sort(dirs)
 	if !slices.Equal(dirs, []string{dirMore, dirOK}) {
 		t.Fatalf("directories = %v, want [more ok]", dirs)
 	}
-	if Directories(cnpCheck(), "見たことない") != nil {
+	if Directories(sampleFlow(), "見たことない") != nil {
 		t.Fatal("an unbound phase has no directories")
 	}
 }
@@ -118,7 +118,7 @@ func TestDirectoriesComeFromTheDeclaration(t *testing.T) {
 func TestNoSingleAnswerEscalates(t *testing.T) {
 	for _, why := range []string{"nothing was written", "two directories were written", "the run timed out"} {
 		t.Run(why, func(t *testing.T) {
-			got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, NoAnswer: why, Visited: visited(phaseInvestigate), Budget: 2})
+			got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, NoAnswer: why, Visited: visited(phaseInvestigate), Budget: 2})
 			if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
 				t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
 			}
@@ -132,7 +132,7 @@ func TestNoSingleAnswerEscalates(t *testing.T) {
 // The fail-closed path (P6) needs a message even when the caller did not
 // bother to say why — an empty NoAnswer must not become an empty Detail.
 func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
-	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Visited: visited(phaseInvestigate), Budget: 2})
 	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
 	}
@@ -144,7 +144,7 @@ func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
 // The handler cannot invent this — the directory would not exist — but a flow
 // edited under a running task can leave one behind.
 func TestUndeclaredDirectoryEscalates(t *testing.T) {
-	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Directory: "looks-fine", Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: "looks-fine", Visited: visited(phaseInvestigate), Budget: 2})
 	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
 	}
@@ -203,7 +203,7 @@ func TestTheEscalateDirectoryIsCreated(t *testing.T) {
 // asks rather than assumes. The two reserved names answer for themselves.
 func TestEndingOfReportsWhatStoppingThereMeans(t *testing.T) {
 	flow := &flowv1alpha1.TaskFlowSpec{
-		Bindings: cnpCheck(),
+		Bindings: sampleFlow(),
 		Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
 			phaseDone: flowv1alpha1.TerminalSuccess,
 			phaseGave: flowv1alpha1.TerminalFailure,
@@ -232,11 +232,11 @@ func TestEndingOfReportsWhatStoppingThereMeans(t *testing.T) {
 // not consent: reporting it as Undeclared is what keeps "nobody has said"
 // distinguishable from "somebody said this was fine".
 func TestAnUndeclaredEndingIsNotASuccess(t *testing.T) {
-	if got := EndingOf(&flowv1alpha1.TaskFlowSpec{Bindings: cnpCheck()}, phaseDone); got != EndingUndeclared {
+	if got := EndingOf(&flowv1alpha1.TaskFlowSpec{Bindings: sampleFlow()}, phaseDone); got != EndingUndeclared {
 		t.Fatalf("ending = %q, want Undeclared for a flow that never said", got)
 	}
 	partly := &flowv1alpha1.TaskFlowSpec{
-		Bindings:  cnpCheck(),
+		Bindings:  sampleFlow(),
 		Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalFailure},
 	}
 	if got := EndingOf(partly, phaseDone); got != EndingUndeclared {
@@ -257,7 +257,7 @@ func TestTheReservedEndingsNeedNoFlow(t *testing.T) {
 
 func TestBrokenFlowFails(t *testing.T) {
 	t.Run("a phase with no binding", func(t *testing.T) {
-		got := Next(Input{Bindings: cnpCheck(), Phase: "存在しない", Directory: dirOK, Budget: 2})
+		got := Next(Input{Bindings: sampleFlow(), Phase: "存在しない", Directory: dirOK, Budget: 2})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
 			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
 		}
@@ -266,7 +266,7 @@ func TestBrokenFlowFails(t *testing.T) {
 	// Creation refuses this; a flow edited afterwards can still carry it, and
 	// picking one of the two would be worse than stopping.
 	t.Run("two statuses sharing a directory", func(t *testing.T) {
-		b := cnpCheck()
+		b := sampleFlow()
 		b[phaseInvestigate].Next["中止"] = dirOK
 		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 2})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
@@ -279,7 +279,7 @@ func TestBrokenFlowFails(t *testing.T) {
 	// about itself — so naming it is the break, and the outcome says so
 	// rather than reading like an edge the flow was entitled to declare.
 	t.Run("Failed declared as a destination", func(t *testing.T) {
-		b := cnpCheck()
+		b := sampleFlow()
 		b[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
 		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: "broken", Visited: visited(phaseInvestigate), Budget: 2})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
@@ -289,7 +289,7 @@ func TestBrokenFlowFails(t *testing.T) {
 }
 
 func TestReworkSpendsBudget(t *testing.T) {
-	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Directory: dirMore, Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore, Visited: visited(phaseInvestigate), Budget: 2})
 	if got.Next != phaseInvestigate || got.Outcome != OutcomeRework {
 		t.Fatalf("got %q/%q, want 調査/Rework", got.Next, got.Outcome)
 	}
@@ -299,7 +299,7 @@ func TestReworkSpendsBudget(t *testing.T) {
 }
 
 func TestReworkWithoutBudgetEscalates(t *testing.T) {
-	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Directory: dirMore, Visited: visited(phaseInvestigate), Budget: 0})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore, Visited: visited(phaseInvestigate), Budget: 0})
 	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeBudgetExhausted {
 		t.Fatalf("got %q/%q, want Escalated/BudgetExhausted", got.Next, got.Outcome)
 	}
@@ -308,7 +308,7 @@ func TestReworkWithoutBudgetEscalates(t *testing.T) {
 // The first version of this rule decremented unconditionally, which made
 // reworkBudget: 0 mean "cannot run at all" instead of "never goes back".
 func TestForwardEdgesIgnoreBudget(t *testing.T) {
-	got := Next(Input{Bindings: cnpCheck(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 0})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 0})
 	if got.Next != phaseReport || got.Outcome != OutcomeDeclared {
 		t.Fatalf("got %q/%q, want 報告/Declared with no budget", got.Next, got.Outcome)
 	}
@@ -324,11 +324,11 @@ func TestCycleTerminates(t *testing.T) {
 	seen := visited(phaseInvestigate)
 
 	for range 50 {
-		got := Next(Input{Bindings: cnpCheck(), Phase: phase, Directory: dirMore, Visited: seen, Budget: budget})
+		got := Next(Input{Bindings: sampleFlow(), Phase: phase, Directory: dirMore, Visited: seen, Budget: budget})
 		budget = got.Budget
 		phase = got.Next
 		seen[phase] = true
-		if IsTerminal(cnpCheck(), phase) {
+		if IsTerminal(sampleFlow(), phase) {
 			if phase != flowv1alpha1.PhaseEscalated {
 				t.Fatalf("terminated at %q, want Escalated once the budget ran out", phase)
 			}

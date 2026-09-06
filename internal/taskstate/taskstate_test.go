@@ -43,13 +43,13 @@ const (
 	dirSent = "sent"
 
 	// The handler the example flow binds to its second phase.
-	handlerDiscord = "discord"
+	handlerNotify = "notify"
 )
 
 func flow() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	return map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-		phaseInvestigate: {Handler: "cnp-reader", Next: map[flowv1alpha1.Phase]string{phaseReport: dirOK, phaseInvestigate: dirMore}},
-		phaseReport:      {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
+		phaseInvestigate: {Handler: "sample-handler", Next: map[flowv1alpha1.Phase]string{phaseReport: dirOK, phaseInvestigate: dirMore}},
+		phaseReport:      {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
 	}
 }
 
@@ -193,7 +193,7 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 // the edge.
 func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-		phaseReport: {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
+		phaseReport: {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
 	}
 	s := &flowv1alpha1.TaskStatus{
 		Phase:      phaseReport,
@@ -240,7 +240,7 @@ func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
 // enough for them to come and read it.
 func TestAdvanceToADeclaredFailureNeedsAHuman(t *testing.T) {
 	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-		phaseReport: {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{phaseGave: dirSent}},
+		phaseReport: {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{phaseGave: dirSent}},
 	}
 	terminals := map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalFailure}
 	s := &flowv1alpha1.TaskStatus{
@@ -276,7 +276,7 @@ func TestAdvanceToADeclaredFailureNeedsAHuman(t *testing.T) {
 // three behaviours exactly where it was before terminals existed.
 func TestAdvanceToADeclaredSuccessSaysNothing(t *testing.T) {
 	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-		phaseReport: {Handler: handlerDiscord, Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
+		phaseReport: {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}},
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	for name, terminals := range map[string]map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
@@ -306,7 +306,7 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 		RunID:      3,
 		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3},
 	}
-	Fail(s, "flow \"cnp-check\" does not exist in this namespace", nil, at)
+	Fail(s, "flow \"sample-flow\" does not exist in this namespace", nil, at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
@@ -324,7 +324,7 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	if cond.Reason != "FlowBroken" {
 		t.Fatalf("Ready condition reason = %q, want FlowBroken", cond.Reason)
 	}
-	if cond.Message != "flow \"cnp-check\" does not exist in this namespace" {
+	if cond.Message != "flow \"sample-flow\" does not exist in this namespace" {
 		t.Fatalf("Ready condition message = %q", cond.Message)
 	}
 }

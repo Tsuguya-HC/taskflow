@@ -60,22 +60,22 @@ const (
 	notAPathElement   = "single path element"
 )
 
-// cnpCheck is a flow that should be accepted: 調査 either reports or asks for
+// sampleFlow is a flow that should be accepted: 調査 either reports or asks for
 // another round, 報告 ends at a phase nothing binds.
-func cnpCheck() *flowv1alpha1.TaskFlowSpec {
+func sampleFlow() *flowv1alpha1.TaskFlowSpec {
 	return &flowv1alpha1.TaskFlowSpec{
 		Profile: flowv1alpha1.ProfileInvestigate,
 		Start:   phaseInvestigate,
 		Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 			phaseInvestigate: {
-				Handler: "cnp-reader",
+				Handler: "sample-handler",
 				Next: map[flowv1alpha1.Phase]string{
 					phaseReport:      dirOK,
 					phaseInvestigate: dirMore,
 				},
 			},
 			phaseReport: {
-				Handler: "discord",
+				Handler: "notify",
 				Next:    map[flowv1alpha1.Phase]string{phaseDone: dirSent},
 			},
 		},
@@ -93,7 +93,7 @@ func check(spec *flowv1alpha1.TaskFlowSpec) []string {
 }
 
 func TestAcceptsAWellFormedFlow(t *testing.T) {
-	if got := check(cnpCheck()); len(got) != 0 {
+	if got := check(sampleFlow()); len(got) != 0 {
 		t.Fatalf("a flow the design itself uses was refused: %v", got)
 	}
 }
@@ -102,7 +102,7 @@ func TestAcceptsAWellFormedFlow(t *testing.T) {
 // silence (transition.OutcomeDeclined) — as long as it also has a way to
 // finish.
 func TestAcceptsADeclaredEdgeToEscalated(t *testing.T) {
-	spec := cnpCheck()
+	spec := sampleFlow()
 	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = dirEscalate
 	if got := check(spec); len(got) != 0 {
 		t.Fatalf("a declared escalation was refused: %v", got)
@@ -112,7 +112,7 @@ func TestAcceptsADeclaredEdgeToEscalated(t *testing.T) {
 // Two endings, one of them the flow's own bad news. Both are phases nothing
 // binds, and declaring what they mean is terminals' business, not this one's.
 func TestAcceptsSeveralEndings(t *testing.T) {
-	spec := cnpCheck()
+	spec := sampleFlow()
 	spec.Bindings[phaseReport].Next[phaseGave] = "gave-up"
 	spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
 		phaseDone: flowv1alpha1.TerminalSuccess,
@@ -265,7 +265,7 @@ func TestRefuses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := cnpCheck()
+			spec := sampleFlow()
 			tc.break_(spec)
 			got := check(spec)
 			for _, line := range got {
@@ -281,7 +281,7 @@ func TestRefuses(t *testing.T) {
 // A start that binds nothing stops the walk, so the phases it cannot reach
 // are not each reported as unreachable on top of it. One mistake, one line.
 func TestAnUnboundStartIsReportedOnce(t *testing.T) {
-	spec := cnpCheck()
+	spec := sampleFlow()
 	spec.Start = "着手"
 	got := check(spec)
 	if len(got) != 1 {
@@ -292,7 +292,7 @@ func TestAnUnboundStartIsReportedOnce(t *testing.T) {
 // Two mistakes in one flow are both reported: a rejection costs a commit, so
 // the author is told everything at once rather than one apply at a time.
 func TestReportsEveryMistakeAtOnce(t *testing.T) {
-	spec := cnpCheck()
+	spec := sampleFlow()
 	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
 	spec.Bindings[phaseReport].Next[phaseDone] = dirNested
 	if got := check(spec); len(got) != 2 {
@@ -306,7 +306,7 @@ func TestReportsEveryMistakeAtOnce(t *testing.T) {
 func TestTheReportIsStable(t *testing.T) {
 	first := ""
 	for i := range 32 {
-		spec := cnpCheck()
+		spec := sampleFlow()
 		spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
 		spec.Bindings[phaseReport].Next[phaseDone] = dirNested
 		spec.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
