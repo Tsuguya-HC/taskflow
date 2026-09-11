@@ -664,6 +664,13 @@ metric の `severity` は 5 値すべてを常に出すので、**「まだ宣�
 `flow` ラベルは実在する TaskFlow の名前か、参照先が存在しなかったことを表す固定値 `<unresolved>` の
 どちらかを取る。
 
+**宣言された終端は、起きる前から 0 として出る**（ADR-0010）。flow の終端は「どの `next` の行き先でもあり、
+束縛が無いもの」＋ 予約語 2 つで、`severity` は `terminals` の宣言でフェーズごとに一意に決まる
+（直積ではない）。0 を先に出すのは、counter の子系列が最初の `Inc()` で値 1 として生まれ、
+**一度しか起きない終端が `increase()` から見えない**ため — ここで一番取りこぼしたくないのは、
+その定義上めったに起きない `Failure` と `Escalated` の方になる。打つのは Task がその flow を
+解決したときで、TaskFlow を watch はしない。**走らせる者のいない flow の終端は出ない。**
+
 これが無いと、エージェントが「この対象は壊れている」と**明示**しても framework は素通りする。
 Step 0 の試作は通知サイドカーが自前で判定していたが、それは利用側が毎回書き直す羽目になる。
 
@@ -697,7 +704,10 @@ finally:
   起動と決着は `bindings` 経由の遷移を通らない独立した経路（`transition.Next` も `Advance` も通らない）
 - **失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / インフラ再試行の使い切り /
   handler が解決できない）は `Ready=False`（reason `FinallyFailed`）と Warning Event と finally 専用の
-  metric で声を出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない
+  metric（`taskflow_finally_outcomes_total{flow, outcome}`、`Declared` / `NoAnswer` の 2 値）で声を
+  出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない。この metric も
+  `TaskOutcomes` と同じ理由で起きる前から 0 として出るが、`finally` を宣言していない flow には出さない
+  — 宣言していない flow はどちらの outcome も起こりえないため（ADR-0010）
 - **受け取るもの**: 終端の意味（5 値）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ
   経路で値として差し込む（`FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME`。finally の run
   にだけ付く。`FLOW_PHASE` は他の run と同じく「この run が何か」= `Finally` を言う）。run が一度も

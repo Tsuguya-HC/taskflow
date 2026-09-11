@@ -109,6 +109,32 @@ var _ = Describe("finishing a run", func() {
 		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
 	}
 
+	// The zero ADR-0010 primes is only worth having if the ending lands on
+	// that same series. A rise on a series already being scraped is what
+	// increase() can see; a series that appears at 1 is not (issue #125).
+	It("counts the ending on the series it reported at zero", func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+				phaseReport: flowv1alpha1.TerminalSuccess,
+			}
+		})
+		fx.makeHandler()
+		fx.makeTask()
+
+		ending := outcome{fx.name, string(phaseReport), string(transition.EndingSuccess)}
+		job := start()
+		Expect(collectedOutcomes()).To(HaveKeyWithValue(ending, float64(0)),
+			"the ending has to be reported before it happens, or nothing can see it rise")
+
+		podOf(job, "", terminated(agentName, "ok\nnothing to report"))
+		finish(job, "")
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(phaseReport))
+		Expect(collectedOutcomes()).To(HaveKeyWithValue(ending, float64(1)),
+			"the ending must count on the series that was already there")
+	})
+
 	It("moves along the declared edge when exactly one container names a directory", func() {
 		fx.makeFlow()
 		fx.makeHandler()

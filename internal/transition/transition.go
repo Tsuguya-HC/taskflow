@@ -24,6 +24,8 @@ limitations under the License.
 package transition
 
 import (
+	"slices"
+
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 )
 
@@ -321,4 +323,68 @@ func IsTerminal(bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding, phase
 	}
 	_, bound := bindings[phase]
 	return !bound
+}
+
+// PhaseEnding pairs a place a task can stop with what stopping there means.
+type PhaseEnding struct {
+	Phase  flowv1alpha1.Phase
+	Ending Ending
+}
+
+// DeclaredEndings lists every place a task of this flow can stop, paired with
+// what stopping there means, in a stable order.
+//
+// It exists so the endings a flow declares can be reported before any task has
+// reached one. A counter's child series is born at its first increment, with
+// no zero sample before it, and a range function needs two samples to see a
+// rise — so an ending that happens once, long after the process started, rises
+// from nothing and is invisible to increase() (ADR-0010). The endings that
+// matter most here are exactly the rare ones, so the flow has to say they
+// exist before they do.
+//
+// The stopping places are the destinations no binding claims: every next a
+// binding names, minus the phases that are themselves bound. The framework's
+// own two are always among them whether or not a flow names them — Escalated
+// can happen to any flow that cannot read an answer, and Failed to any flow
+// that turns out to be broken — so they are added rather than discovered.
+//
+// Each phase appears once, with the single ending it means. severity is not a
+// dimension a phase varies over: EndingOf reads it from the flow's own
+// terminals declaration, so a phase has one meaning and the pairs are a list,
+// never the product of the two labels.
+func DeclaredEndings(spec *flowv1alpha1.TaskFlowSpec) []PhaseEnding {
+	if spec == nil {
+		return nil
+	}
+
+	seen := make(map[flowv1alpha1.Phase]bool, len(spec.Bindings))
+	phases := make([]flowv1alpha1.Phase, 0, len(spec.Bindings))
+	for _, binding := range spec.Bindings {
+		for dest := range binding.Next {
+			if !IsTerminal(spec.Bindings, dest) || seen[dest] {
+				continue
+			}
+			seen[dest] = true
+			phases = append(phases, dest)
+		}
+	}
+	for _, reserved := range flowv1alpha1.ReservedPhases {
+		if !seen[reserved] {
+			seen[reserved] = true
+			phases = append(phases, reserved)
+		}
+	}
+	sortPhases(phases)
+
+	endings := make([]PhaseEnding, 0, len(phases))
+	for _, phase := range phases {
+		endings = append(endings, PhaseEnding{Phase: phase, Ending: EndingOf(spec, phase)})
+	}
+	return endings
+}
+
+// sortPhases keeps DeclaredEndings' order independent of the map hash seed, so
+// two identical flows prime the same series in the same order every time.
+func sortPhases(phases []flowv1alpha1.Phase) {
+	slices.Sort(phases)
 }
