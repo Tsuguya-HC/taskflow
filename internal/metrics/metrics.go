@@ -40,6 +40,7 @@ const (
 	LabelFlow     = "flow"
 	LabelPhase    = "phase"
 	LabelSeverity = "severity"
+	LabelOutcome  = "outcome"
 )
 
 // TaskOutcomes counts tasks by how they ended.
@@ -69,6 +70,27 @@ var TaskOutcomes = prometheus.NewCounterVec(
 	[]string{LabelFlow, LabelPhase, LabelSeverity},
 )
 
+// FinallyOutcomes counts the cleanup runs that follow an ending, by whether
+// they said the task was cleaned up.
+//
+// It is a metric of its own rather than another severity on TaskOutcomes,
+// because a cleanup that failed does not change how the task ended: the same
+// task is counted once there for the conclusion its work reached, and once
+// here for whether the tidying up happened. Folding the two would make the
+// first number wrong, which is the mistake this design is trying not to
+// inherit (ADR-0009).
+//
+// outcome is the framework's own account of the run — Declared for one that
+// wrote the directory it was given, NoAnswer for one that did not — so like
+// every label here its cardinality is fixed by the code, not by a task.
+var FinallyOutcomes = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "taskflow_finally_outcomes_total",
+		Help: "Cleanup runs that followed an ending, by whether they reported the task cleaned up.",
+	},
+	[]string{LabelFlow, LabelOutcome},
+)
+
 func init() {
-	metrics.Registry.MustRegister(TaskOutcomes)
+	metrics.Registry.MustRegister(TaskOutcomes, FinallyOutcomes)
 }

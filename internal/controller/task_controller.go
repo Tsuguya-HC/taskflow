@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -118,7 +119,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// so without this it would sit forever. Backfilling means fetching
 		// the flow this once, ahead of where it is normally resolved; a
 		// flow already gone leaves nothing to read a ttl from, the same as
-		// the nil ttl fail() gets when there is no flow at all.
+		// the nil ttl fail() gets when there is no flow at all — and nothing
+		// to read a cleanup run's declaration from either, which is why a
+		// task owed one never gets it once its flow is gone.
 		var flow flowv1alpha1.TaskFlow
 		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -126,7 +129,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, r.backfillExpiry(ctx, &task, &flow.Spec)
+		return r.terminal(ctx, &task, &flow)
 	}
 
 	// A flow is always resolved in the task's own namespace. There is no field
@@ -145,22 +148,23 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, r.begin(ctx, &task, &flow)
 	}
 	// A phase with no binding is terminal (§5 "束縛の無いステータスが終端") — but
-	// which of two things happened is not the same call. CurrentRun tells them
-	// apart: begin and Advance never set it without first confirming a
-	// binding, so it is nil exactly when the phase was terminal on arrival,
-	// and still set only when a run was in flight and the flow was edited out
-	// from under it. The latter is a structural fault (§5 "実行時の矛盾は修復せ
-	// ず Failed"), not a quiet finish, so it must not be indistinguishable
-	// from success.
+	// which of three things happened is not the same call. CurrentRun tells
+	// them apart: begin and Advance never set it to a phase without first
+	// confirming a binding, so a ref naming anything but the cleanup run means
+	// a run was in flight and the flow was edited out from under it. That is a
+	// structural fault (§5 "実行時の矛盾は修復せず Failed"), not a quiet finish,
+	// so it must not be indistinguishable from success. A ref naming the
+	// cleanup run is the one legitimate way a stopped task still has one
+	// (ADR-0009), and no ref at all means the task was terminal on arrival.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
-		if task.Status.CurrentRun != nil {
+		if task.Status.CurrentRun != nil && !taskstate.InFinally(&task.Status) {
 			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
 				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
 		}
-		// Same backfill as the reserved-phase branch above, for a task that
-		// reached a flow-declared terminal phase before expiresAt existed.
-		// The flow is already in hand here, so nothing extra needs fetching.
-		return ctrl.Result{}, r.backfillExpiry(ctx, &task, &flow.Spec)
+		// Same handling as the reserved-phase branch above, for a task that
+		// stopped at a phase the flow itself leaves unbound. The flow is
+		// already in hand here, so nothing extra needs fetching.
+		return r.terminal(ctx, &task, &flow)
 	}
 
 	run := task.Status.CurrentRun
@@ -171,13 +175,57 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// writes. Pick it up rather than stalling.
 		run = &flowv1alpha1.RunRef{Phase: task.Status.Phase, RunID: task.Status.RunID}
 	}
+	return r.driveRun(ctx, &task, &flow, run, recovering)
+}
+
+// terminal is a task that has stopped. At most one thing is left to do: the
+// cleanup run its flow declared, if the task is owed one and has not had it
+// yet, and otherwise only the deletion date — which a task that was never owed
+// a cleanup already has, so for most stopped tasks this reconcile writes
+// nothing at all.
+//
+// Whether a cleanup is owed is read off the task, not off the flow: stop wrote
+// the ref when the ending was decided, so a flow that says finally today
+// reaches the tasks it starts tomorrow and leaves the ones that already
+// stopped alone (ADR-0009 決定7).
+func (r *TaskReconciler) terminal(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+) (ctrl.Result, error) {
+	if taskstate.InFinally(&task.Status) {
+		return r.driveRun(ctx, task, flow, task.Status.CurrentRun, false)
+	}
+	return ctrl.Result{}, r.backfillExpiry(ctx, task, &flow.Spec)
+}
+
+// driveRun takes the run in flight as far as this reconcile can: it makes sure
+// the Job exists, then either waits, rules on a deadline, retries an attempt
+// that never started, or reads the answer and settles.
+//
+// It is the same sequence for every run, the cleanup one included — a run is a
+// Job with a vocabulary in front of it, and the framework has one way of
+// watching that happen. What differs is only where the vocabulary came from
+// and what settling means, and both of those are answered by the run's phase
+// (runSpec, settleRun), not by a second copy of this loop.
+//
+// recovering says the ref was rebuilt here rather than read from status, so it
+// must be persisted even if ensureJob found nothing new to add to it.
+func (r *TaskReconciler) driveRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	recovering bool,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 	prior := run.DeepCopy()
 
-	job, err := r.ensureJob(ctx, &task, &flow, run)
+	job, err := r.ensureJob(ctx, task, flow, run)
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, broken.reason)
+			return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, broken.reason)
 		}
 		return ctrl.Result{}, err
 	}
@@ -188,7 +236,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// name, and its deadline read, without recomputing either.
 	if recovering || !equality.Semantic.DeepEqual(run, prior) {
 		task.Status.CurrentRun = run
-		if err := r.Status().Update(ctx, &task); err != nil {
+		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -209,7 +257,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			log.V(1).Info("run in flight", "phase", run.Phase, "runID", run.RunID, "job", job.Name, "deadlineIn", remaining)
 			return ctrl.Result{RequeueAfter: remaining}, nil
 		}
-		return ctrl.Result{}, r.settle(ctx, &task, &flow, run, nil, timedOut(job))
+		return ctrl.Result{}, r.settleRun(ctx, task, flow, run, nil, timedOut(job))
 	}
 
 	var pods corev1.PodList
@@ -223,17 +271,84 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// A run cut short may well have written a directory before it was
 		// killed, but a directory written on the way out is not a conclusion.
 		// Whatever it says, the answer is that it did not finish.
-		return ctrl.Result{}, r.settle(ctx, &task, &flow, run, nil, timedOut(job))
+		return ctrl.Result{}, r.settleRun(ctx, task, flow, run, nil, timedOut(job))
 	case failure != "" && !collect.Ran(pods.Items):
 		// The handler never got to run — nothing pulled, nothing scheduled.
 		// That is the one kind of failure the controller retries on its own,
 		// under the same runID: nothing was decided, so no run was spent
 		// (ADR-0004). Whatever the attempt left behind is prepare's to clear.
-		return ctrl.Result{}, r.retryInfra(ctx, &task, &flow, run, failure)
+		return ctrl.Result{}, r.retryInfra(ctx, task, flow, run, failure)
 	}
 
-	answer := collect.FromPods(pods.Items, transition.Directories(flow.Spec.Bindings, run.Phase))
-	return ctrl.Result{}, r.settle(ctx, &task, &flow, run, &answer, "")
+	_, directories, ok := runSpec(&flow.Spec, run.Phase)
+	if !ok {
+		// What the run was started from is gone: a phase's binding, or
+		// spec.finally, edited away while it ran. There is nothing left to read
+		// its answer against, so it is settled as the fault it is rather than
+		// judged against a vocabulary reconstructed here.
+		return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
+			"flow %q no longer says what run %d of %q may answer with", flow.Name, run.RunID, run.Phase))
+	}
+	answer := collect.FromPods(pods.Items, directories)
+	return ctrl.Result{}, r.settleRun(ctx, task, flow, run, &answer, "")
+}
+
+// runSpec says who fills a run and which directories it may answer with. Both
+// come from where the run's phase came from: a phase the flow binds, or
+// spec.finally for the cleanup run that follows the ending. It is the only
+// place either is looked up, which is what keeps Finally — a name no binding
+// may use — from being searched for among the bindings.
+func runSpec(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) (handler string, directories []string, ok bool) {
+	if phase.IsFinally() {
+		if flow.Finally == nil {
+			return "", nil, false
+		}
+		return flow.Finally.Handler, []string{flow.Finally.Done}, true
+	}
+	binding, bound := flow.Bindings[phase]
+	if !bound {
+		return "", nil, false
+	}
+	return binding.Handler, transition.Directories(flow.Bindings, phase), true
+}
+
+// settleRun writes down a finished run. Which of the two ways depends on what
+// the run was: a phase's run is settled by the flow's own table, and the
+// cleanup run has no table to consult — it is recorded, and the ending it
+// followed stays where it was.
+func (r *TaskReconciler) settleRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	answer *collect.Answer,
+	noAnswer string,
+) error {
+	if run.Phase.IsFinally() {
+		return r.settleFinally(ctx, task, flow, run, answer, noAnswer)
+	}
+	return r.settle(ctx, task, flow, run, answer, noAnswer)
+}
+
+// brokeDuringRun is what a broken definition does to the run that found it.
+//
+// For a phase's run the task is Failed: the fault is in the flow, no verdict
+// from it can be trusted, and nothing is repaired (§5). For the cleanup run it
+// is not, because the ending is already decided and a decided ending does not
+// move (ADR-0009 決定2) — the same fault is recorded as a cleanup that did not
+// happen, which is exactly what it is, and the task waits for a human with the
+// reason on it.
+func (r *TaskReconciler) brokeDuringRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	reason string,
+) error {
+	if run.Phase.IsFinally() {
+		return r.settleFinally(ctx, task, flow, run, nil, reason)
+	}
+	return r.fail(ctx, task, &flow.Spec, reason)
 }
 
 // deadlineGrace is how long past a run's deadline the controller waits for the
@@ -379,6 +494,69 @@ func (r *TaskReconciler) announce(
 		"Task ended at %s, which flow %s declares a failure: %s", phase, task.Spec.Flow, detail)
 }
 
+// settleFinally records the cleanup run. Nothing moves: the task stopped
+// before this run started, and where it stopped is not this run's to revise
+// (ADR-0009 決定2). There is no transition to consult and no next run to start,
+// so this is where the task is finished for good — the date it will be deleted
+// on goes on here, and until now it had none.
+//
+// answer is nil when the run is being ruled on without being read — a timeout,
+// an attempt that never started, a declaration that went missing — and
+// noAnswer then says which. Either way "it did not say it was done" is one
+// state, not several: the directory is empty and the reason carries the detail.
+func (r *TaskReconciler) settleFinally(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	answer *collect.Answer,
+	noAnswer string,
+) error {
+	directory, outcome, detail := "", transition.OutcomeNoAnswer, noAnswer
+	if answer != nil {
+		detail = answer.Reason
+		if answer.Directory != "" {
+			directory, outcome = answer.Directory, transition.OutcomeDeclared
+		}
+	}
+
+	logf.FromContext(ctx).Info("cleanup finished",
+		"phase", task.Status.Phase, "runID", run.RunID, "directory", directory, "outcome", outcome)
+	now := metav1.NewTime(r.now())
+	taskstate.FinishFinally(&task.Status, &flow.Spec, directory, outcome, detail, now)
+	if err := r.Status().Update(ctx, task); err != nil {
+		return err
+	}
+	r.announceCleanup(task, outcome, detail)
+	return nil
+}
+
+// announceCleanup says what the cleanup run came to, to the two audiences that
+// do not read status. Both are told either way, because a count of cleanups
+// that only rises when they fail cannot be read as a rate.
+//
+// It is a metric of its own and not another severity on the task's, for the
+// reason the whole decision turns on: how a task ended and whether it was
+// tidied up afterwards are two facts, and a task whose cleanup failed is not a
+// task that ended badly. The Event is only for the failure — a cleanup that
+// worked is not news, and nothing else would say out loud that one did not.
+//
+// Ordering and its cost are the same as announce's: after the status write, so
+// a retried write cannot count twice, at the price of losing the signal (never
+// the record) to a crash in between.
+func (r *TaskReconciler) announceCleanup(task *flowv1alpha1.Task, outcome transition.Outcome, detail string) {
+	metrics.FinallyOutcomes.With(prometheus.Labels{
+		metrics.LabelFlow: task.Spec.Flow, metrics.LabelOutcome: string(outcome),
+	}).Inc()
+
+	if outcome == transition.OutcomeDeclared || r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, taskstate.ReasonFinallyFailed, actionFinishing,
+		"Task ended at %s, but the cleanup run of flow %s did not report it cleaned up: %s",
+		task.Status.Phase, task.Spec.Flow, detail)
+}
+
 // retryInfra re-runs a phase the handler never got to run, or escalates when
 // the handler's retry allowance is spent. The handler is fetched here rather
 // than carried from ensureJob because only this path needs it, and its
@@ -390,18 +568,22 @@ func (r *TaskReconciler) retryInfra(
 	run *flowv1alpha1.RunRef,
 	failure string,
 ) error {
-	binding := flow.Spec.Bindings[run.Phase]
-	handler, err := r.handlerFor(ctx, task, binding, run.Phase)
+	handlerName, _, ok := runSpec(&flow.Spec, run.Phase)
+	if !ok {
+		return r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
+			"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase))
+	}
+	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return r.fail(ctx, task, &flow.Spec, broken.reason)
+			return r.brokeDuringRun(ctx, task, flow, run, broken.reason)
 		}
 		return err
 	}
 
 	if taskstate.InfraRetriesExhausted(&task.Status, handler.Spec.MaxInfraRetries) {
-		return r.settle(ctx, task, flow, run, nil, fmt.Sprintf(
+		return r.settleRun(ctx, task, flow, run, nil, fmt.Sprintf(
 			"the run never started (%s) and %d infrastructure retries were spent",
 			failure, run.InfraRetries))
 	}
@@ -412,20 +594,20 @@ func (r *TaskReconciler) retryInfra(
 	return r.Status().Update(ctx, task)
 }
 
-// handlerFor fetches the handler a binding names. Its disappearing is a
-// broken flow rather than a transient fault, reported through brokenFlow so
-// every caller turns it into a Failed the same way instead of each
-// remembering the NotFound check itself.
+// handlerFor fetches the handler the flow named for this run. Its
+// disappearing is a broken flow rather than a transient fault, reported
+// through brokenFlow so every caller turns it into the same thing instead of
+// each remembering the NotFound check itself.
 func (r *TaskReconciler) handlerFor(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
-	binding flowv1alpha1.PhaseBinding,
+	name string,
 	phase flowv1alpha1.Phase,
 ) (*flowv1alpha1.TaskHandler, error) {
 	var handler flowv1alpha1.TaskHandler
-	if err := r.Get(ctx, types.NamespacedName{Name: binding.Handler, Namespace: task.Namespace}, &handler); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &handler); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, brokenFlow{fmt.Sprintf("phase %q names handler %q, which does not exist", phase, binding.Handler)}
+			return nil, brokenFlow{fmt.Sprintf("phase %q names handler %q, which does not exist", phase, name)}
 		}
 		return nil, err
 	}
@@ -466,8 +648,11 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow
 	// that phase is Failed, Escalated, or one the flow itself declared
 	// terminal. Leaving it alone here, not just for Failed specifically, is
 	// what keeps a deleted or renamed flow from overwriting a finished task's
-	// audit trail.
-	if task.Status.Phase != "" && task.Status.CurrentRun == nil {
+	// audit trail. A task waiting on its cleanup run has stopped just as
+	// surely — the ending is already decided — so it is left alone too, and a
+	// flow deleted while that run was owed cannot turn a task that finished
+	// into one that failed.
+	if task.Status.Phase != "" && (task.Status.CurrentRun == nil || taskstate.InFinally(&task.Status)) {
 		return nil
 	}
 	taskstate.Fail(&task.Status, reason, flow, metav1.NewTime(r.now()))
@@ -547,10 +732,17 @@ func (r *TaskReconciler) ensureJob(
 
 	// Reconcile only ever calls this with a phase it already confirmed is
 	// bound — an unbound current phase is either a quiet finish or, with a
-	// run in flight, a Failed of its own, and neither reaches here.
-	binding := flow.Spec.Bindings[run.Phase]
+	// run in flight, a Failed of its own, and neither reaches here — or with
+	// the cleanup run, which terminal reaches only for a task whose status
+	// says one is owed. Either declaration can still have been edited away
+	// between that check and this lookup, which is what !ok is.
+	handlerName, directories, ok := runSpec(&flow.Spec, run.Phase)
+	if !ok {
+		return nil, brokenFlow{fmt.Sprintf(
+			"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase)}
+	}
 
-	handler, err := r.handlerFor(ctx, task, binding, run.Phase)
+	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
 	if err != nil {
 		return nil, err
 	}
@@ -567,7 +759,8 @@ func (r *TaskReconciler) ensureJob(
 		RunID:        run.RunID,
 		Attempt:      run.InfraRetries,
 		PrevRunID:    previousRun(task),
-		Directories:  transition.Directories(flow.Spec.Bindings, run.Phase),
+		Directories:  directories,
+		Ending:       endingFor(task, &flow.Spec, run),
 		SidecarImage: r.SidecarImage,
 		WorkspacePVC: workspacePVC,
 		SweepRuns:    sweepRuns(run.RunID),
@@ -711,6 +904,50 @@ func ownerSummary(refs []metav1.OwnerReference) string {
 		parts[i] = fmt.Sprintf("%s/%s (uid %s)", ref.Kind, ref.Name, ref.UID)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// endingFor is what the cleanup run is told about the ending it follows, and
+// nil for every other run — a phase's run has no ending yet to be told about.
+//
+// Meaning is read from flow as it stands at dispatch time, the same as the
+// Job's template or image: it is not pinned to whatever flow looked like when
+// the task reached its ending. What is pinned from that earlier moment —
+// status.phase, the Ready condition's reason, the Event, the metric sample —
+// was already written then and is not rewritten here or by anything that
+// reads this. Which ttl the cleanup run earns follows the same rule in the
+// other direction: taskstate.FinishFinally reads the Ready condition already
+// recorded rather than re-deriving it from flow at settle time, for the same
+// reason terminals here are not the last word on an ending already reached.
+//
+// The outcome is looked up by run number rather than read off the end of
+// history, because the two differ exactly where it matters. A flow broken
+// before its run could settle appends nothing, so history's last line is then
+// some earlier run's verdict: true of that run, and not of this ending.
+// Reporting nothing is the honest answer there (P8).
+func endingFor(
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlowSpec,
+	run *flowv1alpha1.RunRef,
+) *runner.Ending {
+	if !run.Phase.IsFinally() {
+		return nil
+	}
+	return &runner.Ending{
+		Meaning: string(transition.EndingOf(flow, task.Status.Phase)),
+		Phase:   task.Status.Phase,
+		Outcome: outcomeOf(task, run.RunID-1),
+	}
+}
+
+// outcomeOf is what was recorded for one run of this task, and empty when that
+// run left no record — it never settled, or never started at all.
+func outcomeOf(task *flowv1alpha1.Task, runID int32) string {
+	for _, h := range slices.Backward(task.Status.History) {
+		if h.RunID == runID {
+			return h.Outcome
+		}
+	}
+	return ""
 }
 
 // previousRun is the run before the one in flight, or 0 on the first attempt.

@@ -97,6 +97,34 @@ spec:
                 description: Bindings is keyed by phase name.
                 minProperties: 1
                 type: object
+              finally:
+                description: |-
+                  Finally is the one handler that runs after a task of this flow has
+                  reached its ending, once, whatever that ending was. Adding it changes
+                  what happens to tasks created afterwards; a task already stopped keeps
+                  the ending it stopped at and is never handed a cleanup run, the same way
+                  its deletion date is never recomputed.
+                properties:
+                  done:
+                    description: |-
+                      Done is the directory this run writes into to say the task is cleaned
+                      up. One directory, not the map a binding carries: the several a phase
+                      declares are there to choose an edge, and this run has none to choose
+                      between. The framework wants one bit from it — did it say it was done —
+                      and a second directory for "could not" would buy a line of history at
+                      the price of two ways to be unfinished.
+                    minLength: 1
+                    type: string
+                  handler:
+                    description: |-
+                      Handler names a TaskHandler in the same namespace, resolved the same way
+                      a binding's is and with the same absence of a check that it exists yet.
+                    minLength: 1
+                    type: string
+                required:
+                - done
+                - handler
+                type: object
               maxInFlight:
                 description: MaxInFlight caps concurrent tasks of this flow.
                 format: int32

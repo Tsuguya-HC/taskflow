@@ -45,11 +45,13 @@ const (
 
 // What the broken flows below are made of: a handler nobody wrote, a
 // directory declared to reach Failed, and a name that is a path rather than
-// a path element.
+// a path element. handlerCleanup is the one a flow names for the run that
+// follows the ending, which is a handler like any other.
 const (
-	handlerNobody = "nobody"
-	dirBroken     = "broken"
-	dirNested     = "nested/sent"
+	handlerNobody  = "nobody"
+	handlerCleanup = "cleanup"
+	dirBroken      = "broken"
+	dirNested      = "nested/sent"
 )
 
 // The field 報告's edge to おわり is reported under, and the reason a name
@@ -109,6 +111,18 @@ func TestAcceptsADeclaredEdgeToEscalated(t *testing.T) {
 	}
 }
 
+// A cleanup run is not a phase: it is not reached by an edge, nothing leads
+// out of it, and the graph checks above have nothing to say about it. All this
+// has to judge is the one directory it answers with, by the same rule an
+// edge's directory is judged by.
+func TestAcceptsACleanupRun(t *testing.T) {
+	spec := sampleFlow()
+	spec.Finally = &flowv1alpha1.FinallySpec{Handler: handlerCleanup, Done: "cleaned"}
+	if got := check(spec); len(got) != 0 {
+		t.Fatalf("a flow with a cleanup run was refused: %v", got)
+	}
+}
+
 // Two endings, one of them the flow's own bad news. Both are phases nothing
 // binds, and declaring what they mean is terminals' business, not this one's.
 func TestAcceptsSeveralEndings(t *testing.T) {
@@ -163,6 +177,41 @@ func TestRefuses(t *testing.T) {
 			},
 			field:   `spec.bindings[Failed]`,
 			mention: "framework's own answers",
+		},
+		{
+			name: "Finally bound to a handler",
+			break_: func(s *flowv1alpha1.TaskFlowSpec) {
+				s.Bindings[flowv1alpha1.PhaseFinally] = flowv1alpha1.PhaseBinding{
+					Handler: handlerCleanup,
+					Next:    map[flowv1alpha1.Phase]string{phaseDone: "cleaned"},
+				}
+			},
+			field:   `spec.bindings[Finally]`,
+			mention: "spec.finally",
+		},
+		{
+			name: "an edge to Finally",
+			break_: func(s *flowv1alpha1.TaskFlowSpec) {
+				s.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFinally] = dirBroken
+			},
+			field:   `spec.bindings[調査].next[Finally]`,
+			mention: "follows the ending",
+		},
+		{
+			name: "a cleanup run answering into a path rather than a name",
+			break_: func(s *flowv1alpha1.TaskFlowSpec) {
+				s.Finally = &flowv1alpha1.FinallySpec{Handler: handlerCleanup, Done: dirNested}
+			},
+			field:   "spec.finally.done",
+			mention: notAPathElement,
+		},
+		{
+			name: "a cleanup run answering into the pod's mark",
+			break_: func(s *flowv1alpha1.TaskFlowSpec) {
+				s.Finally = &flowv1alpha1.FinallySpec{Handler: handlerCleanup, Done: contract.MarkName}
+			},
+			field:   "spec.finally.done",
+			mention: "reserved for the pod's mark",
 		},
 		{
 			name: "a binding under no name at all",

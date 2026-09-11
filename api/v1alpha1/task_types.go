@@ -63,8 +63,13 @@ type TaskSpec struct {
 // an infrastructure retry comes back with the same number (ADR-0004), and
 // infraRetries is what tells those apart.
 //
-// A task's currentRun, when it has one, always names the phase the task is
-// on. A task that has stopped has no currentRun at all.
+// A task's currentRun, when it has one, ordinarily names the phase the task
+// is on. The one exception is the cleanup run a task that has reached its
+// ending may carry: there, currentRun.phase is the reserved name Finally
+// while status.phase stays at the ending itself (ADR-0009), and
+// taskstate.InFinally is the predicate that tells that apart from a task
+// mid-flight. A task that has stopped for good, with no cleanup run in
+// flight or owed, has no currentRun at all.
 type RunRef struct {
 	Phase Phase `json:"phase"`
 	RunID int32 `json:"runID"`

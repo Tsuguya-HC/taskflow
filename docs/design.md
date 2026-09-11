@@ -182,13 +182,7 @@ spec:
   reworkBudget: 2
   maxInFlight: 2              # この flow の同時実行数上限
   ttl: {succeeded: 1h, failed: 168h}
-```
-
-> **スケッチ（未実装）**: `finally`。終端の後に 1 回だけ走る。終端は変えない（§5、ADR-0009）
-
-```yaml sketch
-spec:
-  finally:
+  finally:                    # 任意。終端の後に 1 回だけ走る。終端は変えない（§5、ADR-0009）
     handler: cleanup-handler
     done: ok                  # ここに書けば片付いた
 ```
@@ -676,16 +670,14 @@ Step 0 の試作は通知サイドカーが自前で判定していたが、そ�
 **循環するのが本質。** DAG は非巡回なので差し戻しが表現できない。
 これがコントローラを書く最大の理由。
 
-### 終端の後に 1 回だけ走る `finally`（[ADR-0009](adr/0009-finally-after-the-ending.md)、未実装）
-
-> **スケッチ（未実装）**: この節は ADR-0009 の決定。CRD にはまだ無い。
+### 終端の後に 1 回だけ走る `finally`（[ADR-0009](adr/0009-finally-after-the-ending.md)、実装済み）
 
 `Escalated` / `Failed` には handler を束縛できないので、時間切れや NoAnswer で止まった Task の後に
 片付けも報告も走らない。Task の外に作った物（PR のコメント、ブランチ、投稿）を消せるのは task-uid と
 workspace が生きている間だけで、別の Task で追いかける形では workspace に触れない。だから flow が
 **終端の後に 1 回だけ走る handler** を宣言できる:
 
-```yaml sketch
+```yaml
 finally:
   handler: cleanup
   done: ok            # ここに書けば片付いた。ディレクトリはこれ 1 つ（遷移が無いので選ぶものが無い）
@@ -707,8 +699,11 @@ finally:
   handler が解決できない）は `Ready=False`（reason `FinallyFailed`）と Warning Event と finally 専用の
   metric で声を出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない
 - **受け取るもの**: 終端の意味（5 値）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ
-  経路で値として差し込む。run が一度も決着せずに `Failed` に着いた場合、outcome は空で渡す
-  （推測で埋めない）
+  経路で値として差し込む（`FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME`。finally の run
+  にだけ付く。`FLOW_PHASE` は他の run と同じく「この run が何か」= `Finally` を言う）。run が一度も
+  決着せずに `Failed` に着いた場合、outcome は空で渡す（推測で埋めない）。**3 値は dispatch 時点の
+  flow から読む**（Job の template と同じ扱い）。封印されるのは既に書かれたものだけで、TTL の選択も
+  記録済みの `Ready` condition から決める（終端到達後の flow を読み直さない）
 - **走らない場面**は ADR-0009 の表が正。Task の削除では走らない（削除時の後始末は `metadata.finalizers` で
   なく §10 の sweep）、flow が読めずに `Failed` に着いたときも走らない、flow が壊れて `Failed` に着いた
   ときは走る
@@ -798,7 +793,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない | webhook（`contract.CheckDirectoryName`。sidecar も同じ関数で再検査する） |
 | ディレクトリ名が `.prepared-by` | 予約語。prepare が Pod マークを置く場所（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)） | 同上 |
 | `bindings` のキーが `Escalated` / `Failed` | 予約語。「答えが無い」が成功経路の 1 行隣にあってはならない | webhook |
-| `bindings` のキーが `Finally`、または `next` の行き先が `Finally` | 予約語。片付けの run 名を、束縛できるフェーズや遷移の行き先に使わせない | webhook（未実装、ADR-0009） |
+| `bindings` のキーが `Finally`、または `next` の行き先が `Finally` | 予約語。片付けの run 名を、束縛できるフェーズや遷移の行き先に使わせない | webhook（ADR-0009） |
 | フェーズ名が空（`bindings` のキー、`next` の行き先） | 名前の無いフェーズは終端として素通りする。`spec.start` は `MinLength=1` で弾けるが、map のキーはスキーマで縛れない | webhook |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え | **入れない**。TaskFlow の admission が別オブジェクトの存在に依存してはいけない — handler が後から届く適用順で詰む（ADR-0006 決定4）。実行時の `brokenFlow` → `Failed` のまま |
 | 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない | webhook |
@@ -1077,6 +1072,10 @@ sidecar イメージを再ビルドしなくて済む。
 |---|---|---|
 | `<path>/<宣言されたディレクトリ>` | エージェントが書ける | この run の結果（`/work/ok`, `/work/more` …） |
 | `<path>/results/<runID>/<name>` | 読み取り専用 | 過去の全 run |
+
+flow が `finally` を持つ場合、この棚の最後の番号は cleanup run のもので、どのフェーズの成果物でも
+ない。同じ規則で棚に入るが、読む後続 run が無いので、そこにあるのは検死のための記録であって
+引き渡しではない（[ADR-0009](adr/0009-finally-after-the-ending.md)）。
 
 **基点を `TaskFlow` ではなく `TaskHandler` に置く。** マウントパスは Pod の形であり
 （§2 の責務表では handler の作者のもの）、handler は複数の flow で使い回せる。
@@ -1495,9 +1494,11 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
   掃除の正しさを finalizer に賭けると、外部 API が 500 を返しているだけで object が
   永久に Terminating で刺さる
 
-> **スケッチ（未実装）**: flow が `finally` を持つ場合の `status.expiresAt`。焼くのは finally の
-> run が決着した瞬間で、走っている finally の足元から Task を消さない。finally が片付いたと
-> 言わなかった Task は `ttl.failed` を取る（ADR-0009）
+- flow が `finally` を持つ Task は、**終端到達では焼かない**（`Advance` / `Fail` のどちらの経路でも）。
+  焼くのは finally の run が決着した瞬間で、走っている finally の足元から Task を消さない。
+  finally が片付いたと言わなかった Task は `ttl.failed` を取る（[ADR-0009](adr/0009-finally-after-the-ending.md)）。
+  一度焼いた日付は動かさないという規則はそのまま — だから終端で焼かないことが、finally の分だけ
+  待てる唯一の方法になる
 
 ---
 
