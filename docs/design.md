@@ -184,6 +184,15 @@ spec:
   ttl: {succeeded: 1h, failed: 168h}
 ```
 
+> **スケッチ（未実装）**: `finally`。終端の後に 1 回だけ走る。終端は変えない（§5、ADR-0009）
+
+```yaml sketch
+spec:
+  finally:
+    handler: cleanup-handler
+    done: ok                  # ここに書けば片付いた
+```
+
 厳格検証（到達性・必須束縛・予約語）は **TaskFlow の作成時に一度だけ**走る。
 
 ### Task（実体 / namespaced）
@@ -667,6 +676,43 @@ Step 0 の試作は通知サイドカーが自前で判定していたが、そ�
 **循環するのが本質。** DAG は非巡回なので差し戻しが表現できない。
 これがコントローラを書く最大の理由。
 
+### 終端の後に 1 回だけ走る `finally`（[ADR-0009](adr/0009-finally-after-the-ending.md)、未実装）
+
+> **スケッチ（未実装）**: この節は ADR-0009 の決定。CRD にはまだ無い。
+
+`Escalated` / `Failed` には handler を束縛できないので、時間切れや NoAnswer で止まった Task の後に
+片付けも報告も走らない。Task の外に作った物（PR のコメント、ブランチ、投稿）を消せるのは task-uid と
+workspace が生きている間だけで、別の Task で追いかける形では workspace に触れない。だから flow が
+**終端の後に 1 回だけ走る handler** を宣言できる:
+
+```yaml sketch
+finally:
+  handler: cleanup
+  done: ok            # ここに書けば片付いた。ディレクトリはこれ 1 つ（遷移が無いので選ぶものが無い）
+```
+
+- **1 つ、条件無し、`next` 無し。** `bindings` の外に置くので到達性や終端の検査には関わらない。
+  「失敗のときだけ走る」は `when` であり書かせない（P9）。分けたければ `next` で終端を分け、
+  finally の中で終端の意味を読んで振る舞いを変える（それは handler の話）
+- **終端が確定してから走り、終端を変えない。** `status.phase`、`terminals` の severity、上の表の
+  Event / 条件 / metric は、終端に着いた時点のまま封印される。finally の verdict は遷移しない
+- **finally は run。** runID を 1 つ消費し、`history[]` に予約名 `Finally` の 1 行として残る。
+  サイドカーも workspace の run ビューと棚も他の run と同じ（§7）。`Finally` は `bindings` のキーにも
+  `next` の行き先にも使えない
+- **「止まった Task は currentRun を持たない」の例外。** 終端に着いた Task が finally の run を持つ
+  間は `currentRun.phase` が予約名 `Finally` を指す。Reconcile はこれで finally 中を見分け（束縛の
+  有無や `status.phase` では見分けない）、handler は `bindings` でなく `spec.finally` から解決する。
+  起動と決着は `bindings` 経由の遷移を通らない独立した経路（`transition.Next` も `Advance` も通らない）
+- **失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / インフラ再試行の使い切り /
+  handler が解決できない）は `Ready=False`（reason `FinallyFailed`）と Warning Event と finally 専用の
+  metric で声を出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない
+- **受け取るもの**: 終端の意味（5 値）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ
+  経路で値として差し込む。run が一度も決着せずに `Failed` に着いた場合、outcome は空で渡す
+  （推測で埋めない）
+- **走らない場面**は ADR-0009 の表が正。Task の削除では走らない（削除時の後始末は `metadata.finalizers` で
+  なく §10 の sweep）、flow が読めずに `Failed` に着いたときも走らない、flow が壊れて `Failed` に着いた
+  ときは走る
+
 ### 遷移関数
 
 遷移表はコントローラが持たない。**`bindings[phase].next` が辺を宣言し、それが必須。**
@@ -752,6 +798,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | ディレクトリ名がパス要素として不正（`/` や `..` を含む） | 作れない | webhook（`contract.CheckDirectoryName`。sidecar も同じ関数で再検査する） |
 | ディレクトリ名が `.prepared-by` | 予約語。prepare が Pod マークを置く場所（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)） | 同上 |
 | `bindings` のキーが `Escalated` / `Failed` | 予約語。「答えが無い」が成功経路の 1 行隣にあってはならない | webhook |
+| `bindings` のキーが `Finally`、または `next` の行き先が `Finally` | 予約語。片付けの run 名を、束縛できるフェーズや遷移の行き先に使わせない | webhook（未実装、ADR-0009） |
 | フェーズ名が空（`bindings` のキー、`next` の行き先） | 名前の無いフェーズは終端として素通りする。`spec.start` は `MinLength=1` で弾けるが、map のキーはスキーマで縛れない | webhook |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え | **入れない**。TaskFlow の admission が別オブジェクトの存在に依存してはいけない — handler が後から届く適用順で詰む（ADR-0006 決定4）。実行時の `brokenFlow` → `Failed` のまま |
 | 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない | webhook |
@@ -1448,6 +1495,10 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
   掃除の正しさを finalizer に賭けると、外部 API が 500 を返しているだけで object が
   永久に Terminating で刺さる
 
+> **スケッチ（未実装）**: flow が `finally` を持つ場合の `status.expiresAt`。焼くのは finally の
+> run が決着した瞬間で、走っている finally の足元から Task を消さない。finally が片付いたと
+> 言わなかった Task は `ttl.failed` を取る（ADR-0009）
+
 ---
 
 ## 11. 却下した案と理由
@@ -1481,6 +1532,9 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
 | プロンプトから事実の説明を外し、モデルの知識に委ねる | **指示は守るが事実は忘れる。** 検証の要求は毎回守られたのに、微妙な事実の想起は 3 回中 1 回しか当たらなかった。導出できるという仮定が誤り |
 | prepare / publish サイドカーを利用側の pod spec に書かせる | 判定の回収はコントローラの責務（§2）で、両端とも taskflow のコード。片端だけ handler ごとに 30 行複製させていた。P7 が排除するのは LLM 固有の語彙であってサイドカーではない（#73、§7） |
 | 注入コンテナの uid を固定して「その uid を使うな」と handler に課す | Istio 1337 / Linkerd 2102 はそうしていて、同 uid で迂回した事故（linkerd2 #14796）を誰も検出していない。コントローラが template の uid を避けて選べば規則自体が消える |
+| 終端後の片付けを `metadata.finalizers` で削除時に走らせる | 起動条件が DELETE だけで完了では走らず、期限も順序も無く、結果を書く先のオブジェクトごと消える。先行者は期限と opt-out を自前の CRD に足して固着を避けている。片付けは終端の後の run（`finally`）として持ち、削除時の後始末は sweep（ADR-0009） |
+| `finally` の失敗で終端の意味を変える（`Failed` に落とす、severity を上書き） | 結果を 1 値に畳んだ先行者は全員「本体の失敗と片付けの失敗を区別できない」で困っている。ここは書く場所を別に持っているので畳まない。声だけ出す（`Ready=False` / Event / `ttl.failed`） |
+| `finally` に条件を付ける、複数持つ | 条件は `when` であり P9。複数は順序・相互参照・集約の問題を持ち込む。終端を `next` で分けて finally の中で読み分ければ足りる |
 
 ---
 
