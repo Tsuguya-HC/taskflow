@@ -122,21 +122,21 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// the nil ttl fail() gets when there is no flow at all — and nothing
 		// to read a cleanup run's declaration from either, which is why a
 		// task owed one never gets it once its flow is gone.
-		var flow flowv1alpha1.TaskFlow
-		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
+		flow, err := r.resolveFlow(ctx, &task)
+		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, err
 		}
-		return r.terminal(ctx, &task, &flow)
+		return r.terminal(ctx, &task, flow)
 	}
 
 	// A flow is always resolved in the task's own namespace. There is no field
 	// naming another one, which is what reduces "may I start this flow" to
 	// "may I create a Task here" — a question plain RBAC can answer.
-	var flow flowv1alpha1.TaskFlow
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
+	flow, err := r.resolveFlow(ctx, &task)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// The flow was deleted or never existed. Nothing to repair.
 			return ctrl.Result{}, r.fail(ctx, &task, nil, fmt.Sprintf("flow %q does not exist in this namespace", task.Spec.Flow))
@@ -145,7 +145,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	if task.Status.Phase == "" {
-		return ctrl.Result{}, r.begin(ctx, &task, &flow)
+		return ctrl.Result{}, r.begin(ctx, &task, flow)
 	}
 	// A phase with no binding is terminal (§5 "束縛の無いステータスが終端") — but
 	// which of three things happened is not the same call. CurrentRun tells
@@ -164,7 +164,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// Same handling as the reserved-phase branch above, for a task that
 		// stopped at a phase the flow itself leaves unbound. The flow is
 		// already in hand here, so nothing extra needs fetching.
-		return r.terminal(ctx, &task, &flow)
+		return r.terminal(ctx, &task, flow)
 	}
 
 	run := task.Status.CurrentRun
@@ -175,7 +175,27 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// writes. Pick it up rather than stalling.
 		run = &flowv1alpha1.RunRef{Phase: task.Status.Phase, RunID: task.Status.RunID}
 	}
-	return r.driveRun(ctx, &task, &flow, run, recovering)
+	return r.driveRun(ctx, &task, flow, run, recovering)
+}
+
+// resolveFlow is the one route to a task's TaskFlow, and the two must not
+// come apart: a caller that fetched one by any other means would get a flow
+// whose endings were never primed, which is exactly the gap ADR-0010 closed.
+// Folding the Get and the prime into one call is what makes a third call site
+// safe by construction rather than by a comment repeated at each one.
+//
+// A NotFound error is returned as-is rather than interpreted here, because
+// what it means differs by caller: the reserved-phase branch has nothing to
+// repair, the main path fails the task. That decision stays where the two
+// branches already were.
+func (r *TaskReconciler) resolveFlow(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
+	var flow flowv1alpha1.TaskFlow
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
+		return nil, err
+	}
+	// Say what this flow's endings are before any of them happens (ADR-0010).
+	primeFlowMetrics(&flow)
+	return &flow, nil
 }
 
 // terminal is a task that has stopped. At most one thing is left to do: the
@@ -431,6 +451,50 @@ func (r *TaskReconciler) settle(
 	}
 	r.announce(task, &flow.Spec, res.Next, res.Detail)
 	return nil
+}
+
+// The one ending no flow can prime: a task naming a flow that does not exist
+// never resolves one to read endings from. fail() always lands on Failed, so
+// that is the only pairing this case can produce, and it is fixed by the code
+// rather than by anything in git — which is why it belongs here and not in
+// primeFlowMetrics (ADR-0010).
+//
+// It is done as the package loads rather than when a reconciler is built, so
+// that the series is there for the first scrape either way, and so that it is
+// not a claim only a running manager makes.
+func init() {
+	metrics.PrimeOutcome(metrics.FlowUnresolved, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed))
+}
+
+// primeFlowMetrics reports every ending this flow declares at zero, so that
+// the rare one reads as a rise when it finally happens rather than as a
+// series appearing from nowhere (ADR-0010). The name is plural because it
+// crosses two metrics, not one: TaskOutcomes always, and FinallyOutcomes when
+// the flow declares a cleanup run (below) — unlike metrics.PrimeOutcome,
+// which primes exactly the one series it is asked about.
+//
+// It runs on the way past rather than from a watch on TaskFlow, because what
+// has to be true is only that the zero is there before a task of this flow
+// stops — and a task is reconciled on its way to stopping, every time. A watch
+// would learn the same thing no sooner, and nothing else about the controller
+// needs to know the moment a TaskFlow appears.
+//
+// The endings of a flow nobody runs are never primed, which is the bargain
+// this makes: it says what is true of the flows in use, not what is in git.
+//
+// A flow that declares finally has FinallyOutcomes' two cleanup outcomes
+// primed alongside its own endings, for the identical reason: that counter is
+// born at 1 the same way TaskOutcomes is. A flow with no finally can never
+// produce either outcome, so priming them there would claim a cleanup that
+// cannot happen.
+func primeFlowMetrics(flow *flowv1alpha1.TaskFlow) {
+	for _, ending := range transition.DeclaredEndings(&flow.Spec) {
+		metrics.PrimeOutcome(flow.Name, string(ending.Phase), string(ending.Ending))
+	}
+	if flow.Spec.Finally != nil {
+		metrics.PrimeFinallyOutcome(flow.Name, string(transition.OutcomeDeclared))
+		metrics.PrimeFinallyOutcome(flow.Name, string(transition.OutcomeNoAnswer))
+	}
 }
 
 // announce says what a task's ending means to the two audiences that do not

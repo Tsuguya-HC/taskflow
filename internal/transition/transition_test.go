@@ -340,3 +340,96 @@ func TestCycleTerminates(t *testing.T) {
 	}
 	t.Fatal("did not terminate")
 }
+
+// The endings a flow declares have to be nameable before any task reaches
+// one, because the counter that reports them is born at its first increment
+// and a rise from nothing is invisible to a range function (ADR-0010).
+func TestDeclaredEndingsAreTheStoppingPlaces(t *testing.T) {
+	flow := &flowv1alpha1.TaskFlowSpec{
+		Bindings:  sampleFlow(),
+		Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseDone: flowv1alpha1.TerminalSuccess},
+	}
+	want := []PhaseEnding{
+		{Phase: flowv1alpha1.PhaseEscalated, Ending: EndingEscalated},
+		{Phase: flowv1alpha1.PhaseFailed, Ending: EndingFailed},
+		{Phase: phaseDone, Ending: EndingSuccess},
+	}
+	if got := DeclaredEndings(flow); !slices.Equal(got, want) {
+		t.Fatalf("endings = %v, want %v", got, want)
+	}
+}
+
+// A phase still bound to a handler is not a place anything stops, so priming
+// it would claim an ending that cannot happen.
+func TestDeclaredEndingsLeaveOutBoundPhases(t *testing.T) {
+	for _, got := range DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: sampleFlow()}) {
+		if got.Phase == phaseInvestigate || got.Phase == phaseReport {
+			t.Fatalf("%q is bound to a handler and is not an ending", got.Phase)
+		}
+		if got.Ending == EndingRunning {
+			t.Fatalf("%q was listed as an ending that means nothing", got.Phase)
+		}
+	}
+}
+
+// The framework's own two can happen to any flow — Escalated whenever an
+// answer cannot be read, Failed whenever the flow turns out to be broken — so
+// they are reported whether or not the flow names them, and naming one does
+// not report it twice.
+func TestDeclaredEndingsAlwaysIncludeTheReservedTwo(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding
+	}{
+		{"a flow that never mentions them", sampleFlow()},
+		{"a flow that declares an escalate directory", withEscalate()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: tc.bindings})
+			for _, reserved := range flowv1alpha1.ReservedPhases {
+				n := 0
+				for _, e := range got {
+					if e.Phase == reserved {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Fatalf("%q appears %d times in %v, want exactly once", reserved, n, got)
+				}
+			}
+		})
+	}
+}
+
+// Silence stays distinguishable from consent here too: a flow that declared
+// nothing primes its ending as Undeclared rather than as a success waiting to
+// happen (P8).
+func TestDeclaredEndingsKeepUndeclaredUndeclared(t *testing.T) {
+	got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: sampleFlow()})
+	if !slices.Contains(got, PhaseEnding{Phase: phaseDone, Ending: EndingUndeclared}) {
+		t.Fatalf("endings = %v, want おわり reported as Undeclared", got)
+	}
+}
+
+// Ranging a map would make the primed order depend on the hash seed. The
+// series are the same either way, but a test that reads the list must not
+// depend on which run it is.
+func TestDeclaredEndingsAreOrderedTheSameEveryTime(t *testing.T) {
+	first := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: withEscalate()})
+	for range 20 {
+		if got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: withEscalate()}); !slices.Equal(got, first) {
+			t.Fatalf("endings = %v, want the same order as %v", got, first)
+		}
+	}
+	if !slices.IsSortedFunc(first, func(a, b PhaseEnding) int { return strings.Compare(string(a.Phase), string(b.Phase)) }) {
+		t.Fatalf("endings = %v, want them sorted by phase", first)
+	}
+}
+
+// fail() reaches Failed with no flow at all, and asking a nil spec what it
+// declares must not panic on the way there.
+func TestDeclaredEndingsOfNothing(t *testing.T) {
+	if got := DeclaredEndings(nil); got != nil {
+		t.Fatalf("endings = %v, want none for a flow that is not there", got)
+	}
+}

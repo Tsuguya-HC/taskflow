@@ -91,6 +91,34 @@ var FinallyOutcomes = prometheus.NewCounterVec(
 	[]string{LabelFlow, LabelOutcome},
 )
 
+// PrimeOutcome creates the child series for one ending and leaves it at zero,
+// so a later increment reads as a rise rather than as a series appearing from
+// nowhere.
+//
+// A CounterVec's child is born at its first Inc, with no zero sample before
+// it, and a range function given a single sample returns nothing at all — so
+// an ending that happens once is invisible to increase() no matter how long
+// the watcher waits. Calling With and discarding the result is the client
+// library's own way of saying "this exists and has not happened yet"
+// (ADR-0010). It is safe to call again at any time: a child that already
+// exists keeps whatever it has counted.
+//
+// The caller decides which endings exist, because that is a question about
+// flows; this package only knows how to say it.
+func PrimeOutcome(flow, phase, severity string) {
+	TaskOutcomes.With(prometheus.Labels{
+		LabelFlow: flow, LabelPhase: phase, LabelSeverity: severity,
+	})
+}
+
+// PrimeFinallyOutcome does for FinallyOutcomes what PrimeOutcome does for
+// TaskOutcomes, for the same reason (see PrimeOutcome).
+func PrimeFinallyOutcome(flow, outcome string) {
+	FinallyOutcomes.With(prometheus.Labels{
+		LabelFlow: flow, LabelOutcome: outcome,
+	})
+}
+
 func init() {
 	metrics.Registry.MustRegister(TaskOutcomes, FinallyOutcomes)
 }

@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/metrics"
+	"github.com/Tsuguya-HC/taskflow/internal/transition"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -84,6 +86,16 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	// This is the one place a check on init()'s priming can live independent
+	// of Ginkgo's top-level ordering, which is randomized per seed by
+	// default. BeforeSuite always runs first and exactly once, before any
+	// Task exists, so a mutation that empties init() is caught on every seed
+	// rather than only the ones that happen to run this spec before
+	// task_ttl_test.go's own read of the same series (ADR-0010).
+	Expect(collectedOutcomes()).To(HaveKey(outcome{
+		metrics.FlowUnresolved, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed),
+	}), "the unresolved ending must be primed as the package loads, before any Task is reconciled")
 })
 
 var _ = AfterSuite(func() {
