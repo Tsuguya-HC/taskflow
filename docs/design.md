@@ -688,8 +688,7 @@ workspace が生きている間だけで、別の Task で追いかける形で�
 ```yaml sketch
 finally:
   handler: cleanup
-  done: ok            # ここに書けば片付いた
-  declined: failed    # 任意。「片付けられなかった」を理由つきで表明する出口
+  done: ok            # ここに書けば片付いた。ディレクトリはこれ 1 つ（遷移が無いので選ぶものが無い）
 ```
 
 - **1 つ、条件無し、`next` 無し。** `bindings` の外に置くので到達性や終端の検査には関わらない。
@@ -704,7 +703,7 @@ finally:
   間は `currentRun.phase` が予約名 `Finally` を指す。Reconcile はこれで finally 中を見分け（束縛の
   有無や `status.phase` では見分けない）、handler は `bindings` でなく `spec.finally` から解決する。
   起動と決着は `bindings` 経由の遷移を通らない独立した経路（`transition.Next` も `Advance` も通らない）
-- **失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / Declined / インフラ再試行の使い切り /
+- **失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / インフラ再試行の使い切り /
   handler が解決できない）は `Ready=False`（reason `FinallyFailed`）と Warning Event と finally 専用の
   metric で声を出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない
 - **受け取るもの**: 終端の意味（5 値）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ

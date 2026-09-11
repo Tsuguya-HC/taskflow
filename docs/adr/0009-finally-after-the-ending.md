@@ -11,16 +11,22 @@
 **決定**:
 
 1. **`spec.finally` を持つ。1 つ、条件無し、`next` 無し。** handler と、片付いたことを表す
-   ディレクトリ（`done`）、任意で「片付けられなかった」を書いて表明するディレクトリ（`declined`）を
-   宣言する。`bindings` の外に置くので、到達性や終端の検査には関わらない
+   ディレクトリ（`done`）を宣言する。`bindings` の外に置くので、到達性や終端の検査には関わらない
 
    ```yaml
    spec:
      finally:
        handler: cleanup
        done: ok
-       declined: failed     # 任意。書いた run は outcome Declined、理由つき
    ```
+
+   **ディレクトリは 1 つだけ。** 「非空がちょうど 1 つ」の語彙は遷移先を選ぶためのもので、finally には
+   遷移が無い。framework が知りたいのは「片付いたと言ったか」の 1 ビットで、書けば done、書かなければ
+   失敗。「片付けられなかった」を書いて表明する 2 つ目のディレクトリは、history の reason 1 行を
+   買うだけで、片付いていない状態を 2 通りに分けることになる。片付けの失敗理由は finally の Pod の
+   ログにある（Job に TTL は付けないので、Task が消えるまで残り、`task-uid` ラベルで引ける）。
+   ディレクトリで答えるのは handler が script か LLM かを framework が知らない（P7）からで、
+   契約を「finally は exit code」にすると verdict の機構が 2 本になる
 
 2. **終端が確定してから走り、終端を変えない。** `status.phase`、`terminals` の severity、Event、
    metric の severity ラベル、`Ready` の reason は、終端に着いた時点のまま封印される。
@@ -50,9 +56,9 @@
    抜ける前に `currentRun.phase == Finally` を見る。finally の Job は `spec.finally` から組む
    （`bindings` を引かない）。finally の run の決着は **`transition.Next` も `Advance` も通らない** —
    `history[]` への 1 行追記、失敗時の `Ready=False` / Warning Event / finally 専用の metric、
-   `expiresAt` の焼き付け（決定 5）だけを行う。verdict は `done` / `declined` の 2 値で、行き先 phase は
-   存在しない
-4. **finally の失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / Declined / インフラ再試行の
+   `expiresAt` の焼き付け（決定 5）だけを行う。verdict は `done` の 1 値で、行き先 phase は存在しない。
+   finally の verdict は棚（`results/<runID>/`）に置かない — 読む後続 run が無い
+4. **finally の失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / インフラ再試行の
    使い切り / handler が解決できない）は `Ready=False`（reason `FinallyFailed`）、Warning Event、
    finally 専用の metric で声を出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない
 5. **TTL は一度しか焼かない。** `status.expiresAt` は **`Expire` の規則を変えない** — 焼くのは 1 回きりで、
@@ -133,5 +139,3 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
 
 - 決定 4 の TTL（`ttl.failed` に倒す）は、severity のラベルを動かさずに `Ready` と TTL だけ動かせると
   実装で確認できることが前提。できなければ Condition と Event だけにして TTL は触らない
-- finally 自身の verdict ディレクトリを棚に置くか（`results/<runID>/`）。他の run と同じ規則で置くのが
-  既定だが、読む後続 run が無いので要らない可能性がある。実装時に決める
