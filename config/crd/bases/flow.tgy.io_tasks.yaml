@@ -168,8 +168,13 @@ spec:
                   an infrastructure retry comes back with the same number (ADR-0004), and
                   infraRetries is what tells those apart.
 
-                  A task's currentRun, when it has one, always names the phase the task is
-                  on. A task that has stopped has no currentRun at all.
+                  A task's currentRun, when it has one, ordinarily names the phase the task
+                  is on. The one exception is the cleanup run a task that has reached its
+                  ending may carry: there, currentRun.phase is the reserved name Finally
+                  while status.phase stays at the ending itself (ADR-0009), and
+                  taskstate.InFinally is the predicate that tells that apart from a task
+                  mid-flight. A task that has stopped for good, with no cleanup run in
+                  flight or owed, has no currentRun at all.
                 properties:
                   deadline:
                     format: date-time
@@ -193,8 +198,9 @@ spec:
                       flow: this framework does not know what the work is, so it has no business
                       naming its stages. "調査" and "Planning" are equally valid.
 
-                      Two names are reserved, because they are the framework's own answers rather
-                      than anything in the author's domain — see ReservedPhases.
+                      Three names are the framework's rather than the author's. Two of them are
+                      answers it decides — see ReservedPhases — and the third is PhaseFinally,
+                      which is not an answer at all but the name a cleanup run is recorded under.
                     type: string
                   runID:
                     format: int32
@@ -239,8 +245,9 @@ spec:
                         flow: this framework does not know what the work is, so it has no business
                         naming its stages. "調査" and "Planning" are equally valid.
 
-                        Two names are reserved, because they are the framework's own answers rather
-                        than anything in the author's domain — see ReservedPhases.
+                        Three names are the framework's rather than the author's. Two of them are
+                        answers it decides — see ReservedPhases — and the third is PhaseFinally,
+                        which is not an answer at all but the name a cleanup run is recorded under.
                       type: string
                     reason:
                       description: |-
@@ -265,8 +272,9 @@ spec:
                   flow: this framework does not know what the work is, so it has no business
                   naming its stages. "調査" and "Planning" are equally valid.
 
-                  Two names are reserved, because they are the framework's own answers rather
-                  than anything in the author's domain — see ReservedPhases.
+                  Three names are the framework's rather than the author's. Two of them are
+                  answers it decides — see ReservedPhases — and the third is PhaseFinally,
+                  which is not an answer at all but the name a cleanup run is recorded under.
                 type: string
               reworkBudget:
                 description: |-

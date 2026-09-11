@@ -22,23 +22,29 @@ limitations under the License.
 // can be tested without a cluster.
 //
 // This package keeps one invariant on status.currentRun: whenever it is set,
-// it names the phase status.phase also names. Every writer here keeps the two
-// together — Begin and Advance set both at once, RetryInfra rebuilds the ref
-// from status.phase, and a task that has stopped has no ref at all.
-// Reconcile's recovery path, in task_controller.go, is the one writer outside
-// this package, and holds the same rule: finding no currentRun, it rebuilds
-// one from status.phase before persisting it. Nothing reads a flag to know
-// any of this, which is why it is written down here.
+// it names the phase status.phase also names — with one exception, the cleanup
+// run, which is named PhaseFinally while status.phase stays at the ending the
+// task reached (ADR-0009). Every writer here keeps the two together — Begin
+// and Advance set both at once, RetryInfra rebuilds the ref from the run in
+// flight, and a task that has stopped has either no ref at all or the cleanup
+// one — owed the moment stop writes it, before the Job behind it exists.
+// Reconcile's recovery path, in task_controller.go, is the one writer
+// outside this package, and holds the same rule: finding no currentRun, it
+// rebuilds one from status.phase before persisting it. Nothing reads a flag to
+// know any of this, which is why it is written down here.
 //
 // The controller leans on it twice over. It decides a task is terminal by
 // looking up status.phase and then hands currentRun to settle, so the two
-// naming different phases would settle a run against the wrong binding. And
-// it is the reason transition.Next's "phase has no binding" guard cannot be
-// reached in production: Reconcile's check of status.phase is also a check of
-// currentRun.phase. Break the invariant and that guard is what catches it —
-// with less to say than Reconcile's own message, because Reconcile, looking
-// only at status.phase, never saw the mismatch. Pinned by
-// TestCurrentRunNamesTheCurrentPhase in this package.
+// naming different phases would settle a run against the wrong binding — which
+// is why the cleanup run, the one place they differ on purpose, is dispatched
+// by InFinally rather than through that path at all, and never reaches
+// transition. And it is the reason transition.Next's "phase has no binding"
+// guard cannot be reached in production: Reconcile's check of status.phase is
+// also a check of currentRun.phase for every run that goes through it. Break
+// the invariant and that guard is what catches it — with less to say than
+// Reconcile's own message, because Reconcile, looking only at status.phase,
+// never saw the mismatch. Pinned by TestCurrentRunNamesTheCurrentPhase in this
+// package.
 package taskstate
 
 import (
@@ -59,6 +65,20 @@ const ConditionReady = "Ready"
 // the machinery — so the outcome is not the thing to put in front of a human
 // here. What they need to know is that the answer was bad news.
 const ReasonHandlerFailed = "HandlerFailed"
+
+// ReasonFinallyFailed is why Ready goes false for a task whose cleanup run
+// never said it was done. It is deliberately not one of the ending's own
+// reasons: the work reached whatever conclusion it reached, and this says
+// something else was left behind.
+const ReasonFinallyFailed = "FinallyFailed"
+
+// InFinally reports whether the run in flight is the cleanup one — the single
+// case where a task that has stopped still has a currentRun. Callers ask this
+// instead of comparing phases themselves, because "a stopped task has no run"
+// is load-bearing in several places and each of them needs the same exception.
+func InFinally(status *flowv1alpha1.TaskStatus) bool {
+	return status.CurrentRun != nil && status.CurrentRun.Phase.IsFinally()
+}
 
 // needsAHuman reports whether an ending is one somebody has to come and look
 // at. Three of the five are: the framework's own two, and the endings a flow
@@ -145,17 +165,94 @@ func Advance(
 		})
 	}
 
-	// A stopped task has nothing in flight. Leaving a stale currentRun here
-	// would let a late answer look like it belonged to something, and
-	// incrementing runID here would leave status.runID naming a run that
-	// never happened — "last run" would stop being true.
 	if ending != transition.EndingRunning {
-		status.CurrentRun = nil
-		Expire(status, flow, now)
+		stop(status, flow, now)
 		return
 	}
 	status.RunID++
 	status.CurrentRun = &flowv1alpha1.RunRef{Phase: res.Next, RunID: status.RunID}
+}
+
+// stop is what becomes of a task that has reached its ending. Either the flow
+// declared a cleanup run and that run takes it from here, or nothing more will
+// happen to it and the deletion date can be written now. Advance and Fail
+// share this so the two cannot answer the question differently — a task that
+// broke its flow on the way out is owed the same cleanup as one that finished.
+//
+// Without a cleanup run: nothing is in flight, so the ref goes. Leaving a stale
+// one would let a late answer look like it belonged to something, and bumping
+// runID would leave status.runID naming a run that never happened.
+//
+// With one: runID does move, because a run really is about to happen, and the
+// ref names it. Recording it there is what makes "this task is owed a cleanup"
+// a fact about the task rather than a re-reading of its flow — a task that
+// stopped before the flow ever said finally has no such ref, and so is never
+// handed one afterwards (ADR-0009 決定7). The date waits for that run to
+// settle: Expire never moves a date once written, so writing one here would be
+// writing the only one, and a task could be deleted out from under its own
+// cleanup.
+func stop(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
+	if flow != nil && flow.Finally != nil {
+		status.RunID++
+		status.CurrentRun = &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: status.RunID}
+		return
+	}
+	status.CurrentRun = nil
+	Expire(status, flow, now)
+}
+
+// FinishFinally records the cleanup run and closes the task for good.
+//
+// directory is the one the run wrote, and empty means it never said it was
+// done: nothing written, a run cut short, an infrastructure allowance spent, a
+// handler that could not be resolved. None of that touches the ending the task
+// reached (ADR-0009 決定2) — status.phase stays put, and the severity whoever
+// watches metrics already recorded stays true. What a cleanup that did not
+// happen changes is who hears about it: Ready goes false with a reason of its
+// own, and the task waits out ttl.failed rather than being swept away within
+// the hour with the mess still there.
+func FinishFinally(
+	status *flowv1alpha1.TaskStatus,
+	flow *flowv1alpha1.TaskFlowSpec,
+	directory string,
+	outcome transition.Outcome,
+	detail string,
+	now metav1.Time,
+) {
+	// Read before anything below writes to it. Advance and Fail are the only
+	// two writers of Ready before this run starts, and each set it false
+	// exactly when the ending it recorded needed a human — so this is that
+	// answer, already given, rather than a second way of asking the same
+	// question. terminals is not: a flow can be edited while its task is
+	// still alive (design.md §5, issue #19), and a cleanup run can take
+	// minutes to settle, so re-reading terminals here could disagree with
+	// the Ready condition Advance or Fail already wrote for this same
+	// ending — the exact split needsAHuman exists to rule out.
+	endingNeededAHuman := meta.IsStatusConditionFalse(status.Conditions, ConditionReady)
+
+	status.History = append(status.History, flowv1alpha1.HistoryEntry{
+		Phase:      flowv1alpha1.PhaseFinally,
+		RunID:      status.RunID,
+		Directory:  directory,
+		Outcome:    string(outcome),
+		Reason:     detail,
+		FinishedAt: &now,
+	})
+	status.CurrentRun = nil
+
+	done := directory != ""
+	if !done {
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type:    ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonFinallyFailed,
+			Message: detail,
+		})
+	}
+	// The ending's own answer to "does somebody have to come and look" is still
+	// true — a task that escalated is no less escalated for having been tidied
+	// up after — so both reasons for the longer ttl are taken together.
+	stamp(status, flow, !done || endingNeededAHuman, now)
 }
 
 // Expire stamps the deletion time of a task that has stopped, and does
@@ -175,20 +272,37 @@ func Advance(
 // this existed, on a later reconcile that only means to backfill what that
 // first call missed. Idempotence here is what lets the second kind of call
 // be unconditional rather than needing its own "already has one" guard.
+//
+// A task whose flow declares a cleanup run is not dated here at all — stop
+// hands it to that run instead, and FinishFinally writes the date once the run
+// has settled.
 func Expire(
 	status *flowv1alpha1.TaskStatus,
 	flow *flowv1alpha1.TaskFlowSpec,
 	now metav1.Time,
 ) {
-	if status.ExpiresAt != nil || flow == nil || flow.TTL == nil {
-		return
-	}
 	ending := transition.EndingOf(flow, status.Phase)
 	if ending == transition.EndingRunning {
 		return
 	}
+	stamp(status, flow, needsAHuman(ending), now)
+}
+
+// stamp writes the deletion date, choosing between the flow's two durations.
+// Expire picks needsHuman from the ending alone; FinishFinally has a second
+// reason to pick the longer one, which is why the choice is a parameter here
+// rather than something this works out for itself.
+func stamp(
+	status *flowv1alpha1.TaskStatus,
+	flow *flowv1alpha1.TaskFlowSpec,
+	needsHuman bool,
+	now metav1.Time,
+) {
+	if status.ExpiresAt != nil || flow == nil || flow.TTL == nil {
+		return
+	}
 	d := flow.TTL.Succeeded
-	if needsAHuman(ending) {
+	if needsHuman {
 		d = flow.TTL.Failed
 	}
 	if d == nil {
@@ -216,7 +330,6 @@ func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase, budget int
 // on every later reconcile and backfills the date once one appears.
 func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
 	status.Phase = flowv1alpha1.PhaseFailed
-	status.CurrentRun = nil
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    ConditionReady,
 		Status:  metav1.ConditionFalse,
@@ -226,8 +339,12 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.Tas
 	// Failed is reserved, so it is terminal and needs a human on its own
 	// say-so; Expire reaches that without consulting the flow's bindings or
 	// terminals, which is what makes a nil flow here mean only "no ttl to
-	// read" rather than "cannot tell what this ending was".
-	Expire(status, flow, now)
+	// read" rather than "cannot tell what this ending was". A flow this broken
+	// can still declare a cleanup run, and stop hands the task to it: the
+	// definition being wrong is no reason to leave whatever it already made
+	// lying around. No flow at all means no cleanup either — there is nothing
+	// to read the declaration from.
+	stop(status, flow, now)
 }
 
 // RetryInfra prepares another attempt at the same phase after a failure that
@@ -251,13 +368,18 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.Tas
 //
 // Nothing is appended to history: no verdict was reached, and a history of
 // non-events makes the record harder to read, not easier.
+// The phase comes from the run being retried rather than from status.phase.
+// For every run but one they are the same name; the cleanup run is the
+// exception, and reading status.phase there would restart it as the ending the
+// task stopped at.
 func RetryInfra(status *flowv1alpha1.TaskStatus) {
-	retries := int32(0)
+	phase, retries := status.Phase, int32(0)
 	if status.CurrentRun != nil {
+		phase = status.CurrentRun.Phase
 		retries = status.CurrentRun.InfraRetries + 1
 	}
 	status.CurrentRun = &flowv1alpha1.RunRef{
-		Phase:        status.Phase,
+		Phase:        phase,
 		RunID:        status.RunID,
 		InfraRetries: retries,
 	}

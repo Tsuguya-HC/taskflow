@@ -22,8 +22,9 @@ import "slices"
 // flow: this framework does not know what the work is, so it has no business
 // naming its stages. "調査" and "Planning" are equally valid.
 //
-// Two names are reserved, because they are the framework's own answers rather
-// than anything in the author's domain — see ReservedPhases.
+// Three names are the framework's rather than the author's. Two of them are
+// answers it decides — see ReservedPhases — and the third is PhaseFinally,
+// which is not an answer at all but the name a cleanup run is recorded under.
 type Phase string
 
 const (
@@ -38,6 +39,20 @@ const (
 	// a phase with no binding, an ambiguous mapping. Nothing is repaired,
 	// because the fault is in the definition rather than in the work.
 	PhaseFailed Phase = "Failed"
+
+	// PhaseFinally is the name the run declared by spec.finally is recorded
+	// under: currentRun names it while that run is in flight, and history
+	// keeps the line it wrote. It never appears in status.phase, which is the
+	// ending the task reached and which the cleanup run does not change
+	// (ADR-0009), so it is not in ReservedPhases — a task is not "at" Finally
+	// and stopping there is not something IsTerminal is ever asked about.
+	//
+	// A flow may not use it as a binding key or as an edge's destination
+	// (flowcheck refuses both): the cleanup is not a phase, and a phase
+	// sharing its name would make one line of history mean two things. A
+	// TaskHandler may still declare phase: Finally — spec.phase says what a
+	// handler is for, and for this one that is the truth.
+	PhaseFinally Phase = "Finally"
 )
 
 // ReservedPhases may not be used as a binding key. They are the two outcomes
@@ -60,4 +75,9 @@ var ReservedPhases = []Phase{PhaseEscalated, PhaseFailed}
 // IsReserved reports whether p is one of the framework's own outcomes.
 func (p Phase) IsReserved() bool {
 	return slices.Contains(ReservedPhases, p)
+}
+
+// IsFinally reports whether p is the cleanup run's reserved name.
+func (p Phase) IsFinally() bool {
+	return p == PhaseFinally
 }

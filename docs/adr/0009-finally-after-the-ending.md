@@ -57,7 +57,8 @@
    （`bindings` を引かない）。finally の run の決着は **`transition.Next` も `Advance` も通らない** —
    `history[]` への 1 行追記、失敗時の `Ready=False` / Warning Event / finally 専用の metric、
    `expiresAt` の焼き付け（決定 5）だけを行う。verdict は `done` の 1 値で、行き先 phase は存在しない。
-   finally の verdict は棚（`results/<runID>/`）に置かない — 読む後続 run が無い
+   finally の verdict も他の run と同じ規則で棚（`results/<runID>/`）に入る。ただし読む後続 run が
+   無いので、棚に残るのは検死のための記録であって引き渡しではない
 4. **finally の失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / インフラ再試行の
    使い切り / handler が解決できない）は `Ready=False`（reason `FinallyFailed`）、Warning Event、
    finally 専用の metric で声を出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない
@@ -67,10 +68,19 @@
    足元から Task を消さない。この機能より前に終端へ着いた Task の backfill は、従来どおり終端到達で
    焼き、finally は走らせない（決定 7 の表と同じ）
 6. **finally が受け取るもの**は、終端の意味（`Success` / `Failure` / `Escalated` / `Failed` /
-   `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ経路（環境変数）で
+   `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ経路（環境変数
+   `FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME`、finally の run にだけ付く）で
    値として差し込む。分岐は書かせない（P9）。**run が一度も決着せずに `Failed` に着いた場合**
    （flow の破損が run の開始前・開始不能で判明した場合）、outcome は**空で渡す**。無い値を推測で
-   埋めない（P8）
+   埋めない（P8）。outcome は history の末尾ではなく **finally の runID − 1 の行**から引く — 決着
+   しなかった経路では末尾が無関係な前の run の verdict になっており、それは「この終端の outcome」
+   ではない
+
+   **3 値は dispatch 時点の flow から読む**（Job の template や image と同じ扱い）。決定 2 が
+   封印すると言っているのは終端に着いた瞬間に**既に書かれたもの**（`status.phase`、Ready の
+   reason、Event、metric の sample）で、その後の flow の編集がそれらを書き換えることはない。
+   TTL の選択も同じ理由の裏返しで、片付けが決着した時点の flow を再度読むのではなく、終端到達時に
+   記録済みの `Ready` condition から決める（再計算しない）
 7. **走らない場面を最初から列挙する**（後から 1 つずつ足さない）:
 
    | 場面 | 扱い |
@@ -135,7 +145,20 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
 - **finally に `when`**。P9
 - **finally 失敗で `status.phase` を `Failed` に**。`Failed` は flow の破損であって片付けの失敗ではない
 
-**未解決**:
+**実装で決めたこと**（2026-09-11、この ADR の未解決を閉じた分）:
 
-- 決定 4 の TTL（`ttl.failed` に倒す）は、severity のラベルを動かさずに `Ready` と TTL だけ動かせると
-  実装で確認できることが前提。できなければ Condition と Event だけにして TTL は触らない
+- **決定 4 の TTL は成立した。** severity のラベルを動かさずに `Ready` と TTL だけ動かせることを
+  実装で確認した（`taskstate.stamp` に「人間が要るか」を引数で渡す形にし、`Expire` は終端の意味から、
+  `FinishFinally` は「終端の意味 または 片付かなかった」から決める）。Condition と Event だけに
+  縮める必要は無かった
+- **finally の verdict も他の run と同じ規則で棚に入る**（`results/<runID>/`）。専用の分岐は置かない
+  — サイドカーは `run.Phase` を見ないし、見せる理由がない（決定 3）。ただし**読む後続 run は無い**ので、
+  棚に残るのは検死のための記録であって引き渡しではない
+- **`Finally` は `ReservedPhases` に入れない。** あの 2 つは「framework が決める答え」で
+  `IsReserved()` は終端判定に使われている。`Finally` は `status.phase` に現れないので、入れると
+  「Finally は終端」という読めない命題が増える。flowcheck が `bindings` のキーと `next` の行き先で
+  個別に拒否する（理由が違うのでメッセージも別）。**TaskHandler の `spec.phase` は `Finally` を許す** —
+  あれは handler が何のためのものかを言うフィールドで、片付け handler にはそれが事実
+- **起動も決着も `bindings` 経路を通らない**（決定 3 の実装）: 早期 return する 2 分岐が
+  `currentRun.phase == Finally` を先に見る、Job は `spec.finally` から組む（`runSpec` が唯一の
+  参照点）、決着は `transition.Next` も `Advance` も通らない専用の経路（`FinishFinally`）

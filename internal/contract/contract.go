@@ -95,6 +95,29 @@ const (
 	// their arguments.
 	EnvPodUID = "FLOW_POD_UID"
 
+	// EnvEnding, EnvEndingPhase and EnvEndingOutcome are the cleanup run's
+	// alone, and the only three the framework sets that describe something
+	// other than the run they are in: the ending this run follows
+	// (ADR-0009). No other run has an ending to be told about, so no other
+	// run is given them.
+	//
+	// EnvEnding is what stopping there meant — Success or Failure as the flow
+	// declared it, Escalated or Failed for the framework's own two, Undeclared
+	// for a flow that never said. EnvEndingPhase is the status name it stopped
+	// at, which EnvPhase cannot carry because that says what this run is, and
+	// this run is the cleanup. EnvEndingOutcome is the framework's account of
+	// the run that reached the ending, and empty when no run did — a flow
+	// broken before anything could be started has an ending with no run behind
+	// it, and an empty value is the honest report of that rather than the last
+	// unrelated run's verdict (P8).
+	//
+	// They are values to read, not a control flow to obey: a handler may
+	// report differently for a Failure than for a Success, but nothing the
+	// framework does depends on which it was.
+	EnvEnding        = "FLOW_ENDING"
+	EnvEndingPhase   = "FLOW_ENDING_PHASE"
+	EnvEndingOutcome = "FLOW_ENDING_OUTCOME"
+
 	// WorkspaceVolume is the name of the volume the controller adds to a Job
 	// when the task's flow declares a workspace, backed by that task's own
 	// claim. A handler joins the flow's workspace by naming it in

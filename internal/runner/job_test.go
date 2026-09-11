@@ -287,6 +287,45 @@ func TestAuthorControlledVarRefsAreEscaped(t *testing.T) {
 	}
 }
 
+// The ending's phase is a status name the flow's author chose, same as
+// FLOW_PHASE, so it needs the same escaping.
+func TestEndingPhaseVarRefsAreEscaped(t *testing.T) {
+	phase := flowv1alpha1.Phase("報告-$(GITHUB_TOKEN)")
+	job := build(t, Input{
+		Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
+		Ending: &Ending{Meaning: "Escalated", Phase: phase, Outcome: "NoAnswer"},
+	})
+
+	want := `報告-$$(GITHUB_TOKEN)`
+	found := false
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name != EnvEndingPhase {
+			continue
+		}
+		found = true
+		if e.Value != want {
+			t.Fatalf("%s = %q, want $( escaped to $$( so Kubernetes cannot expand it", EnvEndingPhase, e.Value)
+		}
+	}
+	if !found {
+		t.Fatalf("%s was not set", EnvEndingPhase)
+	}
+}
+
+// Ending is nil for every run but the cleanup one, and a phase's run must not
+// carry three env vars that name an ending it has not reached.
+func TestNoEndingSetsNoEndingVariables(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+
+	for _, name := range []string{EnvEnding, EnvEndingPhase, EnvEndingOutcome} {
+		for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == name {
+				t.Fatalf("%s was set to %q for a run with no ending", name, e.Value)
+			}
+		}
+	}
+}
+
 func TestLeavesTheHandlerUntouched(t *testing.T) {
 	h := handler()
 	_ = build(t, Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 1})

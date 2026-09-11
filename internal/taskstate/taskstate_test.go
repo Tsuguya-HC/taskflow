@@ -491,10 +491,17 @@ func TestExpireWithoutATTLKeepsTheTask(t *testing.T) {
 // happens to be interesting, because the invariant is a property of the set
 // of them: it survives only as long as no writer sets one field without the
 // other.
+//
+// The cleanup run is the one exception, and it is deliberate rather than a
+// hole: its ref names PhaseFinally while the task stays on the ending it
+// reached, because the ending is decided and this run does not revise it
+// (ADR-0009). agrees passes over that case and the last block below states it
+// outright, so the exception is asserted somewhere rather than merely
+// tolerated everywhere.
 func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	agrees := func(t *testing.T, after string, s *flowv1alpha1.TaskStatus) {
 		t.Helper()
-		if s.CurrentRun == nil {
+		if s.CurrentRun == nil || InFinally(s) {
 			return
 		}
 		if s.CurrentRun.Phase != s.Phase {
@@ -546,5 +553,283 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	agrees(t, "Fail", &failed)
 	if failed.CurrentRun != nil {
 		t.Fatalf("a task that stopped still has currentRun %+v", failed.CurrentRun)
+	}
+
+	// The exception, stated: with a cleanup run declared, the same stop leaves
+	// the two fields naming different things on purpose, and the pair is what
+	// tells "stopped, tidying up" from both "stopped" and "still working".
+	cleaning := *s
+	Advance(&cleaning, specWithCleanup(nil), dirSent, transition.Result{
+		Next: phaseDone, Outcome: transition.OutcomeDeclared, Budget: 0,
+	}, at)
+	if !InFinally(&cleaning) {
+		t.Fatalf("currentRun = %+v, want the cleanup run", cleaning.CurrentRun)
+	}
+	if cleaning.Phase != phaseDone {
+		t.Fatalf("phase = %q, want the ending %q the task actually reached", cleaning.Phase, phaseDone)
+	}
+
+	// And it closes again when that run settles: whatever the cleanup said,
+	// the task is finished with and holds no ref.
+	FinishFinally(&cleaning, specWithCleanup(nil), dirDone, transition.OutcomeDeclared, "", at)
+	agrees(t, "FinishFinally", &cleaning)
+	if cleaning.CurrentRun != nil {
+		t.Fatalf("a task whose cleanup run settled still has currentRun %+v", cleaning.CurrentRun)
+	}
+}
+
+// cleanup is the flow's declared cleanup run, and specWithCleanup is the
+// example flow that declares one. Only the two fields this package reads are
+// filled: who fills the run is the controller's lookup, not this package's.
+var cleanup = &flowv1alpha1.FinallySpec{Handler: "cleanup", Done: dirDone}
+
+const dirDone = "done"
+
+func specWithCleanup(t *flowv1alpha1.TTLSpec) *flowv1alpha1.TaskFlowSpec {
+	s := specOf(flow(), map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseDone: flowv1alpha1.TerminalSuccess}, t)
+	s.Finally = cleanup
+	return s
+}
+
+// A flow that declares a cleanup run turns the moment a task stops into the
+// moment one more run starts. The ending is already decided — phase does not
+// move again — but the task is not finished with, so the date it gets deleted
+// on must not be written yet: Expire never moves one, so a date here would be
+// the only date, and the task could go while its cleanup was still running.
+func TestAdvanceToTerminalStartsTheCleanupRun(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      2,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
+	}
+	Advance(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirSent,
+		transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, at)
+
+	if s.Phase != phaseDone {
+		t.Fatalf("phase = %q, want %q — the cleanup run does not move the task", s.Phase, phaseDone)
+	}
+	if !InFinally(s) {
+		t.Fatalf("currentRun = %+v, want the cleanup run in flight", s.CurrentRun)
+	}
+	if s.RunID != 3 || s.CurrentRun.RunID != 3 {
+		t.Fatalf("runID = %d, currentRun.runID = %d, want 3 — a run really is about to happen",
+			s.RunID, s.CurrentRun.RunID)
+	}
+	if s.ExpiresAt != nil {
+		t.Fatalf("expiresAt = %v, want none until the cleanup run settles", s.ExpiresAt)
+	}
+	if len(s.History) != 1 || s.History[0].Phase != phaseReport {
+		t.Fatalf("history = %+v, want the run that reached the ending and nothing else", s.History)
+	}
+}
+
+// The fault being in the definition is no reason to leave behind whatever the
+// task already made. A flow broken enough to fail a task can still say how to
+// clean up after one.
+func TestFailStartsTheCleanupRunToo(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseInvestigate,
+		RunID:      1,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 1},
+	}
+	Fail(s, "the flow lost the binding it was running", specWithCleanup(ttl(time.Hour, 168*time.Hour)), at)
+
+	if s.Phase != flowv1alpha1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed", s.Phase)
+	}
+	if !InFinally(s) || s.CurrentRun.RunID != 2 {
+		t.Fatalf("currentRun = %+v, want the cleanup run as run 2", s.CurrentRun)
+	}
+	if s.ExpiresAt != nil {
+		t.Fatalf("expiresAt = %v, want none until the cleanup run settles", s.ExpiresAt)
+	}
+}
+
+// No flow is the one case where a task that stops is owed nothing further:
+// the declaration of a cleanup run is in the flow, so a missing flow is a
+// missing declaration, and waiting for a run nobody declared would hold the
+// task forever.
+func TestFailWithoutAFlowStartsNoCleanupRun(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseInvestigate,
+		RunID:      1,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 1},
+	}
+	Fail(s, "flow \"sample-flow\" does not exist in this namespace", nil, at)
+
+	if s.CurrentRun != nil {
+		t.Fatalf("currentRun = %+v, want none — there is no flow to read a cleanup run from", s.CurrentRun)
+	}
+	if s.RunID != 1 {
+		t.Fatalf("runID = %d, want 1 — no run was started", s.RunID)
+	}
+}
+
+// A task that stopped before its flow ever declared a cleanup run has no ref
+// saying one is owed, and nothing may hand it one afterwards: that is what
+// keeps a flow's edits away from tasks that already finished. Expire is the
+// path such a task reaches, and it must still date it.
+func TestExpireStillDatesATaskOwedNoCleanupRun(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{Phase: phaseDone, RunID: 2}
+	Expire(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), at)
+
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+1h — no ref means no cleanup is owed", s.ExpiresAt)
+	}
+	if s.CurrentRun != nil {
+		t.Fatalf("currentRun = %+v, want none", s.CurrentRun)
+	}
+}
+
+// FinishFinally is the only writer that ends a task which had a cleanup run.
+// Saying it was done leaves the ending exactly as the work left it — same
+// phase, no condition, the ttl the ending itself earned.
+func TestFinishFinallyRecordsACleanupThatHappened(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseDone,
+		RunID:      3,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+		History:    []flowv1alpha1.HistoryEntry{{Phase: phaseReport, RunID: 2, Directory: dirSent}},
+	}
+	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirDone,
+		transition.OutcomeDeclared, "removed 2 branches", at)
+
+	if s.Phase != phaseDone {
+		t.Fatalf("phase = %q, want %q — a cleanup run never revises where the task ended", s.Phase, phaseDone)
+	}
+	if s.CurrentRun != nil {
+		t.Fatalf("currentRun = %+v, want none — nothing follows the cleanup run", s.CurrentRun)
+	}
+	if len(s.History) != 2 {
+		t.Fatalf("history = %+v, want the cleanup run appended", s.History)
+	}
+	h := s.History[1]
+	if h.Phase != flowv1alpha1.PhaseFinally || h.RunID != 3 || h.Directory != dirDone {
+		t.Fatalf("history entry = %+v, want the cleanup run under its reserved name", h)
+	}
+	if h.Outcome != string(transition.OutcomeDeclared) || h.Reason != "removed 2 branches" || h.FinishedAt == nil {
+		t.Fatalf("history entry = %+v, want the framework's account and what the run said", h)
+	}
+	if cond := meta.FindStatusCondition(s.Conditions, ConditionReady); cond != nil {
+		t.Fatalf("Ready condition = %+v, want none — this task ended well and was tidied up after", cond)
+	}
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+1h (ttl.succeeded)", s.ExpiresAt)
+	}
+}
+
+// A cleanup that did not happen is the one thing the framework will say out
+// loud about a task that otherwise finished well: the ending stays, and what
+// changes is that somebody is told and the task waits for them.
+func TestFinishFinallyReportsACleanupThatDidNot(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseDone,
+		RunID:      3,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+	}
+	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), "",
+		transition.OutcomeNoAnswer, "the run timed out after 5m0s", at)
+
+	if s.Phase != phaseDone {
+		t.Fatalf("phase = %q, want %q — the work still ended where it ended", s.Phase, phaseDone)
+	}
+	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready condition = %+v, want False", cond)
+	}
+	if cond.Reason != ReasonFinallyFailed {
+		t.Fatalf("reason = %q, want %q — this is not how the work ended", cond.Reason, ReasonFinallyFailed)
+	}
+	if cond.Message != "the run timed out after 5m0s" {
+		t.Fatalf("message = %q, want what happened to the cleanup run", cond.Message)
+	}
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(168 * time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+168h — a mess swept away in an hour is a mess nobody sees", s.ExpiresAt)
+	}
+	if len(s.History) != 1 || s.History[0].Directory != "" {
+		t.Fatalf("history = %+v, want one entry naming no directory", s.History)
+	}
+}
+
+// The two reasons for the longer ttl are independent: a task that escalated is
+// no less escalated for having been tidied up after, so a cleanup that
+// succeeded must not shorten the wait its ending earned.
+func TestFinishFinallyKeepsTheTTLTheEndingEarned(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      flowv1alpha1.PhaseEscalated,
+		RunID:      2,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2},
+		// Advance sets this the moment the task lands on Escalated, before the
+		// cleanup run is ever dispatched. FinishFinally reads it rather than
+		// re-deriving it, so it has to be here for the test to describe what
+		// Advance would actually have handed it.
+		Conditions: []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionFalse, Reason: string(transition.OutcomeNoAnswer)}},
+	}
+	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirDone, transition.OutcomeDeclared, "", at)
+
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(168 * time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+168h — somebody still has to come and look at an escalation", s.ExpiresAt)
+	}
+}
+
+// terminals can be edited while a task is still alive (design.md §5, issue
+// #19), including while its cleanup run is in flight. The Ready condition
+// Advance wrote when the task reached its ending must decide the ttl, not a
+// fresh read of terminals as they stand now — a flow that has since started
+// calling this ending Success must not shorten the wait an ending that once
+// needed a human already earned.
+func TestFinishFinallyReadsTheRecordedConditionNotTheCurrentTerminals(t *testing.T) {
+	editedFlow := specOf(nil, map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalSuccess}, ttl(time.Hour, 168*time.Hour))
+	editedFlow.Finally = cleanup
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseGave,
+		RunID:      2,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2},
+		Conditions: []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionFalse, Reason: ReasonHandlerFailed}},
+	}
+	FinishFinally(s, editedFlow, dirDone, transition.OutcomeDeclared, "", at)
+
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(168 * time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+168h (ttl.failed) — the Ready condition already says a human was needed; terminals having been edited to Success since is not a retraction of that", s.ExpiresAt)
+	}
+}
+
+// The reverse: a task that reached an ending its flow declared Success (so
+// Advance wrote no Ready condition at all) still earns ttl.succeeded even if
+// the flow is edited to call that same phase Failure before the cleanup run
+// settles. Nothing was ever recorded to say a human was needed, and terminals
+// changing after the fact is not that record either.
+func TestFinishFinallyKeepsSucceededWhenTerminalsChangeAfterTheFact(t *testing.T) {
+	editedFlow := specOf(nil, map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseDone: flowv1alpha1.TerminalFailure}, ttl(time.Hour, 168*time.Hour))
+	editedFlow.Finally = cleanup
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseDone,
+		RunID:      2,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2},
+	}
+	FinishFinally(s, editedFlow, dirDone, transition.OutcomeDeclared, "", at)
+
+	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(time.Hour)}) {
+		t.Fatalf("expiresAt = %v, want now+1h (ttl.succeeded) — no Ready condition ever said a human was needed here", s.ExpiresAt)
+	}
+}
+
+// An infrastructure retry of the cleanup run must stay the cleanup run.
+// RetryInfra rebuilds the ref, and reading status.phase for the name — which
+// is right for every other run — would restart this one as the ending the task
+// stopped at, a phase with no binding and no handler.
+func TestRetryInfraKeepsTheCleanupRunsName(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseDone,
+		RunID:      3,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+	}
+	RetryInfra(s)
+
+	if !InFinally(s) {
+		t.Fatalf("currentRun = %+v, want the cleanup run again", s.CurrentRun)
+	}
+	if s.CurrentRun.RunID != 3 || s.CurrentRun.InfraRetries != 1 {
+		t.Fatalf("currentRun = %+v, want run 3 attempt 1 — an attempt that never ran spends no run", s.CurrentRun)
 	}
 }

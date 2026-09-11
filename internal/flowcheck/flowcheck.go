@@ -58,9 +58,15 @@ func Check(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 		case phase.IsReserved():
 			errs = append(errs, field.Forbidden(key,
 				fmt.Sprintf("%s is one of the framework's own answers and cannot be bound to a handler", phase)))
+		case phase.IsFinally():
+			errs = append(errs, field.Forbidden(key,
+				"Finally is the name the cleanup run is recorded under, not a phase; the handler that runs "+
+					"after the ending goes in spec.finally"))
 		}
 		errs = append(errs, checkNext(spec.Bindings[phase], key.Child("next"))...)
 	}
+
+	errs = append(errs, checkFinally(spec.Finally, path.Child("finally"))...)
 
 	// Everything below walks the graph, and a walk needs somewhere to start.
 	// A start that binds nothing is reported once, here, rather than again as
@@ -104,6 +110,10 @@ func checkNext(binding flowv1alpha1.PhaseBinding, path *field.Path) field.ErrorL
 			errs = append(errs, field.Forbidden(key,
 				"Failed means the definition is broken, which is not something a run gets to conclude about "+
 					"the flow it is running; Escalated is the reserved name an edge may name"))
+		case flowv1alpha1.PhaseFinally:
+			errs = append(errs, field.Forbidden(key,
+				"the cleanup run follows the ending rather than being somewhere a verdict can lead, so no "+
+					"edge may name Finally; declare it in spec.finally"))
 		}
 
 		if err := contract.CheckDirectoryName(dir); err != nil {
@@ -119,6 +129,21 @@ func checkNext(binding flowv1alpha1.PhaseBinding, path *field.Path) field.ErrorL
 		claimed[dir] = dest
 	}
 	return errs
+}
+
+// checkFinally judges the cleanup run's declaration. Only the directory needs
+// judging here — the handler's name is a string this flow will look up in its
+// own namespace, and whether anything answers to it is not a question
+// admission may ask (ADR-0006 決定4) — and it is judged by exactly the rule an
+// edge's directory is, from the same function the sidecar re-checks it with.
+func checkFinally(finally *flowv1alpha1.FinallySpec, path *field.Path) field.ErrorList {
+	if finally == nil {
+		return nil
+	}
+	if err := contract.CheckDirectoryName(finally.Done); err != nil {
+		return field.ErrorList{field.Invalid(path.Child("done"), finally.Done, err.Error())}
+	}
+	return nil
 }
 
 // walk follows the flow's edges out of start, and reports which bound phases

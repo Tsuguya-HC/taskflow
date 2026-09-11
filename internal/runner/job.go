@@ -73,6 +73,10 @@ const (
 	EnvDirectories = contract.EnvDirectories
 	EnvPodUID      = contract.EnvPodUID
 
+	EnvEnding        = contract.EnvEnding
+	EnvEndingPhase   = contract.EnvEndingPhase
+	EnvEndingOutcome = contract.EnvEndingOutcome
+
 	frameworkPrefix = contract.Prefix
 
 	// maxNameLength is the limit Kubernetes puts on an object name.
@@ -161,6 +165,27 @@ type Input struct {
 	// run to the next; on a template volume, new with every pod, the list
 	// is not passed.
 	SweepRuns []int32
+	// Ending is the one this run follows, and nil for every run but the
+	// cleanup one — a phase's run has no ending yet, so there is nothing to
+	// tell it and nothing is set.
+	Ending *Ending
+}
+
+// Ending is what the cleanup run is told about the ending it follows: what
+// stopping there meant, where the task stopped, and how the run that got it
+// there was accounted for. Three values, injected as environment variables
+// like the rest, and not a decision the run is asked to make — the ending is
+// already decided (ADR-0009 決定2).
+type Ending struct {
+	// Meaning is the ending's severity as the framework reports it: the
+	// string of a transition.Ending. It is a plain string here so that
+	// building a Job does not need the package that decides transitions.
+	Meaning string
+	// Phase is the status name the task stopped at.
+	Phase flowv1alpha1.Phase
+	// Outcome is the framework's account of the run that reached the ending,
+	// and empty when no run reached it.
+	Outcome string
 }
 
 // ErrReservedField reports a jobTemplate that sets something the design keeps
@@ -655,8 +680,11 @@ func sidecarContainer(name, image, subcommand, out string, ws flowv1alpha1.Works
 // left alone: a handler that already sets FLOW_PHASE means it, and silently
 // overwriting would leave the YAML disagreeing with what ran.
 //
-// FLOW_PHASE and FLOW_INPUT carry free strings their authors control — the
-// flow's phase name and the task's spec.input — so both have $(...) escaped.
+// FLOW_PHASE, FLOW_INPUT and FLOW_ENDING_PHASE carry free strings their
+// authors control — the flow's phase names and the task's spec.input — so all
+// three have $(...) escaped. The other two of the ending's three are framework
+// constants, escaped anyway rather than left to whoever next adds a value to
+// either enum.
 // Kubernetes expands $(VAR_NAME) in an env value against everything resolved
 // before it: all of the container's envFrom, then env entries earlier in the
 // list. The injected vars also go in front of the handler's env, which closes
@@ -671,6 +699,12 @@ func injectEnv(pod *corev1.PodSpec, in Input) {
 	}
 	if in.Task.Spec.Input != nil {
 		env = append(env, corev1.EnvVar{Name: EnvInput, Value: escapeVarRefs(string(in.Task.Spec.Input.Raw))})
+	}
+	if in.Ending != nil {
+		env = append(env,
+			corev1.EnvVar{Name: EnvEnding, Value: escapeVarRefs(in.Ending.Meaning)},
+			corev1.EnvVar{Name: EnvEndingPhase, Value: escapeVarRefs(string(in.Ending.Phase))},
+			corev1.EnvVar{Name: EnvEndingOutcome, Value: escapeVarRefs(in.Ending.Outcome)})
 	}
 	for i := range pod.InitContainers {
 		pod.InitContainers[i].Env = merge(pod.InitContainers[i].Env, env)

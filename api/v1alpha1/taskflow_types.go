@@ -125,6 +125,35 @@ type FlowWorkspace struct {
 	VolumeClaimTemplate *corev1.PersistentVolumeClaimSpec `json:"volumeClaimTemplate,omitempty"`
 }
 
+// FinallySpec is the run that follows the ending.
+//
+// A task stops at a phase nothing binds, or at one of the framework's own two
+// answers, and until this existed that was the last thing that happened to it.
+// Nothing could be taken down afterwards — a branch, a comment, a post — and
+// the only place that can still reach those is a pod of this task, while its
+// uid and its workspace are still there. So a flow may name one handler to run
+// once the ending is known (ADR-0009).
+//
+// It sits beside bindings rather than in them because it is not a phase: no
+// edge leads to it, nothing leads out of it, and the ending is already decided
+// before it starts. What it says does not change where the task ended — only
+// whether anyone has to be told the cleanup did not happen.
+type FinallySpec struct {
+	// Handler names a TaskHandler in the same namespace, resolved the same way
+	// a binding's is and with the same absence of a check that it exists yet.
+	// +kubebuilder:validation:MinLength=1
+	Handler string `json:"handler"`
+
+	// Done is the directory this run writes into to say the task is cleaned
+	// up. One directory, not the map a binding carries: the several a phase
+	// declares are there to choose an edge, and this run has none to choose
+	// between. The framework wants one bit from it — did it say it was done —
+	// and a second directory for "could not" would buy a line of history at
+	// the price of two ways to be unfinished.
+	// +kubebuilder:validation:MinLength=1
+	Done string `json:"done"`
+}
+
 // TaskFlowSpec is the topology. It is validated once, when the TaskFlow is
 // created, and not re-derived per task.
 //
@@ -178,6 +207,14 @@ type TaskFlowSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	TTL *TTLSpec `json:"ttl,omitempty"`
+
+	// Finally is the one handler that runs after a task of this flow has
+	// reached its ending, once, whatever that ending was. Adding it changes
+	// what happens to tasks created afterwards; a task already stopped keeps
+	// the ending it stopped at and is never handed a cleanup run, the same way
+	// its deletion date is never recomputed.
+	// +optional
+	Finally *FinallySpec `json:"finally,omitempty"`
 
 	// Workspace, when set, backs the flow's workspace with one claim per
 	// task, created by the controller and deleted with the task. A handler
