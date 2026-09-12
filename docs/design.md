@@ -243,8 +243,8 @@ namespace ごとに生成すればよく、cluster-scoped な種類を足す理�
 
 > 直接参照だと**送り手が決める**。S3 + event なら**受け手が決める**。権限境界としては後者が正しい。
 
-機構は既にある（`runner: External` と同じ形で、イベント + オブジェクトストア + webhook）。
-新設するものは無い。
+形は外から埋まる run（`runner: State`、[ADR-0011](adr/0011-verdict-from-declared-state.md)）と同じで、
+イベント + オブジェクトストア + 受け手側の Task 作成。新設する機構は無い。
 
 注意点は 1 つ。**`ownerReference` も namespace を跨げない**ので、チェーンの GC と追跡は
 framework の外になる。独立した 2 本の Task になり親子関係が残らないので、
@@ -314,9 +314,13 @@ LLM エージェントとの間に、コントローラから見た区別は存�
 | runner | 何をするか | 用途 |
 |---|---|---|
 | `Job` | `jobTemplate` を Job として起動 | **既定。** エージェント、lint、test、任意のスクリプト |
-| `External` | **何も起動しない。** deadline を持ち、verdict サブリソースへの書き込みを待つ | 人間レビュー、CI の結果、外部システム |
+| `State` | **何も起動しない。** deadline を持ち、コントローラが開けた置き場に現れる値を読む | 外の判断・外部システムの結果 |
 
-`External` は **enum にあるが実装が無い**（verdict サブリソースごと未実装。#112）。
+`State` は **まだ実装が無い**（#112）。形は [ADR-0011](adr/0011-verdict-from-declared-state.md):
+run ごとにコントローラが ConfigMap を 1 つ作り、語彙を注釈に敷く。答えは `data.verdict` に書かれた
+宣言ディレクトリ名そのもので、照合は判定ディレクトリと同じ規則。**`prepare` が `/workspace/{ok,more}/` を
+敷くのと同じ動作**で、handler が書くのは `runner: {type: State}` だけ。
+**誰がその値を書いたかは見えない** — 人間でも外部 CI でも別のオペレータでも、コントローラから見れば同じ状態。
 
 > **スケッチ（未実装）**: `Sandbox` — 長命 runner。enum にも無い。§7「終了必須」の不変条件を参照。
 
@@ -360,7 +364,7 @@ runner の選択とは別に、**包む単位**という論点自体は残る。
 
 ### runner は誰の視界に入るか
 
-`runner` の可視性（`Job` / `External` / 将来の `Sandbox` の間でも同じ）:
+`runner` の可視性（`Job` / `State` / 将来の `Sandbox` の間でも同じ）:
 
 | 層 | `runner` が見えるか |
 |---|---|
@@ -371,13 +375,13 @@ runner の選択とは別に、**包む単位**という論点自体は残る。
 フェーズ・タイムアウト・TTL・`status` の形・fail-closed の挙動は runner によらず共通なので、
 `kubectl get task` の見え方もデバッグ手順も失敗の仕方も変わらない。
 
-**消せない差が 1 つだけある**: handler が表現できることが違う（`Job` は 1 Pod、`External` は何も起動しない）。
+**消せない差が 1 つだけある**: handler が表現できることが違う（`Job` は 1 Pod、`State` は何も起動しない）。
 これは隠すべきではない。隠すと「なぜ handler A でできて B でできないのか」が説明不能になる。
 継ぎ目はここに置く。
 
-`External` によって**人間 / 外部 CI / 任意の外部システムが 1 つの機構に統合される**。
-verdict を書くのが人間の `kubectl patch` でもイベント経由の webhook でも、
-コントローラから見れば同じ。
+`State` によって**外の判断が 1 つの機構に統合される**。答えを書いたのが人間の `kubectl` でも
+外部 CI からの橋渡しでも、コントローラから見れば同じ ConfigMap の 1 キーで、**どちらかを知る手段は無い**
+（P7）。誰が答えてよいかは、その ConfigMap を書ける権限＝素の RBAC が決める。
 
 ### 1 フェーズに複数の検査
 
@@ -528,6 +532,25 @@ RuntimeClass・SA・volume・エージェントのコンテナは全部利用側
 P2 の分離が保たれる（prepare / publish はコントローラの側に移った — §7）。Pod 層（`template.spec`）は `corev1.PodSpec` 標準そのもの、Job 層だけが
 自前型（予約フィールドの節を参照）で、どちらも依存は K8s core API のみ —
 **サードパーティ依存はゼロ**のまま。
+
+### コントローラが作る物には決まったラベルを付ける
+
+Job・PVC・verdict の置き場のように、**中身まで framework が決めている物**には 3 つだけ付ける
+（[ADR-0011](adr/0011-verdict-from-declared-state.md) 決定 5）:
+
+| ラベル | 何を言うか |
+|---|---|
+| `app.kubernetes.io/managed-by: taskflow` | framework 産であることの唯一の目印 |
+| `flow.tgy.io/task-uid` | どの Task のものか |
+| `flow.tgy.io/run-id` | どの run のものか |
+
+**ラベルか注釈かは「値がラベル値として合法か」で決まる。** UID と数字はラベルに置けるが、
+flow が選んだフェーズ名（`調査`）は置けないので注釈になる。
+
+目的は利用側が管理できること — 一括で見つける、掃除の対象に入れる / 外す、そして
+**admission policy をラベルで当てる**（名前が生成される物は RBAC の `resourceNames` では絞れない）。
+
+**pod は対象に入れない。** pod が身に着けるラベルはポリシーが選ぶ面で、それは handler の持ち物。
 
 ### 予約フィールド（担保の実態は 2 種類に分かれる）
 

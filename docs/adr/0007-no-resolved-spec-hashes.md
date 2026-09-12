@@ -31,7 +31,7 @@
 スナップショットして走り続け、Tekton の TaskRun は `status.taskSpec` に固め、CronJob は Job 作成時に
 jobTemplate をコピーする。**ハッシュを持って不一致で落とす**設計は見当たらない。
 
-**覆すには**: Job を作らない runner（`External`）が入り、実行の実体が Kubernetes のスナップショットに
+**覆すには**: Job を作らない runner（`State`。[ADR-0011](0011-verdict-from-declared-state.md)）が入り、実行の実体が Kubernetes のスナップショットに
 守られなくなったとき。その場合も先に問うべきは「ハッシュか」ではなく「その runner が何をスナップショット
 できるか」
 
