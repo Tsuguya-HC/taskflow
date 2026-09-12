@@ -1146,7 +1146,9 @@ flow が `finally` を持つ場合、この棚の最後の番号は cleanup run 
 
 `prepare` が敷くもの（Step 0 の試作で実証した形を Go に移し、ADR-0005 で
 `out/` の階層を外した）。run ディレクトリ `work/<runID>/` を prepare 自身が作り、そこが handler の
-マウント直下になる — template 持ち込みの emptyDir でも flow の PVC でも同じ:
+マウント直下になる — template 持ち込みの emptyDir でも flow の PVC でも同じ（この「同じ」は
+ボリュームの実体が Pod 内で共有され `subPath` が尊重されることに乗っている。踏まない実装での
+壊れ方は §15-6）:
 
 ```
 <run>/           prepare の uid   0555   ← 閉じる。宣言に無い mkdir は EACCES
@@ -1728,5 +1730,19 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
    main コンテナ 1 つ + native sidecar 1 つの構成で再現済み。したがって
    **handler の最後の 1 行が `sync` である**ことを、workspace を持つ flow の作法として要求する。
    emptyDir だけの handler には要らない（ページキャッシュがホストのメモリで閉じるため）。
+
+6. **`prepare` が敷いた場所と handler が読む場所は、同じボリュームの同じ実体でなければならない。**
+   §7 の「template 持ち込みのボリュームでも flow の PVC でも同じ」は、ボリュームの実体が Pod 内の
+   全コンテナで共有され、`volumeMount.subPath` が尊重されることに乗っている。**サンドボックス VM
+   ランタイムの中には、Pod ローカルの一時ボリュームを VM の内側に作ってホストと共有せず、
+   `subPath` を実装しないものがある。** その組み合わせでは `prepare` は自分の側に宣言ディレクトリを
+   敷き、handler は**空のディレクトリを見る** — 答えが 1 つも書かれないまま `NoAnswer` →
+   `Escalated` に倒れる。
+
+   fail-closed ではあるが、**framework に見えるのは「空だった」だけで原因は見えない**。
+   §8「遅延バインディングの代償」と同じ形なので、受け皿も同じ: **前提の確認は handler の
+   initContainer**。マウント直下に宣言ディレクトリが実在するかを起動時に確かめれば、同じ失敗が
+   「起動時に落ちる」になる。flow の PVC を使う経路はこの前提を踏まない（実体が Pod の外にある）。
+   **2026-09-12、配置側で 3 回再現**。
 
 ---
