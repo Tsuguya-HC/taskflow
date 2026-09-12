@@ -63,6 +63,12 @@ spec:
               in the pod spec its author writes. The same shape therefore accepts a
               linter, a test suite or a shell script — from the controller's side there is
               no difference between those and an agent.
+
+              The two CEL rules are what runner.type means for the rest of the spec, said
+              where it is written rather than discovered when a run starts: a State run
+              needs a deadline it cannot get from anywhere else, and it has no pod, so the
+              three fields that only describe one are refused rather than accepted and
+              never read (ADR-0011 決定6).
             properties:
               jobTemplate:
                 description: |-
@@ -75,7 +81,8 @@ spec:
                   parallelism) — rather than the two locations with differing semantics
                   that a workflow engine's own template would ask for.
 
-                  Required when runner.type is Job; ignored when it is External.
+                  Required when runner.type is Job, and refused when it is State: a run
+                  nothing starts has no pod for this to describe.
                 properties:
                   template:
                     description: PodTemplate is the pod a run consists of.
@@ -8967,6 +8974,12 @@ spec:
                   judgement — an image that would not pull, an evicted pod. A handler that
                   ran and reached no conclusion is not retried here; it is indeterminate,
                   and indeterminate goes to a human.
+
+                  Refused for a State runner rather than ignored there: nothing is
+                  started, so there is no infrastructure to fail and nothing an
+                  allowance could ever be spent on. A field that is read by nothing but
+                  accepted anyway is the shape of every setting that turns out not to
+                  have been in effect.
                 format: int32
                 minimum: 0
                 type: integer
@@ -8997,7 +9010,7 @@ spec:
                       to share turns out to be scoped to one pod.
                     enum:
                     - Job
-                    - External
+                    - State
                     type: string
                 required:
                 - type
@@ -9007,6 +9020,13 @@ spec:
                   Timeout is the single source of truth for how long a run may take. The
                   controller writes it into the Job as well, so the kubelet enforces it
                   too; setting activeDeadlineSeconds yourself is rejected.
+
+                  A State runner must declare one (the CEL rule on this spec). Nothing
+                  is started, so there is no Job to carry the deadline and nothing else
+                  that ends the wait: without a timeout, a run nobody ever answers is
+                  indistinguishable from one still being considered, and a task that
+                  never stops reaches neither its TTL nor the metric that counts how
+                  flows end.
                 type: string
               workspace:
                 description: |-
@@ -9016,7 +9036,9 @@ spec:
                   template that carries a container under one of their names is
                   refused rather than merged.
 
-                  Required when runner.type is Job; ignored when it is External.
+                  Required when runner.type is Job, and refused when it is State: there
+                  are no containers of the controller's to fit into a run that starts
+                  none.
                 properties:
                   mountPath:
                     description: |-
@@ -9044,6 +9066,15 @@ spec:
             required:
             - phase
             type: object
+            x-kubernetes-validations:
+            - message: 'a State runner must declare a timeout: nothing is started,
+                so nothing else ends the wait, and a run nobody answers would never
+                reach an ending'
+              rule: '!has(self.runner) || self.runner.type != ''State'' || has(self.timeout)'
+            - message: a State runner starts nothing, so jobTemplate, workspace and
+                maxInfraRetries have no run to apply to
+              rule: '!has(self.runner) || self.runner.type != ''State'' || (!has(self.jobTemplate)
+                && !has(self.workspace) && !has(self.maxInfraRetries))'
           status:
             properties:
               conditions:

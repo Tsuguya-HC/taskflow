@@ -178,6 +178,24 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 		Expect(got.Spec.JobTemplate.Template.Metadata.Annotations).To(HaveKeyWithValue("note", "keep me"))
 	})
 
+	// A State runner's whole declaration: which phase it fills, that nothing
+	// starts it, and how long the wait may last (ADR-0011 決定1). There is no
+	// jobTemplate and no workspace, which is the shape the CEL rules below
+	// refuse to see filled in — so this is the half of that pair proving the
+	// rules leave the intended handler alone.
+	It("accepts a State handler that declares only a phase and a deadline", func() {
+		h := &flowv1alpha1.TaskHandler{
+			ObjectMeta: metav1.ObjectMeta{Name: "gate-handler", Namespace: resourceNamespace},
+			Spec: flowv1alpha1.TaskHandlerSpec{
+				Phase:   "承認",
+				Runner:  flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerState},
+				Timeout: &metav1.Duration{Duration: 86400000000000},
+			},
+		}
+		Expect(k8sClient.Create(ctx, h)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, h) })
+	})
+
 	It("accepts a Task of four lines, with arbitrary input", func() {
 		task := &flowv1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{Name: "sample-flow-x7f2", Namespace: resourceNamespace},
@@ -452,7 +470,7 @@ var _ = Describe("the API refuses what the design forbids", func() {
 			return k8sClient.Create(ctx, flow)
 		}, "maxInFlight"),
 		Entry("TaskHandler.runner.type outside the enum", func() error {
-			// Job and External are the only runners this design admits — a
+			// Job and State are the only runners this design admits — a
 			// workflow engine was deliberately not made a third (design.md §4
 			// "ワークフローエンジンを runner に採らない").
 			h := &flowv1alpha1.TaskHandler{
@@ -481,5 +499,63 @@ var _ = Describe("the API refuses what the design forbids", func() {
 			}
 			return k8sClient.Create(ctx, h)
 		}, "maxInfraRetries"),
+		// The four below are one rule each side of ADR-0011 決定6: a State
+		// run has no Job to carry its deadline, and no pod for the three
+		// fields that only describe one. Refused at the write rather than
+		// ignored at the run, so that a handler never says something the
+		// controller will not do.
+		Entry("TaskHandler.runner State with no timeout", func() error {
+			h := &flowv1alpha1.TaskHandler{
+				ObjectMeta: metav1.ObjectMeta{Name: "state-no-timeout", Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskHandlerSpec{
+					Phase:  "承認",
+					Runner: flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerState},
+				},
+			}
+			return k8sClient.Create(ctx, h)
+		}, "must declare a timeout"),
+		Entry("TaskHandler.runner State carrying a jobTemplate", func() error {
+			h := &flowv1alpha1.TaskHandler{
+				ObjectMeta: metav1.ObjectMeta{Name: "state-with-job", Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskHandlerSpec{
+					Phase:   "承認",
+					Runner:  flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerState},
+					Timeout: &metav1.Duration{Duration: 3600000000000},
+					JobTemplate: &flowv1alpha1.JobTemplate{
+						Template: flowv1alpha1.PodTemplate{
+							Spec: corev1.PodSpec{
+								RestartPolicy: corev1.RestartPolicyNever,
+								Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+							},
+						},
+					},
+				},
+			}
+			return k8sClient.Create(ctx, h)
+		}, "starts nothing"),
+		Entry("TaskHandler.runner State carrying a workspace", func() error {
+			h := &flowv1alpha1.TaskHandler{
+				ObjectMeta: metav1.ObjectMeta{Name: "state-with-workspace", Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskHandlerSpec{
+					Phase:     "承認",
+					Runner:    flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerState},
+					Timeout:   &metav1.Duration{Duration: 3600000000000},
+					Workspace: &flowv1alpha1.WorkspaceSpec{Volume: "flow-workspace", MountPath: "/workspace"},
+				},
+			}
+			return k8sClient.Create(ctx, h)
+		}, "starts nothing"),
+		Entry("TaskHandler.runner State bounding infrastructure retries", func() error {
+			h := &flowv1alpha1.TaskHandler{
+				ObjectMeta: metav1.ObjectMeta{Name: "state-with-retries", Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskHandlerSpec{
+					Phase:           "承認",
+					Runner:          flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerState},
+					Timeout:         &metav1.Duration{Duration: 3600000000000},
+					MaxInfraRetries: 2,
+				},
+			}
+			return k8sClient.Create(ctx, h)
+		}, "starts nothing"),
 	)
 })
