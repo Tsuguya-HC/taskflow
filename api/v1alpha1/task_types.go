@@ -20,6 +20,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // TaskSpec is the whole instance. Four fields, three of them optional: whoever
@@ -76,8 +77,70 @@ type RunRef struct {
 	// JobName is derived deterministically from the task, phase, runID and
 	// the count of infrastructure retries, so a controller restart re-creates
 	// the same object instead of a second one.
+	//
+	// Empty for a run the framework does not start; verdictBox below is what
+	// such a run has instead, and exactly one of the two is set once an
+	// attempt is under way. Which one says how this run is being driven, and
+	// the controller reads it from here rather than from the handler: an
+	// attempt already in flight is not re-decided by a definition edited
+	// underneath it (ADR-0007).
+	//
+	// "Once an attempt" rather than "once a run" on purpose: an infrastructure
+	// retry (taskstate.RetryInfra) rebuilds this ref with neither field set,
+	// so the run it carries goes back to having both empty until the next
+	// reconcile reads the handler again — the same moment ensureJob would
+	// build a fresh Job for it anyway. The invariant is real, but it resets
+	// at every attempt boundary rather than holding across all of a run's.
+	//
+	// The reset only ever happens to a run with a Job, though: retryInfra is
+	// reached from driveJobRun's own reading of a Job's pods, and a run with
+	// a verdictBox instead never goes through it — nothing started, so
+	// nothing can have failed to start. A run being driven by state is fixed
+	// for the run's whole life the moment its box is opened; the "one
+	// attempt" this invariant resets at is a distinction that only exists on
+	// the Job side.
 	// +optional
 	JobName string `json:"jobName,omitempty"`
+
+	// VerdictBox names the ConfigMap this run's answer appears in, for a run
+	// the framework does not start (ADR-0011). Empty for every run that has
+	// a Job.
+	//
+	// It is written down before the object is created, not after. That
+	// ordering is what lets the controller tell its own box from one somebody
+	// put there first: on the reconcile that first opens a box this field is
+	// empty, so the create is unconditional and an AlreadyExists means the
+	// place was taken before the run began. It is also how whoever is meant
+	// to answer finds where to write, without being told a naming rule.
+	//
+	// That does not hold on the repair path, where this field is already set
+	// but the box it names is not there and this run has never been dated
+	// (ensureVerdictBox): the create there cannot tell a squatter from its own
+	// earlier create having landed late, so it is not treated as fencing
+	// there — an AlreadyExists is retried, and the next reconcile's Get is
+	// what actually decides whether the box is this run's.
+	//
+	// This is not a pointer to where a run's output went (ADR-0008): the
+	// framework decided this name, created the object and reads it back. What
+	// it must not become is a second place to say where results live.
+	// +optional
+	VerdictBox string `json:"verdictBox,omitempty"`
+	// VerdictBoxUID is the apiserver's own UID for the object VerdictBox
+	// names, stamped the moment this run's Create succeeds (ensureVerdictBox)
+	// and empty until then. The name alone is not enough to say a later Get
+	// found the same object: a name can be deleted and recreated, and nothing
+	// about the new object need be the same one except its name — least of
+	// all its ownerReferences, which are free-form metadata their author
+	// wrote and which IsControlledBy alone cannot tell forged from genuine.
+	// This UID is different: the apiserver assigns it, once, to the object
+	// this run's own Create actually made, and no later Create under the same
+	// name can produce it again. Once it is stamped, a Get returning an
+	// object with a different UID is refused (ensureVerdictBox) whatever its
+	// ownerReferences claim — IsControlledBy still runs, and is still what
+	// decides the one window before this is stamped: the moment right after a
+	// Create whose response this process never saw.
+	// +optional
+	VerdictBoxUID types.UID `json:"verdictBoxUID,omitempty"`
 	// +optional
 	Deadline *metav1.Time `json:"deadline,omitempty"`
 
@@ -92,6 +155,14 @@ type RunRef struct {
 // the whole of what the framework knows: what the run decided and why. Where
 // the run's output ended up is not here, because the controller never learns
 // it — it does not touch the workspace or any store (ADR-0008).
+// HistoryReasonMaxLength is HistoryEntry.Reason's own limit, mirrored here in
+// Go because the marker below cannot be read at runtime. The two must stay in
+// sync — this is what taskstate.Advance and taskstate.FinishFinally clamp an
+// assembled Reason to before it ever reaches the write the CRD would
+// otherwise refuse, and a mismatch would mean one of them stopped meaning
+// what it says. Counted in runes, the same unit the CRD's maxLength counts in.
+const HistoryReasonMaxLength = 2048
+
 type HistoryEntry struct {
 	Phase Phase `json:"phase"`
 	RunID int32 `json:"runID"`
@@ -106,6 +177,7 @@ type HistoryEntry struct {
 	// followed, or why no answer counted, or what the handler said after
 	// naming its directory. The transition never reads it.
 	// +optional
+	// Kept in sync with HistoryReasonMaxLength above.
 	// +kubebuilder:validation:MaxLength=2048
 	Reason string `json:"reason,omitempty"`
 	// +optional

@@ -16,13 +16,16 @@ limitations under the License.
 
 // Package collect reads what a finished run answered.
 //
-// The answer travels in a container's termination message, which Kubernetes
-// surfaces on the pod status — so the controller needs no credentials for
-// whatever holds the workspace, and no idea what kind of store that is.
+// For a run with a pod the answer travels in a container's termination
+// message, which Kubernetes surfaces on the pod status — so the controller
+// needs no credentials for whatever holds the workspace, and no idea what
+// kind of store that is. For a run the framework does not start, it is a key
+// in the ConfigMap the controller opened for it (ADR-0011). Two channels,
+// one rule.
 //
-// There is no parser here, and therefore no parse error. A message answers if
-// its first line is exactly one of the directories the flow declared, and does
-// not otherwise. That is the same rule the directories themselves follow, for
+// There is no parser here, and therefore no parse error. An answer counts if
+// it is exactly one of the directories the flow declared, and does not
+// otherwise. That is the same rule the directories themselves follow, for
 // the same reason: a vocabulary you cannot spell wrong beats one you validate.
 package collect
 
@@ -32,6 +35,8 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
 // Answer is what a run reported.
@@ -110,7 +115,7 @@ func FromPods(pods []corev1.Pod, declared []string) Answer {
 			// effort, which is the point of using this channel.
 			return Answer{Reason: "no container left a termination message"}
 		}
-		return Answer{Reason: fmt.Sprintf(
+		return Answer{Reason: reasonf(
 			"%d container(s) reported, none naming a declared directory (%s)",
 			looked, strings.Join(declared, ", "))}
 	default:
@@ -137,4 +142,54 @@ func Ran(pods []corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// FromBox returns the answer written into the place a State run is answered
+// in, and whether anything was written there at all.
+//
+// The two are separate questions here, which they are not for a pod: a run
+// that produced no directory is over and has said nothing, while an unwritten
+// verdict box is a run still being considered. Only the caller's clock can
+// tell the second from a run nobody will ever answer, so this reports what it
+// sees and leaves the deadline to the caller.
+//
+// The value is matched by the rule FromPods applies to a termination
+// message's first line — exactly one of the declared directories — so a word
+// outside the vocabulary is not an error to report but an answer that does
+// not count, and ends the same way: no directory, and a reason saying so.
+// Surrounding space is trimmed for the same reason it is there, an answer
+// typed by hand.
+func FromBox(box *corev1.ConfigMap, declared []string) (Answer, bool) {
+	if box == nil {
+		return Answer{Reason: "no verdict box to read"}, false
+	}
+	value := strings.TrimSpace(box.Data[contract.KeyVerdict])
+	if value == "" {
+		// An empty value is not an answer that failed to match: no declared
+		// directory can be named by the empty string (contract.CheckDirectoryName
+		// refuses it), so writing one is indistinguishable from not having
+		// written yet, and the honest reading is that the run is still waiting.
+		return Answer{}, false
+	}
+	reason := Sanitize(strings.TrimSpace(box.Data[contract.KeyReason]))
+	if !slices.Contains(declared, value) {
+		return Answer{Reason: reasonf(
+			"%q is not one of the words this run may be answered with (%s)",
+			Sanitize(value), strings.Join(declared, ", "))}, true
+	}
+	return Answer{Directory: value, Reason: reason}, true
+}
+
+// reasonf builds a Reason from prose wrapped around pieces that are each
+// bounded on their own — an answer already run through Sanitize, a declared
+// directory that admission holds to a single path element — but not as a
+// whole: strings.Join has no length of its own, and a flow can declare as
+// many directories as it likes. What lands in status still has a hard limit
+// of its own (HistoryEntry.Reason, 2048 runes in the CRD), so the assembled
+// message is clamped the same way Sanitize clamps a single field, at
+// maxReasonRunes — comfortably under that limit even doubled, and simpler
+// than deriving the CRD's number here. FromPods and FromBox both build a
+// message this shape, and share this rather than each capping it separately.
+func reasonf(format string, args ...any) string {
+	return Sanitize(fmt.Sprintf(format, args...))
 }

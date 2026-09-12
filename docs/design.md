@@ -316,11 +316,24 @@ LLM エージェントとの間に、コントローラから見た区別は存�
 | `Job` | `jobTemplate` を Job として起動 | **既定。** エージェント、lint、test、任意のスクリプト |
 | `State` | **何も起動しない。** deadline を持ち、コントローラが開けた置き場に現れる値を読む | 外の判断・外部システムの結果 |
 
-`State` は **まだ実装が無い**（#112）。形は [ADR-0011](adr/0011-verdict-from-declared-state.md):
-run ごとにコントローラが ConfigMap を 1 つ作り、語彙を注釈に敷く。答えは `data.verdict` に書かれた
-宣言ディレクトリ名そのもので、照合は判定ディレクトリと同じ規則。**`prepare` が `/workspace/{ok,more}/` を
-敷くのと同じ動作**で、handler が書くのは `runner: {type: State}` だけ。
+`State` の形は [ADR-0011](adr/0011-verdict-from-declared-state.md): run ごとにコントローラが
+ConfigMap を 1 つ作り、語彙を注釈に敷く。答えは `data.verdict` に書かれた宣言ディレクトリ名そのもので、
+照合は判定ディレクトリと同じ規則。**`prepare` が `/workspace/{ok,more}/` を敷くのと同じ動作**で、
+handler が書くのは `runner: {type: State}` と `timeout` だけ。
 **誰がその値を書いたかは見えない** — 人間でも外部 CI でも別のオペレータでも、コントローラから見れば同じ状態。
+
+| | |
+|---|---|
+| 置き場 | コントローラが run 開始時に `Create`。Task が owner、`data` は空。名前は `status.currentRun.verdictBox` |
+| 語彙 | 注釈 `flow.tgy.io/choices`（宣言から生成）。答えは `data.verdict`、理由は `data.reason` |
+| 先回り | **開始時に既に在れば `Failed`**。名前を status に書いてから作るので、`AlreadyExists` は「先に誰かが置いた」だけを意味する。ただし名前が既に status にあり置き場が無い状態からの再作成（クラッシュ直後の再開など）はこの限りでなく、`AlreadyExists` は素のエラーとして次周の `Get` に委ねる — 自分の遅延した `Create` と先回りを区別できないため |
+| 読み方 | キャッシュを通さない `Get`。RBAC は `configmaps` の `get` と `create` だけ（`list` / `watch` は要らない） |
+| 待ち | `timeout` 必須。超過は `NoAnswer` → `Escalated`。再確認は 30 秒ごと |
+| 語彙外の値 | 直接 `Escalated`（termination message が語彙外だったときと同じ） |
+
+`State` の run は Pod を作らないので `maxInfraRetries` に意味が無く、`jobTemplate` / `workspace` と
+まとめて CEL で拒否する（**黙って無視しない**）。棚（`results/<runID>/`）は次の run の `prepare` が
+空で敷く — これは**未実装**（#112）。
 
 > **スケッチ（未実装）**: `Sandbox` — 長命 runner。enum にも無い。§7「終了必須」の不変条件を参照。
 

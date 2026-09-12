@@ -189,9 +189,14 @@ func main() {
 	}
 
 	if err := (&controller.TaskReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Recorder:     mgr.GetEventRecorder("task-controller"),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("task-controller"),
+		// The manager's own client reads through its cache, which is an
+		// informer, which needs list and watch. The place a State run is
+		// answered in is read with get alone (ADR-0011 決定4), so it is read
+		// through here instead.
+		APIReader:    mgr.GetAPIReader(),
 		SidecarImage: sidecarImage,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "task")

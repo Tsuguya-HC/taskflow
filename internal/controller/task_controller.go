@@ -47,9 +47,11 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 )
 
-// brokenFlow says the definition is wrong rather than the work. It is carried
-// as an error so that every path out of the reconcile goes through one place
-// that writes Failed, instead of each caller remembering to.
+// brokenFlow says the fault is structural rather than the work's: a definition
+// that contradicts itself, or a place the framework has to own that something
+// else got to first. It is carried as an error so that every path out of the
+// reconcile goes through one place that writes Failed, instead of each caller
+// remembering to.
 type brokenFlow struct{ reason string }
 
 func (e brokenFlow) Error() string { return e.reason }
@@ -65,6 +67,14 @@ type TaskReconciler struct {
 	Now func() time.Time
 	// SidecarImage is what runs prepare and publish in every Job.
 	SidecarImage string
+	// APIReader reads without the manager's cache. It exists for one kind of
+	// object: the ConfigMap a State run is answered in (ADR-0011 決定4). The
+	// controller holds get on those and neither list nor watch, which a
+	// cached read needs — an informer would be refused, and even if it were
+	// not, it would hold every ConfigMap in the cluster in memory to deliver
+	// one key. Reading through here is also what makes the answer's latency
+	// the requeue interval rather than an informer's resync.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks,verbs=get;list;watch;create;update;patch;delete
@@ -74,6 +84,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -219,19 +230,102 @@ func (r *TaskReconciler) terminal(
 	return ctrl.Result{}, r.backfillExpiry(ctx, task, &flow.Spec)
 }
 
-// driveRun takes the run in flight as far as this reconcile can: it makes sure
-// the Job exists, then either waits, rules on a deadline, retries an attempt
-// that never started, or reads the answer and settles.
+// driveRun takes the run in flight as far as this reconcile can. Which of the
+// two ways it does that is the only thing decided here; everything after the
+// answer is read — the transition, the history line, the ending — is the same
+// code for both.
 //
-// It is the same sequence for every run, the cleanup one included — a run is a
-// Job with a vocabulary in front of it, and the framework has one way of
+// recovering says the ref was rebuilt in Reconcile rather than read from
+// status, so it must be persisted even if nothing below found anything new to
+// add to it.
+func (r *TaskReconciler) driveRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	recovering bool,
+) (ctrl.Result, error) {
+	kind, err := r.runnerOf(ctx, task, flow, run)
+	if err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, broken.reason)
+		}
+		return ctrl.Result{}, err
+	}
+	// An exhaustive switch rather than an if on RunnerState with everything
+	// else falling to the Job path: kind can come from a handler's own
+	// runner.type, which the schema constrains but the runtime does not
+	// assume has been checked (ADR-0006 決定5, the same reasoning dateRun's
+	// nil-timeout guard follows) — a third runner type this binary predates,
+	// or a rolling update briefly disagreeing with the CRD, must not fall
+	// silently into running something the flow never asked to be started.
+	switch kind {
+	case flowv1alpha1.RunnerJob:
+		return r.driveJobRun(ctx, task, flow, run, recovering)
+	case flowv1alpha1.RunnerState:
+		return r.driveStateRun(ctx, task, flow, run, recovering)
+	default:
+		return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
+			"phase %q names a runner type %q this controller does not know how to drive", run.Phase, kind))
+	}
+}
+
+// runnerOf says how the attempt in flight is being driven.
+//
+// An attempt that has started answers for itself: it has either a Job or a
+// verdict box, and the one it has is the one it is being run by. The handler
+// is consulted only for an attempt that has neither — one about to start —
+// which is what keeps a definition edited mid-run from switching an attempt
+// in flight onto the other kind, and is the same rule the Job path already
+// lives by: what an attempt is doing was fixed when it started (ADR-0007).
+//
+// An attempt just past an infrastructure retry is "about to start" by this
+// same test: taskstate.RetryInfra clears both fields, so the handler is read
+// again here — at the same moment ensureJob would read it again anyway to
+// build that attempt's Job. Reading the definition afresh there is not a gap
+// in the rule; it is the rule, applied to a run whose current attempt has not
+// picked a kind yet.
+//
+// That reset is a Job-side thing only. RetryInfra is reached from
+// driveJobRun's own reading of a Job's pods; a run with a verdict box instead
+// never starts anything, so there is nothing that can have failed to start,
+// and once that box exists this function's answer for the run is fixed for
+// its whole life — not just one attempt's.
+func (r *TaskReconciler) runnerOf(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+) (flowv1alpha1.RunnerType, error) {
+	switch {
+	case run.VerdictBox != "":
+		return flowv1alpha1.RunnerState, nil
+	case run.JobName != "":
+		return flowv1alpha1.RunnerJob, nil
+	}
+	handlerName, _, ok := runSpec(&flow.Spec, run.Phase)
+	if !ok {
+		return "", brokenFlow{fmt.Sprintf(
+			"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase)}
+	}
+	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+	if err != nil {
+		return "", err
+	}
+	return handler.Spec.Runner.Type, nil
+}
+
+// driveJobRun takes a run the framework starts as far as this reconcile can:
+// it makes sure the Job exists, then either waits, rules on a deadline,
+// retries an attempt that never started, or reads the answer and settles.
+//
+// It is the same sequence for every such run, the cleanup one included — a run
+// is a Job with a vocabulary in front of it, and the framework has one way of
 // watching that happen. What differs is only where the vocabulary came from
 // and what settling means, and both of those are answered by the run's phase
 // (runSpec, settleRun), not by a second copy of this loop.
-//
-// recovering says the ref was rebuilt here rather than read from status, so it
-// must be persisted even if ensureJob found nothing new to add to it.
-func (r *TaskReconciler) driveRun(
+func (r *TaskReconciler) driveJobRun(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
@@ -254,11 +348,8 @@ func (r *TaskReconciler) driveRun(
 	// had neither to begin with, and even an existing run's status object
 	// might predate these fields. Persist them so a stuck run can be found by
 	// name, and its deadline read, without recomputing either.
-	if recovering || !equality.Semantic.DeepEqual(run, prior) {
-		task.Status.CurrentRun = run
-		if err := r.Status().Update(ctx, task); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.persistRun(ctx, task, run, prior, recovering); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	finished, failure := jobFinished(job)
@@ -311,6 +402,302 @@ func (r *TaskReconciler) driveRun(
 	}
 	answer := collect.FromPods(pods.Items, directories)
 	return ctrl.Result{}, r.settleRun(ctx, task, flow, run, &answer, "")
+}
+
+// persistRun writes the run in flight back to status when this reconcile
+// learned something about it — the name of its Job or of the place it is
+// answered in, the deadline it is judged against. recovering forces the write
+// for a ref Reconcile rebuilt rather than read, which has to be stored even
+// when nothing was added to it.
+func (r *TaskReconciler) persistRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	run, prior *flowv1alpha1.RunRef,
+	recovering bool,
+) error {
+	if !recovering && equality.Semantic.DeepEqual(run, prior) {
+		return nil
+	}
+	task.Status.CurrentRun = run
+	return r.Status().Update(ctx, task)
+}
+
+// verdictPoll is how often a run waiting to be answered goes back to look.
+//
+// Nothing is watched (ADR-0011 決定4), so this is the whole of the delay
+// between an answer being written and the task moving. What it costs is one
+// read per waiting run per interval — the answer arrives at a place only this
+// task's run is answered in, so there is nothing to filter and nothing to
+// hold in memory. Half a minute is slow next to an informer and fast next to
+// the thing being waited on, which is something outside the cluster making up
+// its mind.
+const verdictPoll = 30 * time.Second
+
+// driveStateRun takes a run the framework does not start as far as this
+// reconcile can: it opens the place the answer goes if the run has not got one
+// yet, reads what is in it, and either settles the run or comes back later.
+//
+// There is no Job here and so none of what a Job answers for — no attempt to
+// retry, no kubelet enforcing the deadline first, no pods to read. What is
+// left is the same shape: a vocabulary in front of the run, one answer matched
+// against it, and a deadline that decides when silence becomes an answer of
+// its own. Everything past settleRun is the code the Job path uses.
+func (r *TaskReconciler) driveStateRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	recovering bool,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	handlerName, directories, ok := runSpec(&flow.Spec, run.Phase)
+	if !ok {
+		// The declaration this run was started from is gone. Same fault, and
+		// same handling, as a Job run whose vocabulary was edited away: there
+		// is nothing left to judge an answer against.
+		return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
+			"flow %q no longer says what run %d of %q may answer with", flow.Name, run.RunID, run.Phase))
+	}
+
+	prior := run.DeepCopy()
+	box, err := r.ensureVerdictBox(ctx, task, run, directories)
+	if err == nil && run.Deadline == nil {
+		err = r.dateRun(ctx, task, run, handlerName, box)
+	}
+	if err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, broken.reason)
+		}
+		// The run may already be carrying a box name written before the
+		// create was attempted. That is the point of the ordering, so it is
+		// persisted on the way out rather than lost to the retry.
+		if perr := r.persistRun(ctx, task, run, prior, recovering); perr != nil {
+			return ctrl.Result{}, perr
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.persistRun(ctx, task, run, prior, recovering); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	answer, answered := collect.FromBox(box, directories)
+	if !answered {
+		remaining := run.Deadline.Sub(r.now())
+		if remaining > 0 {
+			log.V(1).Info("waiting for an answer",
+				"phase", run.Phase, "runID", run.RunID, "box", run.VerdictBox, "deadlineIn", remaining)
+			return ctrl.Result{RequeueAfter: min(remaining, verdictPoll)}, nil
+		}
+		// Nobody answered in time. It is not an approval and not a failure of
+		// the work: no answer is no answer, and the transition sends it where
+		// every other silence goes (P6).
+		return ctrl.Result{}, r.settleRun(ctx, task, flow, run, nil, fmt.Sprintf(
+			"nothing was written into %s before %s",
+			run.VerdictBox, run.Deadline.UTC().Format(time.RFC3339)))
+	}
+	log.Info("run answered", "phase", run.Phase, "runID", run.RunID,
+		"box", run.VerdictBox, "directory", answer.Directory)
+	return ctrl.Result{}, r.settleRun(ctx, task, flow, run, &answer, "")
+}
+
+// ensureVerdictBox is the place one State run is answered in: the one this
+// run already has, or a new one opened for it.
+//
+// Opening it is two steps in an order that matters. The name goes into status
+// first and the object is created second — but what a create refused because
+// the name is taken then means depends on which of two paths reached it,
+// which the AlreadyExists handling below spells out. On the path opening a
+// box for the first time, the ordering plus persistRun's own optimistic
+// concurrency is what lets a refusal mean what it says — somebody put
+// something there before the run began — and that refusal is the fencing
+// (ADR-0011 決定3): an answer that was already sitting there when the run
+// started is not this run's answer, and the controller cannot tell a
+// pre-filled box from a prompt one, so it refuses to read either. The repair
+// path, picking a name already written to status back up, cannot make that
+// same claim — see below.
+//
+// The two failures of a box that was opened are told apart by whether this
+// run has ever been dated. A deadline is written only once the box has been
+// seen to exist, so a box missing before then is a create that never landed —
+// repaired by creating it — and a box missing afterwards is one that was
+// removed while the run waited, which is a place the framework owns being
+// taken away, not a run still being considered (P8).
+func (r *TaskReconciler) ensureVerdictBox(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	run *flowv1alpha1.RunRef,
+	directories []string,
+) (*corev1.ConfigMap, error) {
+	if r.APIReader == nil {
+		// A cached read of this would need list and watch, which the
+		// controller deliberately does not hold. Saying so beats reading a
+		// box through a cache that cannot have one.
+		return nil, errors.New("controller: no uncached reader to read a verdict box with")
+	}
+	log := logf.FromContext(ctx)
+
+	// repairing is whether this reconcile found the name already in status —
+	// a prior reconcile got as far as writing it and then lost the race to
+	// create, a crash or a requeue in between. It is what tells the two
+	// AlreadyExists below apart, below at the Create.
+	repairing := run.VerdictBox != ""
+	if repairing {
+		var box corev1.ConfigMap
+		err := r.APIReader.Get(ctx,
+			types.NamespacedName{Name: run.VerdictBox, Namespace: task.Namespace}, &box)
+		switch {
+		case err == nil:
+			// The name is this run's, but nothing stops anything else in the
+			// namespace from having taken it first — the same check, and the
+			// same caveat, as the Job's: an ownerReference is a
+			// garbage-collection hint whose UID is whatever its author wrote,
+			// so RBAC is the actual backstop. What differs from the Job's is
+			// what failing it means: ensureJob returns a plain error here, and
+			// an infrastructure retry that finds the name free again recovers
+			// on its own once GC has caught up. A box is not retried — it is
+			// where the run's answer is read from, and an answer read out of
+			// something this task does not control cannot be trusted at any
+			// distance, so this goes through brokenFlow to Failed the same
+			// direction ADR-0011 決定3 already fails closed in.
+			if !metav1.IsControlledBy(&box, task) {
+				return nil, brokenFlow{notOwnedError("verdict box", run.VerdictBox, task, box.OwnerReferences).Error()}
+			}
+			// ownerReferences is free-form metadata its author chose, which
+			// IsControlledBy above cannot tell forged from genuine — the
+			// apiserver never checks it against anything that exists. The
+			// object's own UID is not like that: the apiserver assigns it
+			// once, to the object this run's own Create actually made, and no
+			// later Create under this same name — the box deleted and
+			// recreated with a forged ownerReference naming this task, say —
+			// can produce it again. Once that UID is known it is checked here
+			// on every read, whatever the ownerReferences say.
+			//
+			// Empty is the one window this cannot yet close: the reconcile
+			// whose Create made this box, if it crashed before stamping the
+			// UID this returns. IsControlledBy above is what still guards
+			// that window, and finding the name here for the first time is
+			// what stamps it, so every read after this one is covered.
+			if run.VerdictBoxUID != "" && run.VerdictBoxUID != box.UID {
+				return nil, brokenFlow{fmt.Sprintf(
+					"%s, the place run %d of %q is answered in, is not the object this run created there",
+					run.VerdictBox, run.RunID, run.Phase)}
+			}
+			run.VerdictBoxUID = box.UID
+			return &box, nil
+		case !apierrors.IsNotFound(err):
+			return nil, err
+		case run.Deadline != nil, run.VerdictBoxUID != "":
+			// Either is proof this run's box was seen to exist before this
+			// Get: Deadline is written once dateRun has seen it (an older,
+			// indirect proxy for that), and VerdictBoxUID is stamped the
+			// moment this run's own Create is seen to succeed — direct
+			// evidence, and one that can be true while Deadline is still nil
+			// (dateRun's own read of the handler failing transiently, after
+			// ensureVerdictBox already returned this run's box). Missing the
+			// second would let this branch be skipped, a second box opened
+			// under the same name, and the UID this run already holds
+			// overwritten — discarding the one thing that proved the first
+			// box was ever really there.
+			return nil, brokenFlow{fmt.Sprintf(
+				"%s, the place run %d of %q is answered in, was removed while the run waited",
+				run.VerdictBox, run.RunID, run.Phase)}
+		}
+		// Not there, and never dated, and never created: the create below
+		// never landed.
+	} else {
+		run.VerdictBox = runner.VerdictBoxName(task.Name, task.UID, run.Phase, run.RunID)
+		// Forced rather than left to persistRun's own equality check: this is
+		// the one write that has to land before the create below is even
+		// attempted, whatever recovering says about the reconcile that got us
+		// here.
+		if err := r.persistRun(ctx, task, run, nil, true); err != nil {
+			return nil, err
+		}
+	}
+
+	box := runner.BuildVerdictBox(task, run.Phase, run.RunID, directories)
+	if err := r.Create(ctx, box); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// The name carries this task's UID (runner.VerdictBoxName), so
+			// what is sitting under it cannot be a prior generation of a task
+			// reusing this one's name. What it can be differs by path, and
+			// neither path Gets the box to adopt it by matching its
+			// ownerReference's UID: that UID is whatever the object's author
+			// wrote, unchecked by the apiserver, so trusting it here would let
+			// a forged reference walk straight through the fencing ADR-0011
+			// 決定3 exists for.
+			//
+			// On the path that just wrote this name to status for the first
+			// time, persistRun's Status().Update is what a second reconcile
+			// racing this one loses — a stale resourceVersion refuses before
+			// either gets here — so only one process ever reaches this Create
+			// with this name, and an AlreadyExists can only mean something
+			// else put it there before this run began. That is exactly
+			// ADR-0011 決定3, so it fails for good.
+			//
+			// On the repair path the name was already in status before this
+			// reconcile started, and that changes what AlreadyExists can mean:
+			// it cannot be told apart from this same run's own create having
+			// landed late — an error this process saw that the server did not
+			// agree with — and failing that for good would misjudge the
+			// ordinary case as broken forever. Failing it buys no more safety
+			// here either: a squatter with a forged ownerReference already
+			// ahead of the Get above would have walked straight through the
+			// err == nil branch, not this one. So this returns plain, and the
+			// next reconcile's Get — the branch that already holds the real
+			// ownership check — is what decides it.
+			if !repairing {
+				return nil, brokenFlow{fmt.Sprintf(
+					"%s, the place run %d of %q is answered in, already existed before the run began",
+					box.Name, run.RunID, run.Phase)}
+			}
+			return nil, fmt.Errorf(
+				"%s, the place run %d of %q is answered in, could not be reopened: %w",
+				box.Name, run.RunID, run.Phase, err)
+		}
+		return nil, err
+	}
+	run.VerdictBoxUID = box.UID
+	log.Info("opened a place for an answer",
+		"phase", run.Phase, "runID", run.RunID, "box", box.Name, "choices", directories)
+	return box, nil
+}
+
+// dateRun writes down when a State run's wait runs out: the handler's timeout,
+// counted from the moment the box was created.
+//
+// Anchored to the object rather than to the clock, the way a Job run's
+// deadline is read off the Job, so a controller restart lands on the same
+// instant instead of granting the wait all over again. The handler is read
+// once for this and not again — after this the deadline is in status, and a
+// run already waiting is not re-judged against a definition edited underneath
+// it.
+//
+// A handler with no timeout is refused here even though the schema refuses it
+// too: a State run whose wait has no end cannot be told from one nobody will
+// ever answer, and admission is not something the runtime may assume has run
+// (ADR-0006 決定5).
+func (r *TaskReconciler) dateRun(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	run *flowv1alpha1.RunRef,
+	handlerName string,
+	box *corev1.ConfigMap,
+) error {
+	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+	if err != nil {
+		return err
+	}
+	if handler.Spec.Timeout == nil {
+		return brokenFlow{fmt.Sprintf(
+			"handler %q fills run %d of %q, which nothing starts, but declares no timeout",
+			handlerName, run.RunID, run.Phase)}
+	}
+	deadline := metav1.NewTime(box.CreationTimestamp.Add(handler.Spec.Timeout.Duration))
+	run.Deadline = &deadline
+	return nil
 }
 
 // runSpec says who fills a run and which directories it may answer with. Both
@@ -948,10 +1335,18 @@ func deadlineOf(job *batchv1.Job) *metav1.Time {
 }
 
 // notOwnedError reports that something already sits under a deterministic
-// name but was not put there by this task — the one error both idempotent
-// create paths (Job, PersistentVolumeClaim) raise when their ownership check
-// fails, so the wording does not drift between the two. kind names what
-// sits under the name, for the message.
+// name but was not put there by this task — the one error all three
+// idempotent create paths (Job, PersistentVolumeClaim, verdict box) raise
+// when their ownership check fails, so the wording does not drift between
+// them. kind names what sits under the name, for the message.
+//
+// What a caller does with it differs, and is that caller's to decide: ensureJob
+// and ensureWorkspacePVC return it plain, which the reconcile loop retries — a
+// squatter that is itself collected leaves room to recover. ensureVerdictBox
+// wraps it in brokenFlow instead, because a box is where an answer is read
+// from rather than something the framework can retry its way past; see its
+// own doc for why that one fails closed.
+
 func notOwnedError(kind, name string, task *flowv1alpha1.Task, owners []metav1.OwnerReference) error {
 	return fmt.Errorf("%s %q exists but is not owned by task %s (uid %s): owners = %s",
 		kind, name, task.Name, task.UID, ownerSummary(owners))

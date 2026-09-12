@@ -14,10 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package contract is the vocabulary shared between whatever the controller
-// puts on a Pod and whatever a binary running inside that Pod reads back —
-// the environment variable and annotation names both sides must agree on
-// without agreeing on anything else.
+// Package contract is the vocabulary the controller shares with whatever is
+// on the other end of a run — the environment variable, label, annotation and
+// key names both sides must agree on without agreeing on anything else.
+//
+// There are two such ends. One is a binary running inside a Pod the
+// controller made, reading back what was put on it. The other is whoever
+// answers a run the framework does not start (ADR-0011): the controller opens
+// a place for that answer, and the names it is reached and written by are as
+// much a published contract as the Pod's are.
 //
 // This package must not import anything beyond the standard library. It is
 // the one place a Pod-side binary (cmd/sidecar, and any handler that wants
@@ -35,13 +40,13 @@ import (
 )
 
 const (
-	// LabelTaskUID is the only label the controller sets, and it sets it on
-	// the Job and on the pods that Job makes. The controller needs it on the
-	// Job to find its own work; it is on the pod so that one task's pods can
-	// be pulled up directly — kubectl -l, hubble --label — rather than
-	// through whatever name the Job happened to get. It is bookkeeping, not
-	// something a policy is meant to select on: what a pod must carry to be
-	// allowed to run is the handler's to write.
+	// LabelTaskUID says whose an object is, and it is the one label the
+	// controller puts on a pod. Every object the framework makes carries it;
+	// the controller needs it on the Job to find its own work, and it is on
+	// the pod so that one task's pods can be pulled up directly — kubectl -l,
+	// hubble --label — rather than through whatever name the Job happened to
+	// get. It is bookkeeping, not something a policy is meant to select on:
+	// what a pod must carry to be allowed to run is the handler's to write.
 	//
 	// A UID also happens to be legal as a label value, which a status name
 	// picked by whoever wrote the flow is not — hence the phase below.
@@ -65,12 +70,62 @@ const (
 	// count suggests how much rope is left, the same way a remaining-rework
 	// count would.
 	AnnotationRunID = "flow.tgy.io/run-id"
+	// LabelRunID is the same fact as AnnotationRunID, spelled where a
+	// selector can reach it. The two are not a duplicate that can drift:
+	// they are the same string, and which one an object carries follows one
+	// rule — the framework's own objects (the Job, the verdict box) wear the
+	// labels below so the user side can select them, and the pod wears the
+	// annotations, because what a pod carries is the handler's to decide and
+	// a fieldRef reads annotations just as well.
+	//
+	// A run number is legal as a label value, which is what decides the
+	// question at all: the same object's phase cannot be a label, because a
+	// status name the flow's author chose (調査) is not a legal one.
+	LabelRunID = AnnotationRunID
 	// AnnotationPrevRunID is absent on the first run.
 	AnnotationPrevRunID = "flow.tgy.io/prev-run-id"
 
 	// Prefix is what marks a label or an annotation as the framework's. A
 	// template that sets one of these is refused rather than overwritten.
 	Prefix = "flow.tgy.io/"
+
+	// LabelManagedBy and ManagedBy mark an object as the framework's own
+	// make — one the controller decided the contents of, not one a handler's
+	// author wrote (ADR-0011 決定5). The Job, the workspace claim and the
+	// verdict box carry it; a pod does not, because what a pod wears is a
+	// policy question and policy is the user side's.
+	//
+	// It is there so the user side can manage them: find them at once, put
+	// them in or out of a sweep, and — for objects whose names are generated,
+	// where RBAC's resourceNames cannot reach — write an admission policy
+	// that selects exactly the framework's own.
+	LabelManagedBy = "app.kubernetes.io/managed-by"
+	ManagedBy      = "taskflow"
+
+	// AnnotationChoices is the vocabulary a State run may be answered with, on
+	// the verdict box the controller opens for it. It is there so that
+	// answering does not require reading the flow: the declaration puts the
+	// choices in front of whoever answers, the way prepare lays the same
+	// names down as directories for a run that has a pod (ADR-0011 決定2). An
+	// annotation rather than a label for the reason the phase is one — these
+	// are the flow author's strings.
+	//
+	// Rendered as a JSON array, the same as EnvDirectories below and for the
+	// same reason: a directory name is a free string that may itself contain
+	// a space, and a delimited format would have to forbid whatever character
+	// it delimits on. See runner.BuildVerdictBox for how this is built.
+	AnnotationChoices = "flow.tgy.io/choices"
+
+	// KeyVerdict is where the answer goes in that box, and KeyReason the one
+	// line a human reads next to it — the same two things a termination
+	// message carries in its first line and the rest, named rather than
+	// positional because a map has no first line.
+	//
+	// One key, not a directory each: a verdict box cannot have "exactly one
+	// non-empty entry" go wrong the way a run's directories can, because
+	// there is only ever one place to write.
+	KeyVerdict = "verdict"
+	KeyReason  = "reason"
 
 	// EnvTaskUID, EnvPhase and EnvInput are set on every container in the
 	// template. Unlike the run number these say what the work is, not how

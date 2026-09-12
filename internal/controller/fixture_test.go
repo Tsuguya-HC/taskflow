@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
 )
 
@@ -85,7 +87,12 @@ func newFixture() *fixture {
 	// events once its channel is full, which would turn "nothing was
 	// announced" into a passing assertion for the wrong reason.
 	fx.events = events.NewFakeRecorder(16)
-	fx.reconciler = &TaskReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: fx.events, SidecarImage: sidecarImage}
+	fx.reconciler = &TaskReconciler{
+		Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: fx.events, SidecarImage: sidecarImage,
+		// The suite's client talks to the API server directly, with no cache
+		// in front of it, which is exactly what this field asks for.
+		APIReader: k8sClient,
+	}
 	DeferCleanup(func() {
 		// The reconciler's Jobs outlive their Task here: envtest has no
 		// garbage collector, so ownerReferences do not remove them.
@@ -99,6 +106,11 @@ func newFixture() *fixture {
 			client.InNamespace(resourceNamespace),
 			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)},
 			client.PropagationPolicy(metav1.DeletePropagationBackground))
+		// The verdict boxes go the same way and for the same reason: they
+		// are owned by the Task, and nothing here collects owned objects.
+		_ = k8sClient.DeleteAllOf(fx.ctx, &corev1.ConfigMap{},
+			client.InNamespace(resourceNamespace),
+			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})
 	})
 	return fx
 }
@@ -157,29 +169,36 @@ func directoriesOf(job *batchv1.Job) []string {
 	return nil
 }
 
+// jobRunner is the handler shape every spec but the State ones wants: a pod
+// to run, and the workspace the injected containers are fitted into.
+func jobRunner() func(*flowv1alpha1.TaskHandler) {
+	return func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.Runner = flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob}
+		h.Spec.Workspace = &flowv1alpha1.WorkspaceSpec{Volume: workspaceVol, MountPath: workspacePath}
+		h.Spec.JobTemplate = &flowv1alpha1.JobTemplate{
+			Template: flowv1alpha1.PodTemplate{
+				Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
+				Spec: corev1.PodSpec{
+					RestartPolicy:   corev1.RestartPolicyNever,
+					SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To(int64(65533))},
+					Volumes:         []corev1.Volume{{Name: workspaceVol}},
+					Containers: []corev1.Container{{
+						Name: agentName, Image: agentImage,
+						VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: workspacePath}},
+					}},
+				},
+			},
+		}
+		h.Spec.Timeout = nil
+	}
+}
+
 func (fx *fixture) makeHandler(mut ...func(*flowv1alpha1.TaskHandler)) {
 	h := &flowv1alpha1.TaskHandler{
 		ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
-		Spec: flowv1alpha1.TaskHandlerSpec{
-			Phase:     phaseInvestigate,
-			Runner:    flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerJob},
-			Workspace: &flowv1alpha1.WorkspaceSpec{Volume: workspaceVol, MountPath: workspacePath},
-			JobTemplate: &flowv1alpha1.JobTemplate{
-				Template: flowv1alpha1.PodTemplate{
-					Metadata: flowv1alpha1.EmbeddedObjectMeta{Labels: map[string]string{"role": handlerName}},
-					Spec: corev1.PodSpec{
-						RestartPolicy:   corev1.RestartPolicyNever,
-						SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr.To(int64(65533))},
-						Volumes:         []corev1.Volume{{Name: workspaceVol}},
-						Containers: []corev1.Container{{
-							Name: agentName, Image: agentImage,
-							VolumeMounts: []corev1.VolumeMount{{Name: workspaceVol, MountPath: workspacePath}},
-						}},
-					},
-				},
-			},
-		},
+		Spec:       flowv1alpha1.TaskHandlerSpec{Phase: phaseInvestigate},
 	}
+	jobRunner()(h)
 	for _, m := range mut {
 		m(h)
 	}
@@ -210,6 +229,46 @@ func (fx *fixture) get() *flowv1alpha1.Task {
 	var tk flowv1alpha1.Task
 	Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &tk)).To(Succeed())
 	return &tk
+}
+
+// stateRunner turns the fixture's handler into one the framework does not
+// start: no pod to describe, and a deadline of its own since nothing else
+// would end the wait.
+func stateRunner(timeout time.Duration) func(*flowv1alpha1.TaskHandler) {
+	return func(h *flowv1alpha1.TaskHandler) {
+		h.Spec.Runner = flowv1alpha1.RunnerSpec{Type: flowv1alpha1.RunnerState}
+		h.Spec.JobTemplate, h.Spec.Workspace = nil, nil
+		h.Spec.Timeout = &metav1.Duration{Duration: timeout}
+	}
+}
+
+// box fetches the place the starting phase's first run is answered in, and
+// fails the spec when it is not there. Later runs and the cleanup run go
+// through boxFor, which takes both.
+func (fx *fixture) box() *corev1.ConfigMap {
+	return fx.boxFor(phaseInvestigate, 1)
+}
+
+func (fx *fixture) boxFor(phase flowv1alpha1.Phase, runID int32) *corev1.ConfigMap {
+	var box corev1.ConfigMap
+	Expect(k8sClient.Get(fx.ctx, types.NamespacedName{
+		Name: runner.VerdictBoxName(fx.name, fx.taskUID, phase, runID), Namespace: resourceNamespace,
+	}, &box)).To(Succeed())
+	return &box
+}
+
+// answer writes into that place the way whoever is answering would.
+func (fx *fixture) answer(verdict, reason string) {
+	fx.answerFor(phaseInvestigate, 1, verdict, reason)
+}
+
+func (fx *fixture) answerFor(phase flowv1alpha1.Phase, runID int32, verdict, reason string) {
+	box := fx.boxFor(phase, runID)
+	box.Data = map[string]string{contract.KeyVerdict: verdict}
+	if reason != "" {
+		box.Data[contract.KeyReason] = reason
+	}
+	Expect(k8sClient.Update(fx.ctx, box)).To(Succeed())
 }
 
 // job fetches the Job for the first attempt at one run of the starting phase.

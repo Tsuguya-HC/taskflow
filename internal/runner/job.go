@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package runner turns a task, a flow and a handler into the Job that runs one
-// phase.
+// Package runner turns a task, a flow and a handler into what runs one
+// phase: the Job, for a run the framework starts, or the ConfigMap a run it
+// does not start is answered in (ADR-0011).
 //
 // Like transition and taskstate it is a pure function over values, so what the
 // controller is about to create can be examined without a cluster.
@@ -63,9 +64,14 @@ import (
 const (
 	LabelTaskUID = contract.LabelTaskUID
 
+	LabelManagedBy = contract.LabelManagedBy
+	ManagedBy      = contract.ManagedBy
+	LabelRunID     = contract.LabelRunID
+
 	AnnotationPhase     = contract.AnnotationPhase
 	AnnotationRunID     = contract.AnnotationRunID
 	AnnotationPrevRunID = contract.AnnotationPrevRunID
+	AnnotationChoices   = contract.AnnotationChoices
 
 	EnvTaskUID     = contract.EnvTaskUID
 	EnvPhase       = contract.EnvPhase
@@ -78,6 +84,12 @@ const (
 	EnvEndingOutcome = contract.EnvEndingOutcome
 
 	frameworkPrefix = contract.Prefix
+
+	// kindTask is what every ownerReference the framework writes points at.
+	// Spelled once: the three objects it owns — the Job, the workspace claim,
+	// the verdict box — have to name the same kind or the garbage collector
+	// follows none of them.
+	kindTask = "Task"
 
 	// maxNameLength is the limit Kubernetes puts on an object name.
 	maxNameLength = 63
@@ -219,12 +231,55 @@ var ErrWorkspace = errors.New("workspace is not usable")
 // spelled the way it always was, and means only a run that actually retried
 // carries the extra segment.
 func JobName(taskName string, phase flowv1alpha1.Phase, runID, attempt int32) string {
-	phaseSum := sha256.Sum256([]byte(phase))
 	retry := ""
 	if attempt > 0 {
 		retry = fmt.Sprintf("-r%d", attempt)
 	}
-	suffix := fmt.Sprintf("-%d%s-%s", runID, retry, hex.EncodeToString(phaseSum[:])[:phaseHashLength])
+	return childName(taskName, fmt.Sprintf("-%d%s-%s", runID, retry, phaseHash(phase)))
+}
+
+// VerdictBoxName is the name of the ConfigMap one State run is answered in.
+//
+// Deterministic for the same reason a Job's name is, and then some: the
+// create is what refuses a second one, so two runs that agreed on a name
+// would be one run's answer read as the other's. It carries no attempt
+// segment because a run nothing starts has no attempt to lose — the retry a
+// Job's name has to tell apart is an infrastructure failure, and there is no
+// infrastructure here (the handler is refused for saying otherwise).
+//
+// The task's UID is in it for the same reason WorkspacePVCName's is: a task
+// deleted and recreated under the same name is a different task, and without
+// the UID its new run of the same phase and runID would land on the exact
+// name a prior generation's box may still occupy — orphaned, GC-pending, or
+// kept forever by --cascade=orphan — turning the fencing below into a
+// permanent AlreadyExists rather than the one-time refusal it is meant to be.
+// JobName carries no such hash, and stays that way: ensureJob's ownership
+// check exists so a Job is not mistaken for one that is not this task's, and
+// a plain, retried error is enough for that. ensureVerdictBox's exists so a
+// wrong answer is never mistaken for a right one, which only a collision
+// that cannot happen at all satisfies — the reason only the box needs the
+// extra segment.
+//
+// The word at the end is for whoever finds it with kubectl and has to guess
+// what it is before reading the annotations.
+func VerdictBoxName(taskName string, uid types.UID, phase flowv1alpha1.Phase, runID int32) string {
+	sum := sha256.Sum256([]byte(uid))
+	uidHash := hex.EncodeToString(sum[:])[:taskHashLength]
+	return childName(taskName, fmt.Sprintf("-%d-%s-%s-verdict", runID, phaseHash(phase), uidHash))
+}
+
+// phaseHash stands in for the status name in an object's name: those are free
+// strings and 調査 is not a legal object name. Whoever wants to read it looks
+// at the annotation.
+func phaseHash(phase flowv1alpha1.Phase) string {
+	sum := sha256.Sum256([]byte(phase))
+	return hex.EncodeToString(sum[:])[:phaseHashLength]
+}
+
+// childName fits a task's name and one suffix into the limit Kubernetes puts
+// on an object name, dropping a hash of the full task name in alongside when
+// it has to cut.
+func childName(taskName, suffix string) string {
 	prefix := taskName
 	if len(prefix)+len(suffix) > maxNameLength {
 		taskSum := sha256.Sum256([]byte(taskName))
@@ -271,7 +326,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	// annotations are kept, but one under the framework's prefix is refused
 	// rather than overwritten — the alternative is a value that silently
 	// differs from what the YAML says.
-	podLabels, err := withFrameworkMeta("label", tpl.Metadata.Labels, labels(in))
+	podLabels, err := withFrameworkMeta("label", tpl.Metadata.Labels, podLabels(in))
 	if err != nil {
 		return nil, err
 	}
@@ -304,11 +359,11 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        JobName(in.Task.Name, in.Phase, in.RunID, in.Attempt),
 			Namespace:   in.Task.Namespace,
-			Labels:      labels(in),
+			Labels:      objectLabels(in.Task.UID, in.RunID),
 			Annotations: annotations(in),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
-				Kind:               "Task",
+				Kind:               kindTask,
 				Name:               in.Task.Name,
 				UID:                in.Task.UID,
 				Controller:         ptr(true),
@@ -355,10 +410,12 @@ func BuildWorkspacePVC(task *flowv1alpha1.Task, vct *corev1.PersistentVolumeClai
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      WorkspacePVCName(task.Name, task.UID),
 			Namespace: task.Namespace,
-			Labels:    map[string]string{LabelTaskUID: string(task.UID)},
+			// No run label: the claim is the task's, and every one of its
+			// runs works in the same one (ADR-0002).
+			Labels: objectLabels(task.UID, 0),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
-				Kind:               "Task",
+				Kind:               kindTask,
 				Name:               task.Name,
 				UID:                task.UID,
 				Controller:         ptr(true),
@@ -386,11 +443,80 @@ func withFrameworkMeta(kind string, template, framework map[string]string) (map[
 	return out, nil
 }
 
-// labels is the framework's whole label vocabulary: one entry, on the Job so
-// the controller can find it and on the pod so a human can. Policies select
-// on what the handler's own template says, never on this.
-func labels(in Input) map[string]string {
+// objectLabels is what the framework puts on the objects it makes itself and
+// decides the contents of — the Job here, the verdict box, the workspace
+// claim (ADR-0011 決定5). Three entries: that it is the framework's, whose it
+// is, and which run it belongs to. They are there so the user side can manage
+// them — select them at once, sweep them or exempt them, write an admission
+// policy that reaches objects whose names are generated.
+//
+// runID of 0 leaves the run label off, for an object that belongs to the task
+// rather than to one of its runs.
+func objectLabels(uid types.UID, runID int32) map[string]string {
+	l := map[string]string{
+		LabelManagedBy: ManagedBy,
+		LabelTaskUID:   string(uid),
+	}
+	if runID > 0 {
+		l[LabelRunID] = strconv.Itoa(int(runID))
+	}
+	return l
+}
+
+// podLabels is the one label the framework puts on a pod, so a human can pull
+// up one task's pods without going through the Job's name. The rest of
+// objectLabels deliberately stops here: what a pod wears is what a policy
+// selects on, and that is the handler's to write (ADR-0011 決定5).
+func podLabels(in Input) map[string]string {
 	return map[string]string{LabelTaskUID: string(in.Task.UID)}
+}
+
+// BuildVerdictBox returns the ConfigMap one State run is answered in: the
+// place the controller opens because it will not be starting anything that
+// could answer by itself (ADR-0011 決定2).
+//
+// It is created empty. What is in it is the declaration, put where whoever
+// answers will see it: the phase and the words they may answer with, so that
+// answering does not require reading the flow. That is the same service
+// prepare performs for a run that has a pod, where the words are laid down as
+// directories at the mount's root — here there is no pod to lay anything down
+// in, so the vocabulary rides on the object instead.
+//
+// The words are rendered the way the pod's own vocabulary is, as a JSON
+// array, rather than as the space-separated list ADR-0011 sketched. The
+// reason is the one directoriesJSON already gives: directory names are free
+// strings, nothing stops one containing a space, and a rendering that can
+// carry any name beats one that has to forbid some. Nothing reads this back —
+// the match is against what the flow declares, never against this — so it is
+// a rendering choice and not a second source of the vocabulary.
+//
+// blockOwnerDeletion stays false for the reason the workspace claim's does:
+// it rides the task's TTL out, it does not get a say in it.
+func BuildVerdictBox(
+	task *flowv1alpha1.Task,
+	phase flowv1alpha1.Phase,
+	runID int32,
+	directories []string,
+) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      VerdictBoxName(task.Name, task.UID, phase, runID),
+			Namespace: task.Namespace,
+			Labels:    objectLabels(task.UID, runID),
+			Annotations: map[string]string{
+				AnnotationPhase:   string(phase),
+				AnnotationChoices: directoriesJSON(directories),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
+				Kind:               kindTask,
+				Name:               task.Name,
+				UID:                task.UID,
+				Controller:         ptr(true),
+				BlockOwnerDeletion: ptr(false),
+			}},
+		},
+	}
 }
 
 func annotations(in Input) map[string]string {

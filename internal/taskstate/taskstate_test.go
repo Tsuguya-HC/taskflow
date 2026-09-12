@@ -17,6 +17,7 @@ limitations under the License.
 package taskstate
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +136,29 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 	}
 	if s.CurrentRun == nil || s.CurrentRun.RunID != 3 || s.CurrentRun.Phase != phaseInvestigate {
 		t.Fatalf("currentRun = %+v, want Planning at run 3", s.CurrentRun)
+	}
+}
+
+// res.Detail can come from a controller error with no bound of its own — an
+// owner list, a joined vocabulary — and HistoryEntry.Reason has a real limit
+// (flowv1alpha1.HistoryReasonMaxLength, mirroring the CRD's maxLength). A
+// Reason that walked over it would be refused for good rather than written.
+func TestAdvanceClampsAnOverLongReason(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      2,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
+	}
+	long := strings.Repeat("a", flowv1alpha1.HistoryReasonMaxLength+500)
+	res := transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared, Detail: long}
+	Advance(s, spec(), dirSent, res, at)
+
+	got := s.History[0].Reason
+	if n := len([]rune(got)); n > flowv1alpha1.HistoryReasonMaxLength {
+		t.Fatalf("reason has %d runes, want at most %d (HistoryEntry.Reason's CRD limit)", n, flowv1alpha1.HistoryReasonMaxLength)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("reason = %q, want a mark that it was cut", got)
 	}
 }
 
@@ -715,6 +739,27 @@ func TestFinishFinallyRecordsACleanupThatHappened(t *testing.T) {
 	}
 	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(time.Hour)}) {
 		t.Fatalf("expiresAt = %v, want now+1h (ttl.succeeded)", s.ExpiresAt)
+	}
+}
+
+// detail here can be as unbounded as Advance's — the same controller errors
+// and joined lists can reach FinishFinally's cleanup run too.
+func TestFinishFinallyClampsAnOverLongReason(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseDone,
+		RunID:      3,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+	}
+	long := strings.Repeat("b", flowv1alpha1.HistoryReasonMaxLength+500)
+	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirDone,
+		transition.OutcomeDeclared, long, at)
+
+	got := s.History[0].Reason
+	if n := len([]rune(got)); n > flowv1alpha1.HistoryReasonMaxLength {
+		t.Fatalf("reason has %d runes, want at most %d (HistoryEntry.Reason's CRD limit)", n, flowv1alpha1.HistoryReasonMaxLength)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("reason = %q, want a mark that it was cut", got)
 	}
 }
 
