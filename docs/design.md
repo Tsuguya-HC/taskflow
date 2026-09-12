@@ -533,6 +533,25 @@ P2 の分離が保たれる（prepare / publish はコントローラの側に�
 自前型（予約フィールドの節を参照）で、どちらも依存は K8s core API のみ —
 **サードパーティ依存はゼロ**のまま。
 
+### コントローラが作る物には決まったラベルを付ける
+
+Job・PVC・verdict の置き場のように、**中身まで framework が決めている物**には 3 つだけ付ける
+（[ADR-0011](adr/0011-verdict-from-declared-state.md) 決定 5）:
+
+| ラベル | 何を言うか |
+|---|---|
+| `app.kubernetes.io/managed-by: taskflow` | framework 産であることの唯一の目印 |
+| `flow.tgy.io/task-uid` | どの Task のものか |
+| `flow.tgy.io/run-id` | どの run のものか |
+
+**ラベルか注釈かは「値がラベル値として合法か」で決まる。** UID と数字はラベルに置けるが、
+flow が選んだフェーズ名（`調査`）は置けないので注釈になる。
+
+目的は利用側が管理できること — 一括で見つける、掃除の対象に入れる / 外す、そして
+**admission policy をラベルで当てる**（名前が生成される物は RBAC の `resourceNames` では絞れない）。
+
+**pod は対象に入れない。** pod が身に着けるラベルはポリシーが選ぶ面で、それは handler の持ち物。
+
 ### 予約フィールド（担保の実態は 2 種類に分かれる）
 
 JobTemplateSpec をそのまま開放すると、設計の不変条件をユーザーが壊せてしまう。

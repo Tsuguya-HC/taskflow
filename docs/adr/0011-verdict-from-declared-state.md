@@ -21,8 +21,9 @@
 
    ```yaml
    metadata:
-     labels:      {flow.tgy.io/task-uid: <uid>}     # 既存の contract。名前ではなくこれで引ける
-     annotations: {flow.tgy.io/phase: <フェーズ>, flow.tgy.io/run-id: "3",
+     labels:      {app.kubernetes.io/managed-by: taskflow,
+                   flow.tgy.io/task-uid: <uid>, flow.tgy.io/run-id: "3"}
+     annotations: {flow.tgy.io/phase: <フェーズ>,
                    flow.tgy.io/choices: "ok more"}  # 宣言から生成した語彙
    data: {}
    ```
@@ -59,12 +60,32 @@
    名前が生成されるので `resourceNames` で 1 個に絞る道は閉じるが、**namespace を権限の階層にする**
    （design.md §4）が既に選んでいる粒度がそれで、object 単位の切り分けはこの設計に無い粒度になる
 
-5. **`State` では `timeout` を必須にする**（CEL で create 時に拒否）。期限の無い待ちは沈黙と
+5. **コントローラが自分で作る物には、決まったラベルだけを付ける。** 対象は Job・PVC・
+   verdict の置き場のように**中身まで framework が決めている物**で、
+
+   - `app.kubernetes.io/managed-by: taskflow` — **framework 産である**ことの唯一の目印
+   - `flow.tgy.io/task-uid` — どの Task のものか（既存の contract）
+   - `flow.tgy.io/run-id` — どの run のものか
+
+   **ラベルと注釈の分かれ目は「値がラベル値として合法か」**で、これは既に contract が
+   採っている分け方（UID と数字はラベル、`調査` のようなフェーズ名は注釈）。
+   flow が選んだ名前はラベルに置けないので、`phase` と `choices` は注釈のまま。
+
+   これは**利用側が管理できるようにするため**にある。名前が生成される以上 RBAC の
+   `resourceNames` では絞れないが、**admission policy はラベルで絞れる**ので、
+   「framework 産の verdict 置き場だけ、この主体が書いてよい」は利用側が書ける
+   （決定 4 で失った object 単位の粒度が、ポリシー層で戻る。P2 の線はそのまま）。
+   一括で見つける・掃除の対象に入れる / 外すも同じラベルで足りる。
+
+   **pod は対象に入れない。** pod が何を身に着けるかはポリシーが選ぶ面で、それは handler の
+   持ち物（design.md §4）。framework が勝手に増やすのは、その面に手を入れることになる
+
+6. **`State` では `timeout` を必須にする**（CEL で create 時に拒否）。期限の無い待ちは沈黙と
    区別が付かず、終端に着かない Task は TTL にも metric にも現れない。超過の扱いは既存のまま
    （`NoAnswer` → `Escalated`）。Job の `activeDeadlineSeconds` に乗せられないので、
    期限はコントローラ側の requeue が持つ（TTL で既に使っている経路）
 
-6. **棚は次の run の prepare が `results/<runID>/<value>/` を空で敷く。**
+7. **棚は次の run の prepare が `results/<runID>/<value>/` を空で敷く。**
    `State` の run は Pod を作らないので自分では seal できないが、
    **空の宣言ディレクトリは既に正当な verdict の形**（`ok/` は空）なので、新しい表現は要らない。
    これで ADR-0004 の「1 run = 1 sealed directory、番号はフェーズの通り」が保てる。
