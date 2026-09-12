@@ -77,6 +77,31 @@ type options struct {
 	sealTo string
 	// sweep is prepare-only: the abandoned runs, as ids under out's parent.
 	sweep string
+	// shelve is prepare-only: the sealed directories to lay on the shelf for
+	// runs that never had a pod of their own, as whole paths. A list rather
+	// than one delimited string because the last element of each is a name
+	// the flow chose, and no delimiter is safe against a free string.
+	shelve paths
+}
+
+// paths collects a flag given more than once. The zero value is an empty
+// list, so a run with nothing to shelve passes no flag at all rather than an
+// empty value that would have to be told from a missing one.
+type paths []string
+
+func (p *paths) String() string {
+	if p == nil {
+		return ""
+	}
+	return strings.Join(*p, " ")
+}
+
+func (p *paths) Set(v string) error {
+	if v == "" {
+		return errors.New("empty path")
+	}
+	*p = append(*p, v)
+	return nil
 }
 
 func run(args []string) error {
@@ -96,6 +121,8 @@ func run(args []string) error {
 	fs.StringVar(&o.sealTo, contract.FlagSealTo, "", "publish only: move the run's directory here once sealed")
 	fs.StringVar(&o.sweep, contract.FlagSweep, "",
 		"prepare only: comma-separated runIDs whose leftovers beside this run are cleared away first")
+	fs.Var(&o.shelve, contract.FlagShelve,
+		"prepare only, repeatable: a sealed directory to lay for a run that never had a pod")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -150,6 +177,9 @@ func checkFlags(cmd string, o options) error {
 	if o.sweep != "" {
 		return fmt.Errorf("-%s is prepare's to set, not publish's", contract.FlagSweep)
 	}
+	if len(o.shelve) > 0 {
+		return fmt.Errorf("-%s is prepare's to set, not publish's", contract.FlagShelve)
+	}
 	return nil
 }
 
@@ -173,6 +203,16 @@ func prepare(o options, declared []string, podUID string) error {
 	}
 	if err := sidecar.Prepare(o.out, declared); err != nil {
 		return reportFailure(o.termLog, cmdPrepare, err)
+	}
+	// Last, and this run's own directory first: what is being laid here
+	// belongs to runs that are already over, and a run that cannot prepare
+	// itself has nothing to gain from a tidy shelf. It fails the run all the
+	// same — a later phase reading past a hole would read the run before it
+	// as though it were this one.
+	for _, shelf := range o.shelve {
+		if err := sidecar.Shelve(filepath.Dir(shelf), filepath.Base(shelf)); err != nil {
+			return reportFailure(o.termLog, cmdPrepare, err)
+		}
 	}
 	fmt.Printf("prepared %s with %v\n", o.out, declared)
 	return nil

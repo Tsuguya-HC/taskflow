@@ -318,6 +318,28 @@ spec:
                     runID:
                       format: int32
                       type: integer
+                    runner:
+                      description: |-
+                        Runner is how the run was driven. It is here, and not only on the
+                        handler, because a run the framework did not start seals nothing: the
+                        next run that has a pod lays its directory on the shelf instead
+                        (ADR-0011 決定7), and by then the handler may say something else or be
+                        gone. It is also the honest answer to what a human reads this line
+                        for — whether anything ran at all.
+
+                        Empty reads as Job — but not because Job was ever the only kind a run
+                        could have had before this field existed: ADR-0011 決定2〜6 already let
+                        a build drive and settle a State run before 決定7 added this field, so
+                        a task that reached settle in that window has a history line that is
+                        empty for a run that never had a pod, and reading it as Job is wrong
+                        for exactly that line. There is no fixing it after the fact — the
+                        handler bound to that phase may have changed since, or be gone — so
+                        shelfHoles simply does not shelve that run's answer: its number is a
+                        gap 決定7 cannot close.
+                      enum:
+                      - Job
+                      - State
+                      type: string
                   required:
                   - outcome
                   - phase

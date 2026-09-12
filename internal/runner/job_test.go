@@ -45,6 +45,9 @@ const (
 
 	// dirMore is one of the directories these examples declare.
 	dirMore = "more"
+	// claimName stands in for the claim a task's flow workspace is backed
+	// by; what it is called is the controller's business, not this one's.
+	claimName = "some-claim"
 )
 
 func task() *flowv1alpha1.Task {
@@ -615,10 +618,10 @@ func TestNoDirectoriesIsAnEmptyList(t *testing.T) {
 // anything of the handler's runs; publish is a native sidecar so it is
 // stopped, and answers, once the main containers are done.
 //
-// The run's directory is work/<runID> on the volume, and each sidecar names
-// it from where its own mount stands: prepare mounts work/ (one level above,
-// so the directory is its own to make and close) and says <mountPath>/1;
-// publish mounts the volume's root and says <mountPath>/work/1. Neither path
+// The run's directory is work/<runID> on the volume. Both sidecars mount the
+// volume's root — prepare needs it too, now that its shelving of a run that
+// never had a pod has to reach results/ beside work/ (ADR-0011 決定7) — and
+// both spell -out the same way from there: <mountPath>/work/1. Neither path
 // has an out/ in it — the run's directory is the vocabulary (ADR-0005).
 func TestInjectsPrepareAndPublish(t *testing.T) {
 	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
@@ -659,12 +662,12 @@ func TestInjectsPrepareAndPublish(t *testing.T) {
 			t.Fatalf("%s sets a cpu limit; a throttled sidecar could stall the run it is meant to seal", c.Name)
 		}
 	}
-	wantPrepare := []string{contract.SubcommandPrepare, "--" + contract.FlagOut, workspaceAt + "/1"}
+	wantPrepare := []string{contract.SubcommandPrepare, "--" + contract.FlagOut, workspaceAt + "/work/1"}
 	if !reflect.DeepEqual(prepare.Args, wantPrepare) {
-		t.Fatalf("prepare args = %v, want %v: the run's directory, seen from a mount of work/", prepare.Args, wantPrepare)
+		t.Fatalf("prepare args = %v, want %v: the run's directory, spelled the same way publish is told it", prepare.Args, wantPrepare)
 	}
-	if got := prepare.VolumeMounts[0].SubPath; got != "work" {
-		t.Fatalf("prepare subPath = %q; prepare works one level above its run, where the directory it closes is its own to make", got)
+	if got := prepare.VolumeMounts[0].SubPath; got != "" {
+		t.Fatalf("prepare subPath = %q; both injected containers mount the volume's root, so work/ and results/ are both reachable", got)
 	}
 	wantPublish := []string{contract.SubcommandPublish, "--" + contract.FlagOut, workspaceAt + "/work/1"}
 	if !reflect.DeepEqual(publish.Args, wantPublish) {
@@ -926,14 +929,14 @@ func TestFlowWorkspaceMountsTheTaskClaimPerRun(t *testing.T) {
 	}
 
 	prepare, publish := spec.InitContainers[0], spec.InitContainers[1]
-	if got := prepare.VolumeMounts[0].SubPath; got != "work" {
-		t.Fatalf("prepare subPath = %q; prepare works one level above its run, where it can make this run's directory and sweep abandoned ones", got)
+	if got := prepare.VolumeMounts[0].SubPath; got != "" {
+		t.Fatalf("prepare subPath = %q; it mounts the claim's root, where both work/ and results/ are reachable", got)
 	}
 	if prepare.VolumeMounts[0].ReadOnly {
 		t.Fatal("prepare has to write the directories")
 	}
 	wantPrepare := []string{
-		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/3",
+		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/work/3",
 		"--" + contract.FlagSweep, "1,2",
 	}
 	if !reflect.DeepEqual(prepare.Args, wantPrepare) {
@@ -978,7 +981,7 @@ func TestFlowWorkspacePinsMountsThatNameNoView(t *testing.T) {
 		})
 	})
 	job := build(t, Input{
-		Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 3, WorkspacePVC: "some-claim",
+		Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 3, WorkspacePVC: claimName,
 	})
 
 	for _, c := range job.Spec.Template.Spec.Containers {
@@ -999,7 +1002,7 @@ func TestFlowWorkspacePinsMountsThatNameNoView(t *testing.T) {
 func TestFirstRunHasNothingToSweep(t *testing.T) {
 	job := build(t, Input{Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 1, WorkspacePVC: "run-one-claim"})
 	prepare := job.Spec.Template.Spec.InitContainers[0]
-	want := []string{contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1"}
+	want := []string{contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/work/1"}
 	if !reflect.DeepEqual(prepare.Args, want) {
 		t.Fatalf("prepare args = %v, want %v", prepare.Args, want)
 	}
@@ -1044,7 +1047,7 @@ func TestRefusesAHandlerSettingItsOwnLayoutOnAWritableMount(t *testing.T) {
 func TestATemplateVolumeStaysOffTheClaim(t *testing.T) {
 	job := build(t, Input{
 		Task: task(), Handler: handler(), Phase: phaseInvestigate,
-		RunID: 2, WorkspacePVC: "some-claim",
+		RunID: 2, WorkspacePVC: claimName,
 	})
 	spec := job.Spec.Template.Spec
 	for _, v := range spec.Volumes {
@@ -1212,5 +1215,43 @@ func TestWorkspaceClaimCarriesNoRun(t *testing.T) {
 	want := map[string]string{LabelManagedBy: ManagedBy, LabelTaskUID: taskUID}
 	if !maps.Equal(pvc.Labels, want) {
 		t.Fatalf("labels = %v, want %v", pvc.Labels, want)
+	}
+}
+
+// A run the framework did not start seals nothing, so the next run that has
+// a pod is told to lay what it would have left — one flag per run, because
+// the last element of each path is a name the flow chose (ADR-0011 決定7).
+func TestShelvesTheRunsThatHadNoPod(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 4,
+		WorkspacePVC: claimName, SweepRuns: []int32{1, 2, 3},
+		Shelve: []ShelfEntry{{RunID: 2, Directory: "ok"}, {RunID: 3, Directory: dirMore}},
+	})
+
+	prepare := job.Spec.Template.Spec.InitContainers[0]
+	want := []string{
+		contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/work/4",
+		"--" + contract.FlagSweep, "1,2,3",
+		"--" + contract.FlagShelve, "/workspace/results/2/ok",
+		"--" + contract.FlagShelve, "/workspace/results/3/" + dirMore,
+	}
+	if !reflect.DeepEqual(prepare.Args, want) {
+		t.Fatalf("prepare args = %v, want %v", prepare.Args, want)
+	}
+}
+
+// A template volume is new with every pod, so there is no shelf to lay
+// anything on and nothing is passed — the same rule the sweep list follows.
+func TestNoShelfOnATemplateVolume(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
+		Shelve: []ShelfEntry{{RunID: 1, Directory: "ok"}},
+	})
+
+	prepare := job.Spec.Template.Spec.InitContainers[0]
+	for _, arg := range prepare.Args {
+		if arg == "--"+contract.FlagShelve {
+			t.Fatalf("prepare args = %v; a template volume has no shelf", prepare.Args)
+		}
 	}
 }

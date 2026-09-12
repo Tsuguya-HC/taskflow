@@ -462,6 +462,48 @@ func TestMakeRunCreatesAnOpenDirectory(t *testing.T) {
 	}
 }
 
+// work/ itself, when nothing has made it yet, has to end up at modeDir: a
+// later run's prepare may compute a different sidecar uid (runner.sidecarUID
+// picks one per Job), and it still has to be able to create its own run
+// underneath. A bare MkdirAll(dir, modeOpen) would leave a fresh work/ at
+// modeOpen (0755), subject to the umask besides, which is not wide enough for
+// another uid to write into.
+func TestMakeRunCreatesTheParentAtModeDirWhenItIsMissing(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	dir := filepath.Join(work, "3")
+
+	if err := MakeRun(dir); err != nil {
+		t.Fatalf("MakeRun: %v", err)
+	}
+	st, err := os.Stat(work)
+	if err != nil || st.Mode().Perm() != modeDir {
+		t.Fatalf("work/ = %v (%v), want mode %o so another uid's prepare can create its own run under it", st, err, modeDir)
+	}
+}
+
+// A parent already there — on a real PVC, left behind by whichever run of
+// whichever phase first reached this task's work/ — must be left exactly as
+// it is: it was already made this same way once, so there is nothing on it
+// for a later run's MakeRun to fix, only a mode and ownership that belong to
+// a uid this run's prepare has no reason to share.
+func TestMakeRunLeavesAnExistingParentAlone(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(work, "3")
+
+	if err := MakeRun(dir); err != nil {
+		t.Fatalf("MakeRun: %v", err)
+	}
+	st, err := os.Stat(work)
+	if err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("work/ = %v (%v); an existing parent's mode must be left alone", st, err)
+	}
+}
+
 // A symlink standing in for the run's own directory must not be followed:
 // MkdirAll finds it already "exists" (Stat follows the link), so it is
 // checkRealDir's Lstat that has to catch it — the same attack
@@ -727,5 +769,234 @@ func TestSweepRefusesABadList(t *testing.T) {
 		if err := Sweep(root, ids, "3"); err == nil {
 			t.Fatalf("Sweep(%v) accepted a list it should refuse", ids)
 		}
+	}
+}
+
+// What a run that never had a pod leaves on the shelf is the same shape a
+// sealed one does: the run's number, closed, with one empty declared
+// directory in it (ADR-0011 決定7).
+func TestShelveLaysAnEmptySealedRun(t *testing.T) {
+	shelf := filepath.Join(t.TempDir(), "results")
+	run := filepath.Join(shelf, "2")
+
+	if err := Shelve(run, "ok"); err != nil {
+		t.Fatalf("Shelve: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+
+	entries, err := os.ReadDir(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "ok" || !entries[0].IsDir() {
+		t.Fatalf("shelved run holds %v, want just the directory it answered with", entries)
+	}
+	inside, err := os.ReadDir(filepath.Join(run, "ok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inside) != 0 {
+		t.Fatalf("ok/ holds %v; an answer with no pod behind it has nothing in it", inside)
+	}
+	st, err := os.Stat(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != modeRun {
+		t.Fatalf("shelved run is %v, want %v — closed, the way publish leaves one", st.Mode().Perm(), modeRun)
+	}
+	if _, err := os.Lstat(filepath.Join(run, markName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a run nothing prepared must not carry a pod's mark")
+	}
+}
+
+// A run with a pod seals its own directory. Rewriting one would open what
+// that publish closed, and the same check is what lets a second attempt at
+// the run doing the shelving run through this harmlessly.
+func TestShelveLeavesASealedRunAlone(t *testing.T) {
+	shelf := t.TempDir()
+	run := filepath.Join(shelf, "2")
+	if err := Prepare(run, declared); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+	write(t, run, "more", "report.md")
+
+	if err := Shelve(run, "ok"); err != nil {
+		t.Fatalf("Shelve: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(run, "more"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("more/ holds %v; what a real run wrote must survive", entries)
+	}
+}
+
+// The shelf itself may not be there yet: the first run of a task to reach it
+// makes it, whichever of the two ends gets there first.
+func TestShelveMakesTheShelfWhenItIsMissing(t *testing.T) {
+	run := filepath.Join(t.TempDir(), "results", "1")
+
+	if err := Shelve(run, "ok"); err != nil {
+		t.Fatalf("Shelve: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+
+	if _, err := os.Stat(filepath.Join(run, "ok")); err != nil {
+		t.Fatalf("stat the shelved answer: %v", err)
+	}
+}
+
+func TestShelveRefusesANameThatIsNotOnePathElement(t *testing.T) {
+	run := filepath.Join(t.TempDir(), "1")
+
+	if err := Shelve(run, "../escape"); !errors.Is(err, ErrBadName) {
+		t.Fatalf("Shelve: %v, want %v", err, ErrBadName)
+	}
+	if _, err := os.Lstat(run); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a refused name must leave nothing behind on the shelf")
+	}
+}
+
+// A run's own prepare (the one Shelve falls through to) can die between its
+// first step — MkdirAll to modeOpen — and the chmod that closes it, leaving
+// a bare, open directory rather than nothing at all. A Shelve that only
+// checked "is something there" and stopped could not tell that apart from a
+// sealed run and would leave it open and empty forever; it has to be relaid
+// and closed the same as a run nothing has touched yet.
+func TestShelveRelaysAHalfMadeShelf(t *testing.T) {
+	shelf := t.TempDir()
+	run := filepath.Join(shelf, "2")
+	if err := os.MkdirAll(run, modeOpen); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Shelve(run, "ok"); err != nil {
+		t.Fatalf("Shelve: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+
+	st, err := os.Stat(run)
+	if err != nil || st.Mode().Perm() != modeRun {
+		t.Fatalf("run = %v (%v); a half-laid shelf must be relaid and closed, not left open", st, err)
+	}
+	if _, err := os.Stat(filepath.Join(run, "ok")); err != nil {
+		t.Fatalf("stat the relaid answer: %v", err)
+	}
+}
+
+// clearIfEmpty is tested directly rather than through Shelve, unlike the
+// rest of this file: Prepare, which Shelve falls through to next, is
+// idempotent, so whether clearIfEmpty actually removed an empty leftover or
+// silently did nothing, Shelve's own end state — the run relaid and closed —
+// comes out identical either way. No test built on Shelve's own outcome can
+// tell the two apart, so this reaches over Shelve to check the one thing
+// that does: whether the directory was actually removed.
+func TestClearIfEmptyRemovesAnEmptyOpenDirectory(t *testing.T) {
+	run := filepath.Join(t.TempDir(), "2")
+	if err := os.MkdirAll(run, modeOpen); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := clearIfEmpty(run); err != nil {
+		t.Fatalf("clearIfEmpty: %v", err)
+	}
+
+	if _, err := os.Lstat(run); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("run still exists after clearIfEmpty: err = %v, want ErrNotExist", err)
+	}
+}
+
+// runIsSealed's "closed" condition has to be checked on its own, independent
+// of whether name is already among the run's children: an open run (0755,
+// not yet closed to modeRun) that already has the declared name — the shape
+// Prepare's own first step leaves behind if it died after making a child but
+// before the final chmod — is not sealed, and Shelve must still close it.
+func TestShelveClosesAnOpenRunThatAlreadyHasTheName(t *testing.T) {
+	shelf := t.TempDir()
+	run := filepath.Join(shelf, "2")
+	if err := os.MkdirAll(filepath.Join(run, "ok"), modeDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Shelve(run, "ok"); err != nil {
+		t.Fatalf("Shelve: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+
+	st, err := os.Stat(run)
+	if err != nil || st.Mode().Perm() != modeRun {
+		t.Fatalf("run = %v (%v); an open run must be closed even though it already has the declared name", st, err)
+	}
+}
+
+// runIsSealed's "has name as a child" condition has to be checked on its
+// own, independent of whether the run is otherwise closed: a closed run
+// bearing some other name (the shape a stale run from before this shelf
+// entry's name was known would leave) is not sealed for this name, and
+// Shelve must lay the name down without disturbing what is already there.
+func TestShelveAddsTheNameToAClosedRunThatLacksIt(t *testing.T) {
+	shelf := t.TempDir()
+	run := filepath.Join(shelf, "2")
+	if err := Prepare(run, []string{"other"}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(run, 0o755) })
+	write(t, run, "other", "report.md")
+
+	if err := Shelve(run, "ok"); err != nil {
+		t.Fatalf("Shelve: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(run, "ok")); err != nil {
+		t.Fatalf("stat the newly laid ok/: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(run, "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("other/ holds %v; what was already there must survive", entries)
+	}
+}
+
+// A file (or a symlink) standing where the run's own directory belongs must
+// be refused outright, the same substitution MakeRun and Prepare refuse on
+// their own targets — Shelve must not treat whatever it actually is as an
+// empty shelf to prepare over.
+func TestShelveRefusesANonDirectoryAtTheRunPath(t *testing.T) {
+	shelf := t.TempDir()
+	run := filepath.Join(shelf, "2")
+	if err := os.WriteFile(run, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Shelve(run, "ok"); !errors.Is(err, ErrNotADirectory) {
+		t.Fatalf("Shelve over a file standing in for the run: err = %v, want ErrNotADirectory", err)
+	}
+}
+
+// A shelf that cannot even be created must fail Shelve before anything is
+// laid down, the same as TestMoveFailsWhenTheShelfCannotBeCreated does for
+// Move — the two share openDir for exactly this reason.
+func TestShelveFailsWhenTheShelfCannotBeCreated(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	run := filepath.Join(root, "results", "2")
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	if err := Shelve(run, "ok"); err == nil {
+		t.Fatal("Shelve must fail when the shelf cannot be created")
+	}
+	if _, err := os.Lstat(run); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a failed Shelve must leave nothing behind: %v", err)
 	}
 }

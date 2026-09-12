@@ -257,7 +257,7 @@ var _ = Describe("starting a task", func() {
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(flow), flow)).To(Succeed())
 		flow.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-			phaseReport: {Handler: name, Next: map[flowv1alpha1.Phase]string{"おわり": "ok"}},
+			phaseReport: {Handler: name, Next: map[flowv1alpha1.Phase]string{phaseDone: "ok"}},
 		}
 		Expect(k8sClient.Update(ctx, flow)).To(Succeed())
 

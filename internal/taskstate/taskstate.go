@@ -96,6 +96,30 @@ func needsAHuman(e transition.Ending) bool {
 	}
 }
 
+// runnerOf says how the run being recorded was driven, read off the run
+// rather than passed in: a run with a place for an answer is one the
+// framework did not start (ADR-0011). RunRef.Runner is the one place that
+// rule lives — the controller's own runnerOf reads the same method — and
+// what lets it be read here at all is the invariant this package keeps —
+// status.currentRun is the run the history line being written is about.
+//
+// No ref at all, or one Runner cannot yet tell apart, reads as Job — this
+// package's own answer for a run about to start, unlike the controller's,
+// which reads the handler instead. That is not a claim that Job was ever the
+// only kind a run without one could have had: ADR-0011 決定2〜6 already let a
+// build drive and settle a State run before 決定7 added this field, so this
+// same default also reads an already-settled State run's now-empty history
+// line as Job, wrongly, with no way left to tell the two apart
+// (HistoryEntry.Runner's own doc carries the same caveat).
+func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
+	if status.CurrentRun != nil {
+		if kind := status.CurrentRun.Runner(); kind != "" {
+			return kind
+		}
+	}
+	return flowv1alpha1.RunnerJob
+}
+
 // Visited is every phase this task has already run, derived from history
 // rather than stored beside it. Two records of the same fact drift; this one
 // cannot disagree with the history a human reads.
@@ -158,6 +182,7 @@ func Advance(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(res.Outcome),
+		Runner:     runnerOf(status),
 		Reason:     clampReason(res.Detail),
 		FinishedAt: &now,
 	})
@@ -257,6 +282,7 @@ func FinishFinally(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(outcome),
+		Runner:     runnerOf(status),
 		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})
