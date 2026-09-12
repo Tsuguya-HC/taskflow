@@ -100,6 +100,20 @@ func TestAcceptsAWellFormedFlow(t *testing.T) {
 	}
 }
 
+// The start is reached by definition, not by an edge. Every other flow here
+// happens to send work back to its own start — that is what a rework edge is
+// — which would hide a walk that only ever counts a phase as reached when
+// something points at it. A flow that never looks back is the plainest shape
+// there is, and it is the one that tells the two apart.
+func TestAcceptsAFlowThatNeverReturnsToItsStart(t *testing.T) {
+	spec := sampleFlow()
+	delete(spec.Bindings[phaseInvestigate].Next, phaseInvestigate)
+
+	if got := check(spec); len(got) != 0 {
+		t.Fatalf("a straight-line flow was refused: %v", got)
+	}
+}
+
 // A flow may send work to Escalated on purpose — that is a conclusion, not
 // silence (transition.OutcomeDeclined) — as long as it also has a way to
 // finish.

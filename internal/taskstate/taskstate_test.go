@@ -162,6 +162,26 @@ func TestAdvanceClampsAnOverLongReason(t *testing.T) {
 	}
 }
 
+// The limit is a length a Reason may be, not one it must stay under: a
+// Reason of exactly HistoryReasonMaxLength runes is written whole. Testing
+// only far-over-the-limit text leaves the edge itself free to move, and a
+// clamp firing one rune early would trade a rune of what a human reads for
+// an ellipsis claiming something was cut when nothing was.
+func TestAReasonExactlyAtTheLimitIsKeptWhole(t *testing.T) {
+	exact := strings.Repeat("a", flowv1alpha1.HistoryReasonMaxLength)
+	if got := clampReason(exact); got != exact {
+		t.Fatalf("a Reason of exactly %d runes came back as %d runes: %q",
+			flowv1alpha1.HistoryReasonMaxLength, len([]rune(got)), got)
+	}
+	switch got := clampReason(exact + "a"); {
+	case len([]rune(got)) != flowv1alpha1.HistoryReasonMaxLength:
+		t.Fatalf("one rune over the limit came back at %d runes, want %d",
+			len([]rune(got)), flowv1alpha1.HistoryReasonMaxLength)
+	case !strings.HasSuffix(got, "…"):
+		t.Fatalf("one rune over the limit = %q, want a mark that it was cut", got)
+	}
+}
+
 func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
 		Phase:      phaseReport,

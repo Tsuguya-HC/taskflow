@@ -383,6 +383,20 @@ func TestExecutionMechanics(t *testing.T) {
 	if !*job.OwnerReferences[0].Controller {
 		t.Fatal("the controller must own the Job, or cleanup will not follow the Task")
 	}
+	// The Job is the one framework-made child with blockOwnerDeletion true;
+	// the workspace claim and the verdict box both leave it false, on
+	// record as riding the task's TTL out rather than getting a say in it
+	// (BuildWorkspacePVC, BuildVerdictBox). The flag only matters to a
+	// foreground delete, and the framework's own path — expire, on the
+	// task's TTL — takes no PropagationPolicy and so runs background, where
+	// it does nothing. It is asserted anyway because the three children
+	// otherwise agree, and a change that quietly flattened this one
+	// disagreement to match the other two would have nowhere else to be
+	// caught.
+	if job.OwnerReferences[0].BlockOwnerDeletion == nil || !*job.OwnerReferences[0].BlockOwnerDeletion {
+		t.Fatalf("blockOwnerDeletion = %v, want true: the Job is the one framework-made child that sets it, unlike the claim and the verdict box",
+			job.OwnerReferences[0].BlockOwnerDeletion)
+	}
 }
 
 func TestNameIsDeterministicAndLegal(t *testing.T) {
@@ -599,6 +613,38 @@ func TestDeclaredDirectoriesTravelAsJSON(t *testing.T) {
 			if got != `["a,b","more","ok"]` {
 				t.Fatalf("container %q %s = %q", c.Name, EnvDirectories, got)
 			}
+		}
+	}
+}
+
+// The rest of the injected containers' securityContext, kept apart from the
+// test above only because that one is already at the complexity the linter
+// allows. The fields here have nowhere else to be caught: these two
+// containers are the framework's own, so nothing in a handler's template can
+// be blamed for them, and a change that quietly widens one would otherwise
+// first be visible in a cluster.
+func TestInjectedContainersAreLockedDown(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	inits := job.Spec.Template.Spec.InitContainers
+	if len(inits) < 2 {
+		t.Fatalf("initContainers = %d; the two the controller injects come first", len(inits))
+	}
+
+	for _, c := range []corev1.Container{inits[0], inits[1]} {
+		sc := c.SecurityContext
+		if sc == nil {
+			t.Fatalf("%s has no securityContext at all", c.Name)
+		}
+		if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+			t.Fatalf("%s may escalate privileges: %v", c.Name, sc.AllowPrivilegeEscalation)
+		}
+		if sc.Capabilities == nil ||
+			!slices.Equal(sc.Capabilities.Drop, []corev1.Capability{"ALL"}) ||
+			len(sc.Capabilities.Add) != 0 {
+			t.Fatalf("%s capabilities = %+v; want every one dropped and none added", c.Name, sc.Capabilities)
+		}
+		if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+			t.Fatalf("%s seccompProfile = %+v, want RuntimeDefault", c.Name, sc.SeccompProfile)
 		}
 	}
 }

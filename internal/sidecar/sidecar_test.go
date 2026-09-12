@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Tsuguya-HC/taskflow/internal/collect"
@@ -459,6 +460,30 @@ func TestMakeRunCreatesAnOpenDirectory(t *testing.T) {
 	}
 	if err := MakeRun(dir); err != nil {
 		t.Fatalf("MakeRun must tolerate a directory that already exists: %v", err)
+	}
+}
+
+// MakeRun's chmod after MkdirAll is what makes the mode the run's rather than
+// the process's: MkdirAll asks for modeOpen and gets it minus whatever the
+// caller happens to be masking, and the agent that has to write in here is
+// not this process. A 022 mask hides the difference — 0755 masked by 022 is
+// still 0755 — so holding the chmod in place takes a mask that would
+// actually take something away.
+func TestMakeRunOpensTheRunPastTheUmask(t *testing.T) {
+	root := t.TempDir()
+	old := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(old) })
+
+	dir := filepath.Join(root, "3")
+	if err := MakeRun(dir); err != nil {
+		t.Fatalf("MakeRun: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != modeOpen {
+		t.Fatalf("mode = %o, want %o; what the run is open to is not the umask's to decide", got, modeOpen)
 	}
 }
 

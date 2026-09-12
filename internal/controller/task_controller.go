@@ -1143,6 +1143,10 @@ func (r *TaskReconciler) backfillExpiry(
 // stale read — the object this reconcile fetched has since been deleted and
 // a different one created under the same name — refuses rather than taking
 // the newer object down with it.
+//
+// No PropagationPolicy is given, so this delete of the Task runs background:
+// the children's blockOwnerDeletion (job.go) has no effect here, foreground
+// delete being the only kind it holds up.
 func (r *TaskReconciler) expire(ctx context.Context, task *flowv1alpha1.Task) error {
 	return client.IgnoreNotFound(r.Delete(ctx, task, client.Preconditions{UID: &task.UID}))
 }
