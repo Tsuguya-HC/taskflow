@@ -112,6 +112,28 @@ func Visited(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]fl
 	return seen
 }
 
+// clampReason keeps a Reason within HistoryEntry.Reason's own CRD limit
+// (flowv1alpha1.HistoryReasonMaxLength) before Advance or FinishFinally ever
+// writes one. This is the one place that limit is actually enforced: what
+// reaches here can be a transition's own detail, a controller error folded in
+// (ensureVerdictBox's notOwnedError, unbounded in the number of owners it
+// lists), or free text a handler wrote — none of it bounded upstream to a
+// number that agrees with the CRD's, and a write that walks over it is
+// refused for good rather than merely truncated (Round 2's collect.reasonf
+// already clamps its own two producers; this is the backstop that also
+// covers everything built here in taskstate). Truncated text says so, with an
+// ellipsis, so a human reading a Reason that stops mid-sentence knows it was
+// cut rather than mistaking it for the whole story.
+func clampReason(s string) string {
+	const ellipsis = "…"
+	runes := []rune(s)
+	if len(runes) <= flowv1alpha1.HistoryReasonMaxLength {
+		return s
+	}
+	cut := max(flowv1alpha1.HistoryReasonMaxLength-len([]rune(ellipsis)), 0)
+	return string(runes[:cut]) + ellipsis
+}
+
 // Advance records the completed run and moves the task to res.Next.
 //
 // runID rises on every run — reworks and infrastructure retries alike —
@@ -136,7 +158,7 @@ func Advance(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(res.Outcome),
-		Reason:     res.Detail,
+		Reason:     clampReason(res.Detail),
 		FinishedAt: &now,
 	})
 
@@ -235,7 +257,7 @@ func FinishFinally(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(outcome),
-		Reason:     detail,
+		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})
 	status.CurrentRun = nil

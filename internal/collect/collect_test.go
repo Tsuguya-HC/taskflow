@@ -272,3 +272,107 @@ func TestRan(t *testing.T) {
 		t.Fatal("an init container that terminated counts: the handler's own code ran")
 	}
 }
+
+// box is the ConfigMap a State run is answered in, with whatever has been
+// written into it so far.
+func box(data map[string]string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{Data: data}
+}
+
+func TestBoxNotAnsweredYet(t *testing.T) {
+	for name, data := range map[string]map[string]string{
+		"nothing written": nil,
+		"empty value":     {"verdict": ""},
+		"only blanks":     {"verdict": "  \n"},
+		"reason alone":    {"reason": "まだ見ている"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, answered := FromBox(box(data), declared)
+			if answered {
+				t.Fatalf("answered = true (%+v); nothing that counts as a word was written", got)
+			}
+			if got.Directory != "" {
+				t.Fatalf("directory = %q, want none", got.Directory)
+			}
+		})
+	}
+}
+
+func TestBoxAnswers(t *testing.T) {
+	got, answered := FromBox(box(map[string]string{"verdict": " ok\n", "reason": " 見ました "}), declared)
+	if !answered || got.Directory != "ok" {
+		t.Fatalf("answer = %+v, answered = %v; surrounding space is trimmed, the word is not", got, answered)
+	}
+	if got.Reason != "見ました" {
+		t.Fatalf("reason = %q; the line beside the answer is kept", got.Reason)
+	}
+}
+
+// A word outside the vocabulary is not an error to report: it is an answer
+// that does not count, and ends where every other non-answer does.
+func TestBoxOutsideTheVocabulary(t *testing.T) {
+	got, answered := FromBox(box(map[string]string{"verdict": "approved"}), declared)
+	if !answered {
+		t.Fatal("answered = false; something was written, and the run is over either way")
+	}
+	if got.Directory != "" {
+		t.Fatalf("directory = %q; only a declared word is an answer", got.Directory)
+	}
+	if !strings.Contains(got.Reason, "approved") || !strings.Contains(got.Reason, dirMore) {
+		t.Fatalf("reason = %q; it must say what was written and what could have been", got.Reason)
+	}
+}
+
+// The value and the reason are both free text somebody else wrote, and both
+// end up in a status a person reads with kubectl.
+func TestBoxSanitizesWhatItReadsBack(t *testing.T) {
+	got, _ := FromBox(box(map[string]string{"verdict": "\x1b[31mapproved"}), declared)
+	if strings.Contains(got.Reason, "\x1b") {
+		t.Fatalf("reason = %q; an escape sequence reached a terminal through status", got.Reason)
+	}
+	got, _ = FromBox(box(map[string]string{"verdict": "ok", "reason": "done\x1b]0;pwned\a"}), declared)
+	if strings.Contains(got.Reason, "\x1b") {
+		t.Fatalf("reason = %q; an escape sequence reached a terminal through status", got.Reason)
+	}
+}
+
+// The value is free text somebody typed where a single word was expected, and
+// nothing bounds how long it is before Sanitize runs on it a first time. What
+// lands in status has a hard limit of its own (HistoryEntry.Reason, 2048
+// runes), and a Reason built from an over-long value plus the declared
+// vocabulary's prose must not walk over that and get the write refused.
+func TestBoxOutsideTheVocabularyReasonStaysBounded(t *testing.T) {
+	long := strings.Repeat("no", maxReasonRunes)
+	got, answered := FromBox(box(map[string]string{"verdict": long}), declared)
+	if !answered {
+		t.Fatal("answered = false; something was written")
+	}
+	// maxReasonRunes is what reasonf clamps the whole message to, and it is
+	// well under HistoryEntry.Reason's 2048-rune limit even doubled — so
+	// bounding by it here is bounding by the CRD's limit, with room to spare.
+	if n := len([]rune(got.Reason)); n > maxReasonRunes {
+		t.Fatalf("reason has %d runes, want at most %d (the CRD allows 2048)", n, maxReasonRunes)
+	}
+}
+
+// The declared vocabulary comes from the flow, not from anything this package
+// bounds — strings.Join has no length of its own, and a flow can declare as
+// many directories as its author likes. The message built around it must stay
+// bounded the same way.
+func TestReasonStaysBoundedByALongDeclaredList(t *testing.T) {
+	many := make([]string, 200)
+	for i := range many {
+		many[i] = strings.Repeat("x", 20)
+	}
+	got := FromPods([]corev1.Pod{*pod(terminated("publish", "unrelated"))}, many)
+	if n := len([]rune(got.Reason)); n > maxReasonRunes {
+		t.Fatalf("reason has %d runes, want at most %d (the CRD allows 2048)", n, maxReasonRunes)
+	}
+}
+
+func TestBoxMissing(t *testing.T) {
+	got, answered := FromBox(nil, declared)
+	if answered || got.Reason == "" {
+		t.Fatalf("answer = %+v, answered = %v; a box that is not there says so", got, answered)
+	}
+}

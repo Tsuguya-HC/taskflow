@@ -81,7 +81,13 @@ var _ = Describe("starting a task", func() {
 
 		Expect(job.Annotations[runner.AnnotationPhase]).To(Equal(string(phaseInvestigate)),
 			"the status name travels as an annotation, being illegal as a label")
-		Expect(job.Labels).To(HaveLen(1), "the controller adds one label of its own and no more")
+		Expect(job.Labels).To(SatisfyAll(
+			HaveLen(3),
+			HaveKeyWithValue(runner.LabelManagedBy, runner.ManagedBy),
+			HaveKeyWithValue(runner.LabelRunID, "1"),
+		), "the framework's own objects wear exactly the three labels ADR-0011 決定5 names")
+		Expect(job.Spec.Template.Labels).NotTo(HaveKey(runner.LabelManagedBy),
+			"a pod is not one of them: what a pod wears is what a policy selects on")
 		Expect(job.Spec.Template.Labels).To(HaveKeyWithValue("role", handlerName),
 			"whatever a policy selects on comes from the handler untouched")
 		Expect(job.OwnerReferences).To(HaveLen(1))

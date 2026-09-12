@@ -18,6 +18,7 @@ package runner
 
 import (
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -118,17 +119,40 @@ func TestCarriesTheTemplateThrough(t *testing.T) {
 	}
 }
 
-// The one label the controller sets is its own bookkeeping. A status name
-// cannot be a label value, which is half the reason it is not one.
-func TestSetsOnlyItsOwnLabel(t *testing.T) {
-	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+// The labels the controller sets are its own bookkeeping — that the object is
+// the framework's, whose it is, and which run it belongs to (ADR-0011 決定5).
+// A status name cannot be a label value, which is half the reason it is not
+// one of them.
+func TestSetsOnlyItsOwnLabels(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 3})
 
-	if len(job.Labels) != 1 || job.Labels[LabelTaskUID] != taskUID {
-		t.Fatalf("job labels = %v, want only %s", job.Labels, LabelTaskUID)
+	want := map[string]string{
+		LabelManagedBy: ManagedBy,
+		LabelTaskUID:   taskUID,
+		LabelRunID:     "3",
+	}
+	if !maps.Equal(job.Labels, want) {
+		t.Fatalf("job labels = %v, want %v", job.Labels, want)
 	}
 	for k, v := range job.Labels {
 		if strings.ContainsAny(v, "調査報告") {
 			t.Fatalf("label %s carries a status name (%q), which Kubernetes rejects", k, v)
+		}
+	}
+}
+
+// The pod is deliberately not one of those objects: what a pod wears is what
+// a policy selects on, and that is the handler's to write.
+func TestThePodWearsOnlyTheTaskUID(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 3})
+
+	pod := job.Spec.Template.Labels
+	if pod[LabelTaskUID] != taskUID {
+		t.Fatalf("pod labels = %v, want the task uid among them", pod)
+	}
+	for _, unwanted := range []string{LabelManagedBy, LabelRunID} {
+		if _, found := pod[unwanted]; found {
+			t.Fatalf("pod labels = %v, want no %s", pod, unwanted)
 		}
 	}
 }
@@ -1090,5 +1114,100 @@ func TestBuildWorkspacePVCOwnership(t *testing.T) {
 	vct.AccessModes[0] = corev1.ReadWriteOnce
 	if pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
 		t.Fatal("the claim's spec must be a copy, not an alias of the flow's")
+	}
+}
+
+// The place a State run is answered in is named the way its Job would have
+// been, for the same reasons: the name repeats, so a second create collides
+// instead of opening a second place, and no status name can leak into it.
+func TestVerdictBoxNameIsDeterministicAndLegal(t *testing.T) {
+	a := VerdictBoxName("sample-flow-x7f2", taskUID, phaseInvestigate, 2)
+	if a != VerdictBoxName("sample-flow-x7f2", taskUID, phaseInvestigate, 2) {
+		t.Fatalf("%q is not stable; the create is what refuses a second box", a)
+	}
+	if VerdictBoxName("sample-flow-x7f2", taskUID, "報告", 2) == a ||
+		VerdictBoxName("sample-flow-x7f2", taskUID, phaseInvestigate, 3) == a {
+		t.Fatalf("two different runs share the name %q", a)
+	}
+	if a == JobName("sample-flow-x7f2", phaseInvestigate, 2, 0) {
+		t.Fatalf("the box and the Job of one run share the name %q", a)
+	}
+	if len(a) > maxNameLength {
+		t.Fatalf("name is %d characters: %q", len(a), a)
+	}
+	for _, r := range a {
+		lower := r >= 'a' && r <= 'z'
+		digit := r >= '0' && r <= '9'
+		if !lower && !digit && r != '-' {
+			t.Fatalf("name %q contains %q, which RFC 1123 does not allow", a, r)
+		}
+	}
+}
+
+// A task deleted and recreated under the same name is a different task, and a
+// prior generation's box — orphaned, or kept by --cascade=orphan — must not
+// collide with this one's, the same reason WorkspacePVCName is UID-derived.
+func TestVerdictBoxNameIsUIDDerived(t *testing.T) {
+	a := VerdictBoxName("sample-flow-x7f2", "uid-1", phaseInvestigate, 2)
+	if a == VerdictBoxName("sample-flow-x7f2", "uid-2", phaseInvestigate, 2) {
+		t.Fatalf("two different task generations share the name %q", a)
+	}
+}
+
+// A task whose name has to be cut still gets a box, and two tasks that agree
+// up to the cut still get different ones.
+func TestVerdictBoxNameStaysWithinTheLimit(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	first := VerdictBoxName(long+"-one", taskUID, phaseInvestigate, 12)
+	second := VerdictBoxName(long+"-two", taskUID, phaseInvestigate, 12)
+	if len(first) > maxNameLength || len(second) > maxNameLength {
+		t.Fatalf("names are %d and %d characters", len(first), len(second))
+	}
+	if first == second {
+		t.Fatalf("two task names that agree up to the cut collided on %q", first)
+	}
+}
+
+// What the box carries is the declaration, put where whoever answers will see
+// it. It carries nothing else: the answer is theirs to write.
+func TestVerdictBoxCarriesTheDeclaration(t *testing.T) {
+	box := BuildVerdictBox(task(), phaseInvestigate, 3, []string{"more", "ok"})
+
+	if len(box.Data) != 0 {
+		t.Fatalf("data = %v, want an empty box", box.Data)
+	}
+	if got := box.Annotations[AnnotationPhase]; got != string(phaseInvestigate) {
+		t.Fatalf("phase annotation = %q", got)
+	}
+	if got := box.Annotations[AnnotationChoices]; got != `["more","ok"]` {
+		t.Fatalf("choices = %q; the vocabulary is rendered the way the pod's is", got)
+	}
+	if got := BuildVerdictBox(task(), phaseInvestigate, 3, []string{"ok", "more"}).
+		Annotations[AnnotationChoices]; got != `["more","ok"]` {
+		t.Fatalf("choices = %q; the rendering must not depend on declaration order", got)
+	}
+	want := map[string]string{LabelManagedBy: ManagedBy, LabelTaskUID: taskUID, LabelRunID: "3"}
+	if !maps.Equal(box.Labels, want) {
+		t.Fatalf("labels = %v, want %v", box.Labels, want)
+	}
+	if len(box.OwnerReferences) != 1 || !*box.OwnerReferences[0].Controller {
+		t.Fatalf("owners = %v; the box goes when the task goes", box.OwnerReferences)
+	}
+	if *box.OwnerReferences[0].BlockOwnerDeletion {
+		t.Fatal("the box rides the task's TTL out; it does not get a say in it")
+	}
+	if box.Namespace != task().Namespace {
+		t.Fatalf("namespace = %q; the answer is written where the task is", box.Namespace)
+	}
+}
+
+// The claim spans every run of a task, so it is the one framework-made object
+// that cannot carry a run number.
+func TestWorkspaceClaimCarriesNoRun(t *testing.T) {
+	pvc := BuildWorkspacePVC(task(), &corev1.PersistentVolumeClaimSpec{})
+
+	want := map[string]string{LabelManagedBy: ManagedBy, LabelTaskUID: taskUID}
+	if !maps.Equal(pvc.Labels, want) {
+		t.Fatalf("labels = %v, want %v", pvc.Labels, want)
 	}
 }
