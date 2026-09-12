@@ -1,4 +1,4 @@
-# ADR-0011 framework が起こさない run の verdict は、宣言された外部状態から読む
+# ADR-0011 framework が起こさない run には、framework が答えの置き場を開ける
 
 - **status**: accepted（2026-09-12、人間の承認）
 - **根拠**: issue #112。`External` は enum に居るが実装が無く（design.md §4）、その説明は
@@ -15,37 +15,49 @@
    `External` が「人間 / 外部 CI / 任意の外部システムを 1 つの機構に統合する」と言っていたものは、
    人間という語を一度も使わない形にして初めて本当になる
 
-2. **入口は ConfigMap ひとつ。Task と同じ namespace。** キーは framework が導出する
-   **`run-<runID>`**（`results/<runID>` と同じ流儀で、宣言に書かせない）。
-   **値は宣言されたディレクトリ名そのもの**で、照合は `collect.FromPods` と同じ
-   `slices.Contains(declared, value)` — 照合表もパーサも新設しない。語彙外の値は
-   termination message が語彙外だったときと同じく直接 `Escalated`。
-   `run-<runID>.reason` があれば termination message の 2 行目と同じ扱い（history / 条件 / Event）。
+2. **入口はコントローラが run ごとに作る ConfigMap。** `State` の run を始めるとき、Task と同じ
+   namespace に、Task を `ownerReference` に持つ ConfigMap を 1 つ作る。中身は空で、答えの語彙は
+   注釈に置く:
 
-   **キーが run 番号で分かれるので、前の run 宛の答えが次の run を通すことが構造的に起きない。**
-   ADR-0004 が「決着した run を数える」と決めた番号が、そのまま鍵になる。
-   ただし番号は数えれば分かるので、**run が始まる前にそのキーを書いておける**。
-   先回りを素通りさせないために、**run の開始時にキーが既に在れば受理せず `Failed`**（P8）。
+   ```yaml
+   metadata:
+     labels:      {flow.tgy.io/task-uid: <uid>}     # 既存の contract。名前ではなくこれで引ける
+     annotations: {flow.tgy.io/phase: <フェーズ>, flow.tgy.io/run-id: "3",
+                   flow.tgy.io/choices: "ok more"}  # 宣言から生成した語彙
+   data: {}
+   ```
+
+   答えは `data.verdict` に宣言されたディレクトリ名そのものを書く。照合は
+   `collect.FromPods` と同じ `slices.Contains(declared, value)` で、照合表もパーサも新設しない。
+   語彙外の値は termination message が語彙外だったときと同じく直接 `Escalated`。
+   `data.reason` があれば termination message の 2 行目と同じ扱い（history / 条件 / Event）。
+   キーが 1 本なので、ディレクトリ側で必要だった「非空がちょうど 1 つ」に当たる判定が要らない。
+
+   **`prepare` が `/workspace/{ok,more}/` を敷くのと同じ動作**にあたる — 宣言が語彙を作り、
+   答える側は並んでいるものから 1 つ選ぶ。答える側が語彙を知るのに flow を読む必要が無い。
+   **handler 側の宣言は `runner: {type: State}` だけで、ConfigMap の名前も場所も書かせない。**
+
+   置き場をコントローラが用意するのは workspace の PVC と同じ筋（[ADR-0002](0002-per-task-workspace-pvc.md)）。
+   利用側に固定名の ConfigMap を持たせる案は採らない: handler は複数の Task が共有するので、
+   **同じ handler を使う 2 つの Task が同じ run 番号に居るとキーが衝突する**。
+   Task ごとに名前を分ける手段は、結局コントローラが名前を決めることに帰着する
+
+3. **先回りは `Create` が弾く。** 既に同じ名前の ConfigMap があれば `AlreadyExists` で、それは
+   **run が始まる前に誰かが置き場を作っていた**ということなので受理せず `Failed`（P8）。
+   run 番号は数えれば分かるので、「番号を宛先に焼く」だけでは先回りを防げない — 先行者の言葉で
+   言えば fencing には**古い / 先走った書き込みを能動的に拒否する側**が要り（下の先行調査 6）、
+   ここではその拒否が**作成の一意性**という K8s が元から持っている性質に落ちる。
    「外部の結果が先に出ていた」と「ゲートを先回りで通した」はコントローラから区別が付かず、
-   区別が付かないまま通す方が悪い（P7 の帰結）。先行者の言葉ではこれが fencing にあたる
-   — 世代を宛先に焼くだけでは足りず、**古い / 先走った書き込みを能動的に拒否する側**が要る
-   （下の先行調査 6）。
-   0 個 / 2 個以上も起きない — キー 1 本に値は 1 つで、ディレクトリ側で必要だった
-   「非空がちょうど 1 つ」の判定に当たるものが要らない
+   区別が付かないまま通す方が悪い（P7 の帰結）。前もって答えたい側は、run が始まってから書く
 
-3. **値は uncached の `Get`。watch は要求しない。** 待っている run があるときだけ引き、requeue で
-   再訪する。RBAC は `configmaps` の **`get` だけ**で済み、`list` / `watch` が要らない = informer の
-   キャッシュにクラスタ中の ConfigMap が乗らない（**値の取得と変更検知を別経路にし、
-   後者を任意能力として落とせるようにする**のは先行例がある — 下の先行調査 7）。**どの ConfigMap を verdict 源にしてよいかを
-   framework は絞らない** — 絞りたいなら admission policy で、それは P2 の言う
-   ポリシーであって利用側の持ち物。framework 側でラベルを必須にして絞る案は、
-   ポリシーを提供側へ引き込むうえに「ラベルを付け忘れた ConfigMap が黙って永久に待つ」という
-   沈黙する壊れ方を足すので採らない
-
-4. **置き場が無いのは矛盾、答えがまだ無いのは待ち。** run の開始時に **ConfigMap が存在しなければ
-   `Failed`** — 答えを置く場所が無いのは配管が定義できない側で、workspace が未マウントなら答えの
-   置き場が無いのと同じ形（CLAUDE.md の物差し）。対して **キーがまだ無いのは正常な待ち**で、
-   これが `State` の平常状態。値が宣言ディレクトリに無ければ `Escalated`（既存の規則）
+4. **値は uncached の `Get`。watch は要求しない。** 待っている run があるときだけ引き、requeue で
+   再訪する。RBAC は `configmaps` の **`get` と `create`** だけで済み、`list` / `watch` が
+   要らない = informer のキャッシュにクラスタ中の ConfigMap が乗らない（**値の取得と変更検知を
+   別経路にし、後者を任意能力として落とせるようにする**のは先行例がある — 下の先行調査 7）。
+   削除は `ownerReference` の GC に任せるので `delete` も要らない。
+   **答えられる者を framework は絞らない** — その ConfigMap を書ける権限、つまり素の RBAC が決める。
+   名前が生成されるので `resourceNames` で 1 個に絞る道は閉じるが、**namespace を権限の階層にする**
+   （design.md §4）が既に選んでいる粒度がそれで、object 単位の切り分けはこの設計に無い粒度になる
 
 5. **`State` では `timeout` を必須にする**（CEL で create 時に拒否）。期限の無い待ちは沈黙と
    区別が付かず、終端に着かない Task は TTL にも metric にも現れない。超過の扱いは既存のまま
@@ -127,11 +139,12 @@
   （apiextensions v1）。`kubectl patch --subresource=verdict` は apiserver に届かず、
   当初案が最大の利点としていた「**verdict だけ書ける RBAC**」も同時に消える
   （`tasks/status` を配ると phase も history も runID も書ける）
-- **inbox 型（誰かが Task へ書き込む）そのもの。** 書き込み経路が 2 本目になるが、
-  この設計の保証はどれも 1 本目の性質だった — 語彙は宣言から生成される、パーサを持たない、
-  権限はカーネル（パーミッション）。2 本目に同じ強さを与えようとすると、runID の CAS・
-  ディレクトリの照合・拒否の返し方を自作することになる。状態を**読む**側に倒すと、
-  権限は素の RBAC（その ConfigMap を書ける者が答えられる）に落ち、照合は 1 本目と同じ規則で済む
+- **Task 自身へ書かせる案**（`status` / `spec` / 注釈のいずれでも）。決定 2 は「コントローラが
+  run ごとに私書箱を開ける」形なので inbox ではあるが、**書かれる先が Task ではない**。
+  Task の `status` を外から書かせると、Argo Workflows が 2020 年から抱えている two-writer problem
+  （#2942、"Only the workflow controller should be able to change a workflow"）をそのまま踏む。
+  `spec` は投入者のもので、注釈は `patch tasks` を配ることになり spec も書けてしまう。
+  Cluster API は注釈を選んでいるが、それは対象（Machine）がもともと管理者の持ち物だから成立している
 - **「計画された人間の判断」を framework の語彙として持つ案**（#109 / #110 の前提）。
   P7 の下で見分けられない。#110 の実行時検査「gate のフェーズの handler が `External` でなければ
   `Failed`」は、見分けられるふりをしていた半分なので落とす。残すのは admission のグラフ検査
@@ -166,5 +179,8 @@
   API 負荷は待っている run の数に比例するだけなので小さいが、答えが着いてから遷移するまでの
   遅延はここで決まる。実測は #112。**間隔を詰める代わりに watch を任意能力として足す道**（先行調査 7）は
   開いているが、既定では要求しない
+- **置き場の名前の導出**。`ownerReference` と `flow.tgy.io/task-uid` ラベルで引ける形にはなるが、
+  名前そのものを Task 名から導くと 253 文字の上限で切り詰めが要る。切り詰め方（と、切り詰めた
+  名前が衝突しないこと）は実装で決める
 - **`State` の run に `maxInfraRetries` は意味を持たない**（インフラ障害が起きる実体が無い）。
   型の上で無視するか、CEL で拒否するかは実装時に決める
