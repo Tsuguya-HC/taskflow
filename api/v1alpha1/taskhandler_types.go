@@ -29,15 +29,23 @@ import (
 // definitions already written for it — not worth the dependency, and a single
 // pod structurally avoids the class of trap where a volume the steps are meant
 // to share turns out to be scoped to one pod.
-// +kubebuilder:validation:Enum=Job;External
+// +kubebuilder:validation:Enum=Job;State
 type RunnerType string
 
 const (
 	// RunnerJob runs the handler as a batch Job. The only runner in Step 1.
 	RunnerJob RunnerType = "Job"
-	// RunnerExternal means something outside the cluster fills the phase and
-	// reports back. A human reviewer is this.
-	RunnerExternal RunnerType = "External"
+	// RunnerState means the framework starts nothing for this phase: the
+	// run's verdict appears in state declared outside it, and the
+	// controller reads it back from the place it opened for that answer
+	// (ADR-0011).
+	//
+	// Who wrote the answer is not part of what this says, because it is not
+	// something the controller can find out: a person with kubectl, an
+	// external system bridging a result back, and another operator are one
+	// case from here. Which of them may answer is decided by who can write
+	// that place — plain RBAC — not by anything in this type.
+	RunnerState RunnerType = "State"
 )
 
 // EmbeddedObjectMeta is the part of a pod's metadata a handler may set.
@@ -114,6 +122,15 @@ type WorkspaceSpec struct {
 // in the pod spec its author writes. The same shape therefore accepts a
 // linter, a test suite or a shell script — from the controller's side there is
 // no difference between those and an agent.
+//
+// The two CEL rules are what runner.type means for the rest of the spec, said
+// where it is written rather than discovered when a run starts: a State run
+// needs a deadline it cannot get from anywhere else, and it has no pod, so the
+// three fields that only describe one are refused rather than accepted and
+// never read (ADR-0011 決定6).
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.runner) || self.runner.type != 'State' || has(self.timeout)",message="a State runner must declare a timeout: nothing is started, so nothing else ends the wait, and a run nobody answers would never reach an ending"
+// +kubebuilder:validation:XValidation:rule="!has(self.runner) || self.runner.type != 'State' || (!has(self.jobTemplate) && !has(self.workspace) && !has(self.maxInfraRetries))",message="a State runner starts nothing, so jobTemplate, workspace and maxInfraRetries have no run to apply to"
 type TaskHandlerSpec struct {
 	// Phase this handler can fill — a status name from the flow's own
 	// vocabulary. The framework owns only two names and refuses those; every
@@ -135,7 +152,8 @@ type TaskHandlerSpec struct {
 	// parallelism) — rather than the two locations with differing semantics
 	// that a workflow engine's own template would ask for.
 	//
-	// Required when runner.type is Job; ignored when it is External.
+	// Required when runner.type is Job, and refused when it is State: a run
+	// nothing starts has no pod for this to describe.
 	// +optional
 	JobTemplate *JobTemplate `json:"jobTemplate,omitempty"`
 
@@ -145,13 +163,22 @@ type TaskHandlerSpec struct {
 	// template that carries a container under one of their names is
 	// refused rather than merged.
 	//
-	// Required when runner.type is Job; ignored when it is External.
+	// Required when runner.type is Job, and refused when it is State: there
+	// are no containers of the controller's to fit into a run that starts
+	// none.
 	// +optional
 	Workspace *WorkspaceSpec `json:"workspace,omitempty"`
 
 	// Timeout is the single source of truth for how long a run may take. The
 	// controller writes it into the Job as well, so the kubelet enforces it
 	// too; setting activeDeadlineSeconds yourself is rejected.
+	//
+	// A State runner must declare one (the CEL rule on this spec). Nothing
+	// is started, so there is no Job to carry the deadline and nothing else
+	// that ends the wait: without a timeout, a run nobody ever answers is
+	// indistinguishable from one still being considered, and a task that
+	// never stops reaches neither its TTL nor the metric that counts how
+	// flows end.
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
@@ -159,6 +186,12 @@ type TaskHandlerSpec struct {
 	// judgement — an image that would not pull, an evicted pod. A handler that
 	// ran and reached no conclusion is not retried here; it is indeterminate,
 	// and indeterminate goes to a human.
+	//
+	// Refused for a State runner rather than ignored there: nothing is
+	// started, so there is no infrastructure to fail and nothing an
+	// allowance could ever be spent on. A field that is read by nothing but
+	// accepted anyway is the shape of every setting that turns out not to
+	// have been in effect.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxInfraRetries int32 `json:"maxInfraRetries,omitempty"`
