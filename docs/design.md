@@ -332,8 +332,14 @@ handler が書くのは `runner: {type: State}` と `timeout` だけ。
 | 語彙外の値 | 直接 `Escalated`（termination message が語彙外だったときと同じ） |
 
 `State` の run は Pod を作らないので `maxInfraRetries` に意味が無く、`jobTemplate` / `workspace` と
-まとめて CEL で拒否する（**黙って無視しない**）。棚（`results/<runID>/`）は次の run の `prepare` が
-空で敷く — これは**未実装**（#112）。
+まとめて CEL で拒否する（**黙って無視しない**）。
+
+**棚（`results/<runID>/`）は次の run の `prepare` が空で敷く**（決定7）。Pod が無い run は自分で封印
+できないが、**空の宣言ディレクトリは既に正当な verdict の形**（`ok/` は空）なので、新しい表現は要らない。
+コントローラが `history` から「Pod を持たなかった run とその答え」を計算して `prepare` に渡し、
+`prepare` は**既にある棚には触らない** — Pod を持った run は自分で封印しているので、それを敷き直すのは
+起きなかったことの証拠を作ることになる。この判定のために `history` の各行が
+**どの runner で走ったか**（`runner: Job` / `State`）を持つ。
 
 > **スケッチ（未実装）**: `Sandbox` — 長命 runner。enum にも無い。§7「終了必須」の不変条件を参照。
 
@@ -1080,9 +1086,10 @@ flow が `spec.workspace.volumeClaimTemplate`（corev1 の **spec のみ**。省
 `/workspace/ok/` 等、マウント直下）。publish が seal で
 verdict を確定させた後、同一ボリューム内の rename で `work/<runID>` を `results/<runID>` に移す —
 別ボリュームを跨がないので原子的。**`results/` には封印済みの run だけが並ぶ**、というのが読み側の
-意味論。publish は flow-workspace モードでは唯一 volume の root を書き込み可でマウントする（rename
+意味論。publish は flow-workspace モードでは volume の root を書き込み可でマウントする（rename
 が work/ と results/ の二つの棚を跨ぐため）— agent の書き込みは work/<runID> の subPath に閉じた
-まま。rename が失敗したら termination message を書かずに非 0 で exit し、既存の infra retry 経路に
+まま。prepare も同じくルートをマウントする（決定7、下の段落）ので、この 2 つの注入コンテナだけが
+root を見る。rename が失敗したら termination message を書かずに非 0 で exit し、既存の infra retry 経路に
 落ちる（移動できていないのに verdict だけ通ると下流が読めないディレクトリを指すことになるため）。
 再試行は同じ runID に戻ってくるので（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)）、
 Pod オブジェクトが消えたあとも生きているゾンビ publish が、次の attempt の書きかけを同じパスから
@@ -1097,8 +1104,9 @@ Pod オブジェクトが消えたあとも生きているゾンビ publish が�
 開けば封印済みの run だけが並び、今走っている run は work/ にいるので見えない。readOnly の明示
 subPath は checkWorkspace の拒否対象ではない（拒否は書き込み可マウントの SubPath / SubPathExpr だけ）。
 
-**残骸は次の run の prepare が掃除する**（同 ADR-0003）。prepare は work/ を 1 階層上でマウントし、
-自分の run ディレクトリを作ってから、コントローラが計算した sweep リスト（何が生きているかを知る
+**残骸は次の run の prepare が掃除する**（同 ADR-0003）。prepare は publish と同じくボリュームの
+ルートをマウントし（`work/` と `results/` の両方に届く必要がある — 後者は Pod を持たなかった run の
+棚を敷くため。ADR-0011 決定7）、自分の run ディレクトリを作ってから、コントローラが計算した sweep リスト（何が生きているかを知る
 のはコントローラだけ。直列の今は自 runID 未満の全部で、並列化の日はリスト計算だけが変わる）にある
 `work/<id>` を消す。封印済みは rename で work/ に居ないので、消えるのは封印できず死んだ run の
 残骸だけ。消せなければ（NFS の sillyrename ゴースト等）エラー = その run は始まらず infra retry へ
@@ -1147,9 +1155,14 @@ flow が `finally` を持つ場合、この棚の最後の番号は cleanup run 
 <run>/.prepared-by                       ← Pod UID（ADR-0004）。閉じた中に一緒に封じる
 ```
 
-prepare が volume を `subPath: work` でマウントして `<runID>/` を自分で作るのは、kubelet が作った
-subPath ディレクトリは root 所有で chmod が EPERM になるため（2026-08-30 実測）。自分で作れば
-閉じられる。handler のマウントは `subPath: work/<runID>` に焼かれ、init が main より先に走るので
+**prepare は run ディレクトリ自身をマウントしない** — マウントすれば `<runID>/` は kubelet が作った
+ものになり、root 所有で chmod が EPERM になるため（2026-08-30 実測）。だから祖先をマウントして
+`<runID>/` は自分で作り、自分で閉じる。どの祖先をマウントするかは、他に何へ届く必要があるかで
+決まる: ADR-0003 / ADR-0005 の時点では `work/` の 1 階層上（`subPath: work`）で足りたが、
+ADR-0011 決定7 以降は Pod を持たなかった run の棚を `results/` にも敷く必要があり、`work/` と
+`results/` は互いの下ではなく隣なので、両方に届く volume のルートをマウントする（publish が
+既に要求している権限で、新しい要求ではない）。handler のマウントは `subPath: work/<runID>` に
+焼かれ、init が main より先に走るので
 kubelet はその時点で存在するディレクトリを作り直さない（2026-09-05 実測。runc とサンドボックス
 VM のどちらでも、handler から見た root は `dr-xr-xr-x prepare-uid`）。閉じた run を publish が棚へ rename するときは
 ディレクトリ自身への書き込み権限が要る（`..` の書き換え）ので、publish は同 uid で 0755 に開けて

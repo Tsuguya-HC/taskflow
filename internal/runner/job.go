@@ -177,10 +177,31 @@ type Input struct {
 	// run to the next; on a template volume, new with every pod, the list
 	// is not passed.
 	SweepRuns []int32
+	// Shelve are the runs that never had a pod, and the directory each
+	// answered with: what this run's prepare lays on the results/ shelf so
+	// the numbers on it run without gaps (ADR-0011 決定7, ADR-0004). The set
+	// is the controller's to compute — it is the only side that knows how
+	// each earlier run was driven — and, like SweepRuns, it is only passed
+	// for a flow workspace, since a template volume has no shelf to lay
+	// anything on.
+	Shelve []ShelfEntry
 	// Ending is the one this run follows, and nil for every run but the
 	// cleanup one — a phase's run has no ending yet, so there is nothing to
 	// tell it and nothing is set.
 	Ending *Ending
+}
+
+// ShelfEntry is one run that decided its way through without a pod: its
+// number, and the single directory it answered with. Empty is not a case —
+// not because a run that answered nothing never reaches a next run to lay it
+// (a flow with a finally still runs a cleanup run after the Escalated ending
+// that reaches), but because what such a run was even offered is not in
+// history to rebuild: only what it decided is (ADR-0008), and reconstructing
+// the declared directories from the flow as it reads now would have the run
+// say something it was never asked (shelfHoles carries the same reasoning).
+type ShelfEntry struct {
+	RunID     int32
+	Directory string
 }
 
 // Ending is what the cleanup run is told about the ending it follows: what
@@ -316,7 +337,8 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	// A deep copy: the handler is a cached object shared with everything else
 	// reading it, and the caller would not expect building a Job to edit it.
 	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
-	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec), in.WorkspacePVC, in.RunID, in.SweepRuns)
+	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec),
+		in.WorkspacePVC, in.RunID, in.SweepRuns, in.Shelve)
 
 	// The framework's annotations go on the pod as well as the Job: a
 	// container reads them through the downward API, and that reads the pod
@@ -667,20 +689,26 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 // init containers, so the run's directory is laid down before anything of
 // the handler's runs, and so publish — a native sidecar, kept alive until
 // the main containers are done and then stopped — is already waiting when
-// they start.
+// they start. This ordering is load-bearing beyond this package: prepare
+// being the very first container to touch the volume at all is what
+// internal/sidecar's ensureParent and openDir lean on to say a shared
+// directory's mode is only ever the first creator's to set.
 //
 // The layout is the same whichever volume the workspace is (ADR-0005). Every
 // mount of it that names no subPath of its own — the handler's containers'
 // and the injected ones' alike — is pinned to work/<runID> (pinSubPath), so
 // the run's directory is what each of them sees at its mount's root, and
-// nothing but this attempt is there while it is in flight. prepare alone
-// mounts work/ itself, one level above: it makes the run's directory, so
-// that what it closes is its own — a path the kubelet's subPath machinery
+// nothing but this attempt is there while it is in flight. prepare never
+// mounts the run's directory itself: a path the kubelet's subPath machinery
 // made is root's, and a chmod on it comes back EPERM (measured 2026-08-30;
 // and again 2026-09-05 with the run's directory itself as the pinned
 // target, on runc and inside a sandbox VM alike: prepare's 0555 holds at
-// the handler's root) — and it clears away the debris of abandoned runs,
-// which needs the same parent.
+// the handler's root) — so it mounts an ancestor instead and makes the run's
+// directory itself, which is what lets it close what it made. Which ancestor
+// depends on what else it has to reach: clearing away the debris of
+// abandoned runs needs work/, its own parent, and laying the shelf for a run
+// that never had a pod needs results/ too (ADR-0011 決定7) — beside work/,
+// not under it — so prepare mounts the volume's root, same as publish.
 //
 // What differs between a flow workspace and a template volume is only the
 // volume itself and what publish does once sealed. The reserved volume is
@@ -702,7 +730,16 @@ func sidecarUID(pod *corev1.PodSpec) int64 {
 // would otherwise have to carry just to name it — the run stays out of the
 // agent's own environment, the same as the annotation it is read from
 // stays out of reach of anything but the downward API (§ADR-0002 決定5).
-func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image string, uid int64, pvcName string, runID int32, sweep []int32) {
+func injectSidecars(
+	pod *corev1.PodSpec,
+	ws flowv1alpha1.WorkspaceSpec,
+	image string,
+	uid int64,
+	pvcName string,
+	runID int32,
+	sweep []int32,
+	shelve []ShelfEntry,
+) {
 	run := strconv.Itoa(int(runID))
 	pinSubPath(pod, ws.Volume, path.Join(workDir, run))
 
@@ -722,13 +759,23 @@ func injectSidecars(pod *corev1.PodSpec, ws flowv1alpha1.WorkspaceSpec, image st
 			}
 			prepareArgs = []string{"--" + contract.FlagSweep, strings.Join(ids, ",")}
 		}
+		// Whole paths, one flag each: the last element is a name the flow
+		// chose, and the shelf is somewhere only a flow workspace has.
+		for _, entry := range shelve {
+			prepareArgs = append(prepareArgs, "--"+contract.FlagShelve,
+				path.Join(ws.MountPath, resultsDir, strconv.Itoa(int(entry.RunID)), entry.Directory))
+		}
 		publishArgs = []string{"--" + contract.FlagSealTo, path.Join(ws.MountPath, resultsDir, run)}
 	}
 
-	// prepare's mount is work/, so its run is <mountPath>/<runID>; publish
-	// mounts the volume's root, so the same directory is
-	// <mountPath>/work/<runID> from where it stands.
-	prepare := sidecarContainer(PrepareContainer, image, contract.SubcommandPrepare, path.Join(ws.MountPath, run), ws, uid, workDir, false)
+	// Both injected containers mount the volume at its root, so the run's
+	// directory is <mountPath>/work/<runID> from where either of them
+	// stands — one string, spelled the same way in both sets of arguments.
+	// prepare mounts the root rather than work/ because the shelf it lays
+	// for runs that had no pod is results/, beside work/ and not under it;
+	// the run's own directory is still prepare's to create and close, which
+	// is what the subPath mount had been for.
+	prepare := sidecarContainer(PrepareContainer, image, contract.SubcommandPrepare, path.Join(ws.MountPath, workDir, run), ws, uid, "", false)
 	prepare.Args = append(prepare.Args, prepareArgs...)
 	publish := sidecarContainer(PublishContainer, image, contract.SubcommandPublish, path.Join(ws.MountPath, workDir, run), ws, uid, "", !isFlowWorkspace)
 	publish.Args = append(publish.Args, publishArgs...)

@@ -637,3 +637,95 @@ func TestPublishWithSweepFlagIsRefused(t *testing.T) {
 		t.Fatalf("termination log = %q; startup validation reports its cause", got)
 	}
 }
+
+// The shelf a run that had no pod would have left is laid by the next run
+// that has one (ADR-0011 決定7). The flag is repeatable because the last
+// element of each path is a name the flow chose.
+func TestPrepareLaysTheShelfForRunsThatHadNoPod(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
+	volume := t.TempDir()
+	log := termLog(t)
+	out := filepath.Join(volume, "work", "4")
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+
+	shelved := []string{filepath.Join(volume, "results", "2", "ok"), filepath.Join(volume, "results", "3", "more")}
+	for _, path := range shelved {
+		t.Cleanup(func() { _ = os.Chmod(filepath.Dir(path), 0o755) })
+	}
+	args := runArgs(cmdPrepare, out, log)
+	for _, path := range shelved {
+		args = append(args, "-"+contract.FlagShelve, path)
+	}
+
+	if err := run(args); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	for _, path := range shelved {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got, err := os.Stat(filepath.Dir(path)); err != nil || got.Mode().Perm() != 0o555 {
+			t.Fatalf("shelved run %s = %v (%v); it is closed, the way a sealed one is", filepath.Dir(path), got, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(out, "ok")); err != nil {
+		t.Fatalf("this run's own vocabulary was not laid down: %v", err)
+	}
+}
+
+// A shelf that cannot be laid fails the run: a later phase reading past the
+// hole would read the run before it as though it were the one it wanted.
+func TestPrepareShelveFailureIsReported(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
+	volume := t.TempDir()
+	log := termLog(t)
+	out := filepath.Join(volume, "work", "2")
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+
+	// Spelled rather than joined: filepath.Join would clean the ".." away,
+	// and what is being checked is that the sidecar refuses a name it is
+	// handed rather than trusting the controller to have cleaned it.
+	err := run(append(runArgs(cmdPrepare, out, log),
+		"-"+contract.FlagShelve, volume+"/results/1/.."))
+	if err == nil {
+		t.Fatal("a shelf entry naming something that is not one path element must fail the run")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "prepare failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "prepare failed:")
+	}
+}
+
+// The zero value of paths is an empty list, so a run with nothing to shelve
+// passes no flag at all rather than an empty value that would have to be
+// told apart from a missing one — Set has to refuse an explicit empty string
+// outright rather than silently appending it.
+func TestShelveFlagRejectsAnEmptyValue(t *testing.T) {
+	var p paths
+	if err := p.Set(""); err == nil {
+		t.Fatal(`-shelve "" must be refused`)
+	}
+	if len(p) != 0 {
+		t.Fatalf("a refused value must not be appended: %v", p)
+	}
+}
+
+// The shelf flag is prepare's alone: publish moves this run onto the shelf
+// and lays nothing for anyone else.
+func TestPublishWithTheShelveFlagIsRefused(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
+	log := termLog(t)
+
+	err := run(append(runArgs(cmdPublish, filepath.Join(t.TempDir(), "1"), log),
+		"-"+contract.FlagShelve, "/somewhere/results/1/ok"))
+	if err == nil {
+		t.Fatal("publish with the shelve flag set must be refused")
+	}
+	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
+		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
+	}
+}

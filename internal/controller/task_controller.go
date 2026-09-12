@@ -274,11 +274,13 @@ func (r *TaskReconciler) driveRun(
 // runnerOf says how the attempt in flight is being driven.
 //
 // An attempt that has started answers for itself: it has either a Job or a
-// verdict box, and the one it has is the one it is being run by. The handler
-// is consulted only for an attempt that has neither — one about to start —
-// which is what keeps a definition edited mid-run from switching an attempt
-// in flight onto the other kind, and is the same rule the Job path already
-// lives by: what an attempt is doing was fixed when it started (ADR-0007).
+// verdict box, and RunRef.Runner — the one place that rule lives, so this and
+// taskstate's own runnerOf cannot drift apart on it — reads which. The
+// handler is consulted only for an attempt that has neither — one about to
+// start — which is what keeps a definition edited mid-run from switching an
+// attempt in flight onto the other kind, and is the same rule the Job path
+// already lives by: what an attempt is doing was fixed when it started
+// (ADR-0007).
 //
 // An attempt just past an infrastructure retry is "about to start" by this
 // same test: taskstate.RetryInfra clears both fields, so the handler is read
@@ -298,11 +300,8 @@ func (r *TaskReconciler) runnerOf(
 	flow *flowv1alpha1.TaskFlow,
 	run *flowv1alpha1.RunRef,
 ) (flowv1alpha1.RunnerType, error) {
-	switch {
-	case run.VerdictBox != "":
-		return flowv1alpha1.RunnerState, nil
-	case run.JobName != "":
-		return flowv1alpha1.RunnerJob, nil
+	if kind := run.Runner(); kind != "" {
+		return kind, nil
 	}
 	handlerName, _, ok := runSpec(&flow.Spec, run.Phase)
 	if !ok {
@@ -1215,6 +1214,7 @@ func (r *TaskReconciler) ensureJob(
 		SidecarImage: r.SidecarImage,
 		WorkspacePVC: workspacePVC,
 		SweepRuns:    sweepRuns(run.RunID),
+		Shelve:       shelfHoles(task),
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it
@@ -1306,6 +1306,40 @@ func (r *TaskReconciler) ensureWorkspacePVC(
 		return "", err
 	}
 	return pvc.Name, nil
+}
+
+// shelfHoles is every run this task decided without a pod, and the directory
+// each answered with.
+//
+// They are the holes on the results/ shelf: a run the framework does not start
+// has nothing to seal from and nobody to seal it (ADR-0011 決定7), so the next
+// run that does have a pod lays what it would have left. Passed in full on
+// every run rather than only the ones since the last pod, because prepare
+// leaves alone anything already there — which is also what makes a second
+// attempt at this run harmless.
+//
+// A run that answered nothing is not here — not because no later run could
+// read past it (a flow with a finally still runs a cleanup run after the
+// Escalated ending that answering nothing reaches, so the claim that nothing
+// follows would be false), but because what that run was even offered is not
+// in history. History records what a run decided, never the declared
+// directories it chose among (ADR-0008), and rebuilding that set from the
+// flow as it reads now would have the run say something it was never asked.
+// A Job run carries no such gap: publish's Move runs whether or not Seal
+// found an answer, so a Job run that answered nothing still lands on the
+// shelf with its declared directories present and empty, the one place a
+// State run's shelf and a Job run's differ in shape. Neither is here a run
+// of a flow with no workspace — the Job builder drops the list where there
+// is no shelf to lay it on.
+func shelfHoles(task *flowv1alpha1.Task) []runner.ShelfEntry {
+	var holes []runner.ShelfEntry
+	for _, h := range task.Status.History {
+		if h.Runner != flowv1alpha1.RunnerState || h.Directory == "" {
+			continue
+		}
+		holes = append(holes, runner.ShelfEntry{RunID: h.RunID, Directory: h.Directory})
+	}
+	return holes
 }
 
 // sweepRuns is every run before this one — what prepare may clear out of

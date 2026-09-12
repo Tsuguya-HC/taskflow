@@ -92,8 +92,10 @@ var _ = Describe("a flow with a workspace", func() {
 		}
 		Expect(claimed).To(Equal(pvc.Name), "the reserved volume mounts this task's claim and no other")
 		prepare, publish := podSpec.InitContainers[0], podSpec.InitContainers[1]
-		Expect(prepare.VolumeMounts[0].SubPath).To(Equal("work"),
-			"prepare works one level above its run, where it can make this run's directory and sweep abandoned ones")
+		Expect(prepare.VolumeMounts[0].SubPath).To(BeEmpty(),
+			"prepare mounts the claim's root: this run's directory is under work/, and the shelf it lays for runs that had no pod is beside it under results/")
+		Expect(prepare.VolumeMounts[0].ReadOnly).To(BeFalse(),
+			"prepare must be able to write to both shelves")
 		Expect(podSpec.Containers[0].VolumeMounts[0].SubPath).To(Equal("work/1"),
 			"the handler's own writable mount is pinned to the run's number in work/ too, not left to the handler to resolve")
 
@@ -205,7 +207,7 @@ var _ = Describe("a flow with a workspace", func() {
 		second := fx.job(2)
 		prepare := second.Spec.Template.Spec.InitContainers[0]
 		Expect(prepare.Args).To(Equal([]string{
-			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/2",
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/work/2",
 			"--" + contract.FlagSweep, "1",
 		}), "run 1 sealed, but the sweep list names every run before this one either way")
 	})
@@ -255,7 +257,7 @@ var _ = Describe("a flow with a workspace", func() {
 		Expect(second.Name).NotTo(Equal(job.Name), "the failed attempt's Job is still there to collide with")
 		prepare := second.Spec.Template.Spec.InitContainers[0]
 		Expect(prepare.Args).To(Equal([]string{
-			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/1",
+			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/work/1",
 		}), "the retry returns to run 1's own directory, with nothing before it to sweep")
 	})
 

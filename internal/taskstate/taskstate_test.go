@@ -878,3 +878,42 @@ func TestRetryInfraKeepsTheCleanupRunsName(t *testing.T) {
 		t.Fatalf("currentRun = %+v, want run 3 attempt 1 — an attempt that never ran spends no run", s.CurrentRun)
 	}
 }
+
+// How a run was driven is recorded with what it decided, because the run that
+// comes next has to lay the shelf a run without a pod never sealed (ADR-0011
+// 決定7) — and by then the handler may say something else or be gone.
+func TestHistorySaysHowTheRunWasDriven(t *testing.T) {
+	for name, tc := range map[string]struct {
+		run  *flowv1alpha1.RunRef
+		want flowv1alpha1.RunnerType
+	}{
+		"a run with a Job":                      {&flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2, JobName: "j"}, flowv1alpha1.RunnerJob},
+		"a run with a place to answer":          {&flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2, VerdictBox: "b"}, flowv1alpha1.RunnerState},
+		"a ref from before either was recorded": {&flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2}, flowv1alpha1.RunnerJob},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &flowv1alpha1.TaskStatus{Phase: phaseReport, RunID: 2, CurrentRun: tc.run}
+			Advance(s, spec(), "ok", transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeDeclared}, at)
+
+			if got := s.History[0].Runner; got != tc.want {
+				t.Fatalf("runner = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The cleanup run is a run like any other, and can be answered from outside
+// the same way (ADR-0009 決定3).
+func TestFinallyHistorySaysHowTheRunWasDriven(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:      phaseReport,
+		RunID:      3,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3, VerdictBox: "b"},
+	}
+	FinishFinally(s, spec(), "cleaned", transition.OutcomeDeclared, "", at)
+
+	last := s.History[len(s.History)-1]
+	if last.Runner != flowv1alpha1.RunnerState {
+		t.Fatalf("runner = %q, want %q", last.Runner, flowv1alpha1.RunnerState)
+	}
+}

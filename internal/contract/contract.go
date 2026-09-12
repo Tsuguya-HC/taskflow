@@ -193,10 +193,11 @@ const (
 	// makes, lays the declared directories down in directly, and closes;
 	// the one publish seals. It is the same directory the handler's own
 	// containers see at their mount's root (ADR-0005) — there is no layer
-	// between the mount and the vocabulary. prepare reaches it through a
-	// mount of its parent, work/, so the directory is prepare's to create
-	// and close rather than whatever the kubelet's subPath machinery would
-	// have left there.
+	// between the mount and the vocabulary. Both injected containers mount
+	// the volume at its root and are told this path in full, so the
+	// directory is prepare's to create and close rather than whatever the
+	// kubelet's subPath machinery would have left there, and so the shelf
+	// beside it is reachable at all.
 	FlagOut = "out"
 
 	// FlagSealTo names the flag publish takes when the task's flow brings a
@@ -207,6 +208,25 @@ const (
 	// the template-volume case, where there is no shelf to move onto.
 	// prepare refuses it outright — it is publish's alone.
 	FlagSealTo = "seal-to"
+
+	// FlagShelve is a run that never had a pod, and the directory it
+	// answered with, as the path the two make on the results/ shelf. It may
+	// be given more than once, which is what a delimiter would have had to
+	// be chosen for: a declared directory name is a free string and nothing
+	// stops one containing whatever the delimiter was.
+	//
+	// A run the framework does not start seals nothing, because there is no
+	// pod of its own to seal from (ADR-0011 決定7): its number would leave a
+	// hole on the shelf a later phase reads back, and a hole is only
+	// readable by whoever already knows it is there (ADR-0004). So the next
+	// run that does have a pod lays the empty directory the answer amounts
+	// to — an empty declared directory is already what a verdict looks like,
+	// so nothing new had to be invented to say it.
+	//
+	// prepare lays only what is missing: a run with a pod shelves itself,
+	// and one of those found already there is left exactly as its own
+	// publish sealed it.
+	FlagShelve = "shelve"
 
 	// FlagSweep is the comma-separated runIDs whose work/ leftovers prepare
 	// clears away before this run starts. The controller computes the list —

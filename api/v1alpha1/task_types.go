@@ -151,6 +151,25 @@ type RunRef struct {
 	InfraRetries int32 `json:"infraRetries,omitempty"`
 }
 
+// Runner says how r is being driven, when that is something r itself already
+// says: RunnerState once VerdictBox is set, RunnerJob once JobName is — the
+// same rule in the one place it should live, rather than copied wherever
+// something needs to tell the two apart. The zero value means neither field
+// is set yet, and is deliberately not one of the two real answers: a run
+// about to start has not picked a kind, and a caller with its own idea of
+// what an unset ref means (the controller reads the handler; taskstate
+// defaults to Job) is the one that gets to decide, not this method.
+func (r *RunRef) Runner() RunnerType {
+	switch {
+	case r.VerdictBox != "":
+		return RunnerState
+	case r.JobName != "":
+		return RunnerJob
+	default:
+		return ""
+	}
+}
+
 // HistoryEntry records a completed run. This is the audit trail, and it is
 // the whole of what the framework knows: what the run decided and why. Where
 // the run's output ended up is not here, because the controller never learns
@@ -173,6 +192,24 @@ type HistoryEntry struct {
 	// Outcome is why the task moved: the framework's account of the run,
 	// recorded even when the handler said nothing.
 	Outcome string `json:"outcome"`
+	// Runner is how the run was driven. It is here, and not only on the
+	// handler, because a run the framework did not start seals nothing: the
+	// next run that has a pod lays its directory on the shelf instead
+	// (ADR-0011 決定7), and by then the handler may say something else or be
+	// gone. It is also the honest answer to what a human reads this line
+	// for — whether anything ran at all.
+	//
+	// Empty reads as Job — but not because Job was ever the only kind a run
+	// could have had before this field existed: ADR-0011 決定2〜6 already let
+	// a build drive and settle a State run before 決定7 added this field, so
+	// a task that reached settle in that window has a history line that is
+	// empty for a run that never had a pod, and reading it as Job is wrong
+	// for exactly that line. There is no fixing it after the fact — the
+	// handler bound to that phase may have changed since, or be gone — so
+	// shelfHoles simply does not shelve that run's answer: its number is a
+	// gap 決定7 cannot close.
+	// +optional
+	Runner RunnerType `json:"runner,omitempty"`
 	// Reason is the one line a human reads next to Outcome: which edge was
 	// followed, or why no answer counted, or what the handler said after
 	// naming its directory. The transition never reads it.

@@ -20,7 +20,10 @@ limitations under the License.
 // into after it has finished. When the task's flow brings a workspace,
 // publish's closing act is Move — a rename that shelves the now-sealed run
 // where a later phase reads completed runs back from, once and only once its
-// answer is decided.
+// answer is decided. prepare carries a third role besides its own run: on a
+// flow workspace it also shelves, through Shelve, the runs immediately
+// before it that never had a pod of their own to seal one (ADR-0011 決定7) —
+// the only way those numbers ever reach results/ at all.
 //
 // The run's directory is the vocabulary: the declared directories sit
 // directly in it, and it is what the handler's own containers see at the
@@ -116,6 +119,39 @@ func checkName(name string) error {
 	return contract.CheckDirectoryName(name)
 }
 
+// openDir makes dir when it is not there yet, at mode, and leaves it alone —
+// mode and ownership both — when it already is.
+//
+// Only whoever creates a directory more than one uid will use gets to decide
+// what mode it ends up at. A later arrival that found it owned by someone
+// else cannot fix that by chmod-ing: chmod is the owner's alone (or
+// CAP_FOWNER's, which every container this package runs in has dropped), so
+// trying would only turn the EACCES writing into it might already be into an
+// EPERM that no retry ever clears. Made at mode outright on the create path
+// rather than created loose and chmod'd after, so the one call that is
+// allowed to fix the mode does so before the umask narrows it and before
+// anyone else could see it in between.
+//
+// Shared by Shelve and Move, which lay a shelf directory down exactly the
+// same way on purpose — which of the two gets there first must not be
+// something a later look at the directory can tell apart — and by
+// ensureParent, below, for work/, which the same reasoning applies to
+// unchanged.
+func openDir(dir string, mode fs.FileMode) error {
+	switch err := os.Mkdir(dir, mode); {
+	case err == nil:
+		// Mkdir's own mode is subject to the umask; set it outright.
+		if err := os.Chmod(dir, mode); err != nil {
+			return fmt.Errorf("set mode on %s: %w", dir, err)
+		}
+		return nil
+	case errors.Is(err, fs.ErrExist):
+		return nil
+	default:
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+}
+
 // checkRealDir refuses anything at path that is not itself a directory —
 // Lstat rather than Stat, so a symlink is caught rather than followed.
 func checkRealDir(path string) error {
@@ -177,6 +213,120 @@ func Prepare(run string, declared []string) error {
 		return fmt.Errorf("close %s to writing: %w", run, err)
 	}
 	return nil
+}
+
+// Shelve lays the sealed directory a run that never had a pod would have left
+// on the shelf: the run's number, with the single directory it answered with,
+// empty and closed (ADR-0011 決定7).
+//
+// It is what publish's Move would have produced, reached the other way round.
+// Nothing is invented for it: an empty declared directory is already the whole
+// of a verdict — ok/ is empty when a run says ok — so a later phase reading
+// results/<runID>/ finds the same shape whether a pod wrote it or nobody did.
+//
+// A run already sealed is left alone, and that is not politeness: a run with
+// a pod seals its own, and rewriting one would open what its publish closed.
+// The same check is what makes a second attempt at the run doing the shelving
+// harmless. Anything less complete than sealed — including a bare, open
+// directory Prepare's own first step (MkdirAll to modeOpen) left behind if an
+// earlier call died before Prepare finished filling it in and closing it — is
+// not mistaken for done: shelfHoles only ever names a run that never had a
+// pod, so whatever Shelve finds at run is either a prior Shelve's own work or
+// such a half-laid leftover, never something a real publish sealed. Falling
+// through to Prepare over it is exactly the reopen-fill-close it already
+// tolerates from a pod's own retried prepare.
+//
+// A half-laid leftover empty enough to have nothing in it yet is removed
+// first, rather than handed to Prepare's own reopening chmod: the uid that
+// made it and the uid retrying the shelving are not always the same one
+// (an infra retry of the run that owns this shelf entry can land on a
+// different sidecar uid than its own first attempt did), and Prepare's
+// os.Chmod(run, modeOpen) can only ever be the owner's to do. Removing an
+// empty directory needs only write permission on its parent — the shelf
+// itself, always modeDir — not on the directory's own owner, so this reaches
+// what a chmod could not. Limited to empty on purpose: a run with anything
+// already written into a declared directory is not a half-laid leftover, it
+// is something this must never touch, and only checking "nothing is in it
+// yet" keeps the two apart without having to know which uid is which.
+//
+// There is no mark (MarkName) in it, because no pod prepared it. Nothing reads
+// one back off the shelf — CheckMark looks in work/, before the move — so the
+// absence says what is true rather than leaving something to be explained.
+func Shelve(run, name string) error {
+	if err := checkName(name); err != nil {
+		return err
+	}
+
+	switch sealed, err := runIsSealed(run, name); {
+	case err != nil:
+		return err
+	case sealed:
+		return nil
+	}
+	if err := clearIfEmpty(run); err != nil {
+		return err
+	}
+
+	// The shelf itself may not be there yet — this can be the first run of
+	// the task to reach it. Made and opened exactly the way Move makes it,
+	// so which of the two got there first cannot be told apart afterwards.
+	if err := openDir(filepath.Dir(run), modeDir); err != nil {
+		return err
+	}
+	return Prepare(run, []string{name})
+}
+
+// clearIfEmpty removes run when it is there, a real directory, and holds
+// nothing — the shape Prepare's own first step (MkdirAll to modeOpen) leaves
+// behind if an earlier attempt at laying this same shelf entry died before
+// it got any further. See Shelve's own doc for why only the empty case is
+// handled here.
+//
+// A run that is not there yet needs none of this — Prepare makes it fresh —
+// and this is never reached at all when run exists but is not itself a
+// directory, since runIsSealed has already turned that into an error before
+// Shelve gets here.
+func clearIfEmpty(run string) error {
+	entries, err := os.ReadDir(run)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read %s: %w", run, err)
+	case len(entries) > 0:
+		return nil
+	}
+	if err := os.RemoveAll(run); err != nil {
+		return fmt.Errorf("clear %s: %w", run, err)
+	}
+	return nil
+}
+
+// runIsSealed reports whether run already holds a finished answer: a real
+// directory, closed to modeRun, with name among its children. Refuses
+// outright if something is at run but is not itself a directory, the same
+// symlink-shaped substitution checkRealDir refuses elsewhere — Shelve must
+// not open a door onto whatever that entry actually is. Anything at run that
+// falls short of sealed (not yet closed, or closed but missing name) reads as
+// not sealed rather than as an error: Prepare is what re-lays it, and it does
+// its own validation of what is in the way of each declared name.
+func runIsSealed(run, name string) (bool, error) {
+	st, err := os.Lstat(run)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("stat %s: %w", run, err)
+	case !st.Mode().IsDir():
+		return false, fmt.Errorf("%w: %s", ErrNotADirectory, run)
+	case st.Mode().Perm() != modeRun:
+		return false, nil
+	}
+	child, err := os.Lstat(filepath.Join(run, name))
+	if err != nil || !child.Mode().IsDir() {
+		return false, nil
+	}
+	return true, nil
 }
 
 // Seal reads which declared directory the run wrote into.
@@ -290,16 +440,12 @@ func Move(from, to string) error {
 		return fmt.Errorf("stat %s: %w", to, err)
 	}
 
-	shelf := filepath.Dir(to)
-	if err := os.MkdirAll(shelf, modeDir); err != nil {
-		return fmt.Errorf("create %s: %w", shelf, err)
-	}
-	// MkdirAll leaves an existing directory's mode alone, and the shelf may
-	// already be there from an earlier run's publish, running as a
-	// different uid; either way MkdirAll's own mode is subject to the
-	// umask, so it is set outright rather than trusted.
-	if err := os.Chmod(shelf, modeDir); err != nil {
-		return fmt.Errorf("open %s for writing: %w", shelf, err)
+	// The shelf may already be there from an earlier run's publish, running
+	// as a different uid; openDir leaves it exactly as that uid made it
+	// rather than chmod-ing it, which this uid may not even hold the
+	// permission to do.
+	if err := openDir(filepath.Dir(to), modeDir); err != nil {
+		return err
 	}
 
 	if err := checkRealDir(from); err != nil {
@@ -346,6 +492,11 @@ func (a Answer) Message() string {
 // directory is the vocabulary itself, and it is what the handler's mount,
 // pinned to it, shows at its root (ADR-0005).
 //
+// work/ itself does not exist until some run's prepare creates it — see
+// ensureParent, below, for why that is the ordinary path rather than an edge
+// case — so this does not depend on os.MkdirAll below to have made it with
+// whatever mode a bare Mkdir's umask would leave.
+//
 // Anything already at the path goes first. A run keeps its number across
 // infrastructure retries, so on the second attempt this is where the first
 // attempt's leftovers are, and starting work on top of them would mix two
@@ -370,6 +521,9 @@ func MakeRun(dir string) error {
 	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("stat %s: %w", dir, err)
 	}
+	if err := ensureParent(dir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, modeOpen); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
@@ -380,6 +534,34 @@ func MakeRun(dir string) error {
 		return fmt.Errorf("open %s for writing: %w", dir, err)
 	}
 	return nil
+}
+
+// ensureParent makes dir's own parent — work/ — when it is not there yet, at
+// modeDir so a run whose prepare computes a different sidecar uid than the
+// one that made it (runner.sidecarUID picks one per Job) can still create
+// its own run underneath. openDir is what actually does that, and does not
+// touch a parent that is already there, mode or ownership — the same
+// "whoever creates it decides the mode" rule Shelve and Move lean on for
+// results/, and for the same reason: chmod is the owner's alone, so a
+// different uid finding work/ already there could not fix its mode even if
+// this tried to.
+//
+// This is the ordinary path for every task with a flow workspace, not a
+// fallback for one the kubelet somehow missed: the kubelet makes a subPath
+// directory only right before the one container that names it starts,
+// container by container, and prepare — mounted with no subPath of its own
+// — is always the very first container to touch the volume at all
+// (injectSidecars prepends it ahead of the handler's own containers, and
+// only those carry subPath: work/<runID>). work/ is nothing's to have made
+// before prepare's own MakeRun runs. What openDir's ErrExist branch actually
+// tells apart is which run is doing the making: the first run any phase of
+// this task ever reaches finds nothing there and creates it; every later one
+// — later phases, and infra retries of this same run, all sharing one PVC
+// across pod restarts — finds it already there, exactly as that first run's
+// uid left it. There is nothing to fix on it: it was already made this same
+// way, once.
+func ensureParent(dir string) error {
+	return openDir(filepath.Dir(dir), modeDir)
 }
 
 // Mark records id in the run's directory as the identity of the pod that

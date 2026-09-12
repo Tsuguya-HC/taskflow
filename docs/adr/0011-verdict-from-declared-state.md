@@ -177,6 +177,14 @@
   P7 の下で見分けられない。#110 の実行時検査「gate のフェーズの handler が `External` でなければ
   `Failed`」は、見分けられるふりをしていた半分なので落とす。残すのは admission のグラフ検査
   （untrusted な始点から `Success` への全経路が、宣言された gate フェーズを通る）だけ
+- **[ADR-0002](0002-per-task-workspace-pvc.md) 決定5の「publish は flow-workspace モードでは
+  唯一 volume の root を書き込み可でマウントする」。** 決定7の実装で `prepare` も
+  results/ の棚を敷くために root をマウントするようになり、「唯一」ではなくなった
+- **[ADR-0003](0003-run-view-and-sweep.md) 決定2の「prepare は work/ を 1 階層上でマウントして
+  自分の run ディレクトリを作り」。** 同じ実装変更で、prepare のマウントは work/ の 1 階層上
+  ではなくボリュームのルートになった
+- **[ADR-0005](0005-vocabulary-at-the-mount-root.md) 決定2の「prepare は volume を
+  `subPath: work` でマウントして」。** 同上 — prepare はもう `subPath: work` を書かない
 
 **なぜポーリング Job ではないか**: 外部 API を叩いて結果を待つ handler は「ただの Job」で表せるが、
 表した結果が設計の断ったものになる。
@@ -221,7 +229,48 @@
 空白を含みうるので、区切り文字の形式は一部の名前を禁止しないと成立しない。
 照合はこの注釈ではなく宣言そのものに対して行うので、これは表示の選択であって語彙の出所ではない
 
-**未解決**:
+**決定 7 の実装で決めたこと**（2026-09-12）:
 
-- **棚**（決定 7）。次の run の `prepare` が `results/<runID>/<value>/` を空で敷く分はまだ無い。
-  `prepare` のマウントは `work/` の下なので、`results/` に触れるには配線が要る
+- **`prepare` のマウントを `work/` の subPath からボリュームのルートへ移した**（publish と同じ形）。
+  `results/` は `work/` の下ではなく隣なので、subPath を増やす案は採らない: 追加した subPath の
+  ディレクトリは kubelet が作るので、**その後 publish の `Move` が `results/` に掛ける chmod が
+  所有者違いで落ちうる**（今は publish 自身が作っているので落ちない）。ルートをマウントするのは
+  publish が既に要求している権限で、新しい要求ではない
+- **コントローラは `history` から棚を計算する**。そのために `HistoryEntry` に `runner` を足した
+  （空は `Job` と読む = この欄が無かった頃の run）。「無ければ作る」で全 run を敷く案は採らない:
+  Pod を持った run の棚が無いのは publish の `Move` が失敗したということで、**そこを埋めるのは
+  起きなかったことの証拠を作ること**になる（そして `Move` が失敗した run はそもそも verdict を
+  返さないので、`directory` を持つ history 行は必ず棚を持っている）
+- **`prepare` は既にある棚に触らない**。これは上の理由と、同じ run の 2 回目の試行が無害であることの
+  両方を満たす。マーク（`.prepared-by`）は書かない — 用意した Pod が無いのだから、無いことが正しい
+- **答えが無かった run（`Escalated` へ落ちた run）は棚を敷かない。** `finally` を持つ flow では
+  `Escalated` の先に cleanup run が続くので、「その先を読む run が無いから」は理由にならない。
+  本当の理由は、その run が何を提示されていたか（宣言ディレクトリの集合）が history に無いこと
+  — 今の flow から引き直すのは、その run が言ってもいないことを言わせることになる。**Job の run は
+  publish の `Move` が無条件に走るので、答えが無くても宣言ディレクトリが空のまま棚に載る**。
+  これは意図的な既知の非対称で、`State` の run にだけこの穴がある（`shelfHoles`）。この非対称を
+  将来閉じるなら、語彙を一切名乗らず `results/<n>/` を**空のまま閉じて敷く**案がある —
+  「何も書かれなかった」は run 自身の事実なので何も捏造せず、番号の密度だけが回復する。読み手
+  からは「非空の宣言ディレクトリはゼロ」で Job の全空棚と同じ結論になる。ただし今の `-shelve` の
+  渡し方（whole path を `Dir` / `Base` で割って `Shelve(dir, name)` に渡す）はそのままでは使えない
+  — `--shelve <mount>/results/3` を `Shelve("<mount>/results", "3")` と読むと `results/` 自身を
+  閉じてしまうので、採るなら別の表現が要る。今回は採らない
+- `HistoryEntry` に `runner` を足したことで、[ADR-0008](0008-no-store-pointers-in-status.md) 決定3
+  の「history に残るのは `phase` / `runID` / `directory` / `outcome` / `reason` / `finishedAt` の
+  6 つ」という列挙は古くなった。今は 7 つ目として `runner` が並ぶ
+- **この diff より前に作られた PVC は自動では直らない。** 旧 `MakeRun` の `MkdirAll(dir, modeOpen)`
+  が副作用で作っていた `work/` は、当時の sidecar uid 所有・0755 のまま volume に残る。新設の
+  `ensureParent` は「既にあれば触らない」ので、そのタスクが別 uid のフェーズへ進むと `work/` への
+  `mkdir` が EACCES になる（uid が同じフェーズしか踏まない task は影響を受けない。新規タスクは
+  `ensureParent` が最初から `modeDir` で作るので無関係）。コードで手当てしない: このプロセスは
+  `work/` の所有者ではないので、そもそも chmod で直せない。失敗は prepare のエラーとして
+  termination message に即座に出るので、沈黙はしない — 直す手段は当該タスクの `work/` を
+  手動で `chmod 0777` するか、そのタスクを終わらせて作り直すことになる
+- **`HistoryEntry.Runner` が無い行を `Job` と読む既定は、この field 以前は `Job` しか無かったという
+  意味ではない。** 決定2〜6（State run を動かして settle する）はこの field を足した決定7より先に
+  実装済みで、その間に settle した State run の history 行は `runner` が空のまま残る —
+  `shelfHoles` はそれを見つけられず、決定7が埋めるはずの穴がそのまま残る。history は書き換えない
+  ので直しようが無く、影響範囲はこの field 追加より前に State run を settle 済みで、まだ生きている
+  task だけ
+
+**未解決**: なし

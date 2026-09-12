@@ -567,3 +567,131 @@ var _ = Describe("a run nothing starts", func() {
 		Expect(tk.Status.ExpiresAt).NotTo(BeNil(), "the cleanup settled, so the task is dated")
 	})
 })
+
+// The shelf a run without a pod leaves is laid by the next run that has one
+// (ADR-0011 決定7): the numbers on results/ have to run without gaps, because
+// a hole is only readable by whoever already knows it is there (ADR-0004).
+var _ = Describe("the shelf a run nothing started leaves behind", func() {
+	var fx *fixture
+	const timeout = time.Hour
+
+	BeforeEach(func() { fx = newFixture() })
+
+	// A flow of two phases: the first is answered from outside, the second
+	// runs a pod on the flow's own workspace — which is the only kind of
+	// volume that has a shelf at all.
+	twoPhases := func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{}
+			f.Spec.Bindings[phaseReport] = flowv1alpha1.PhaseBinding{
+				Handler: fx.name + "-job",
+				Next:    map[flowv1alpha1.Phase]string{"おわり": "sent"},
+			}
+		})
+		fx.makeHandler(stateRunner(timeout))
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Name = fx.name + "-job"
+			h.Spec.Phase = phaseReport
+			h.Spec.Workspace.Volume = contract.WorkspaceVolume
+			spec := &h.Spec.JobTemplate.Template.Spec
+			spec.Volumes = nil
+			spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
+		})
+		fx.makeTask()
+	}
+
+	It("records how each run was driven, so the shelf can be reconstructed", func() {
+		twoPhases()
+		fx.reconcile() // settles the starting phase
+		fx.reconcile() // opens the place run 1 is answered in
+		fx.answer("ok", "")
+		fx.reconcile() // settles run 1
+
+		history := fx.get().Status.History
+		Expect(history).To(HaveLen(1))
+		Expect(history[0].Runner).To(Equal(flowv1alpha1.RunnerState),
+			"nothing ran, and the line a human reads says so")
+	})
+
+	It("tells the next run's prepare to lay it", func() {
+		twoPhases()
+		fx.reconcile()
+		fx.reconcile()
+		fx.answer("ok", "")
+		fx.reconcile() // settles run 1 and moves to 報告
+		fx.reconcile() // creates the Job for run 2
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{
+			Name: runner.JobName(fx.name, phaseReport, 2, 0), Namespace: resourceNamespace,
+		}, &job)).To(Succeed())
+
+		prepare := job.Spec.Template.Spec.InitContainers[0]
+		Expect(prepare.Args).To(ContainElements(
+			"--"+contract.FlagShelve, workspacePath+"/results/1/ok"),
+			"run 1 sealed nothing, so run 2 lays what it would have left")
+	})
+
+	// A run with a pod seals its own directory, so nothing is laid for it —
+	// and a shelf entry the framework fabricated for a run that was supposed
+	// to write one would be evidence of something that never happened.
+	It("lays nothing for a run that had a pod of its own", func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{}
+			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
+				Handler: fx.name,
+				Next:    map[flowv1alpha1.Phase]string{phaseInvestigate: "more", phaseReport: "ok"},
+			}
+		})
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.Workspace.Volume = contract.WorkspaceVolume
+			spec := &h.Spec.JobTemplate.Template.Spec
+			spec.Volumes = nil
+			spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
+		})
+		fx.makeTask()
+
+		fx.reconcile() // settles the starting phase
+		fx.reconcile() // creates the Job for run 1
+		finishJobWith(fx, fx.job(1), "more")
+		fx.reconcile() // the rework lands on run 2
+		fx.reconcile() // creates the Job for run 2
+
+		prepare := fx.job(2).Spec.Template.Spec.InitContainers[0]
+		Expect(prepare.Args).NotTo(ContainElement("--"+contract.FlagShelve),
+			"run 1 had a pod, and that pod's publish shelved it")
+	})
+})
+
+// finishJobWith is the Job controller's part, written by hand: the pod it
+// would have made, the message the handler left behind, and the conditions in
+// the order the apiserver validates them.
+func finishJobWith(fx *fixture, job *batchv1.Job, message string) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      job.Name,
+			Namespace: resourceNamespace,
+			Labels:    map[string]string{batchv1.ControllerUidLabel: string(job.UID)},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+		},
+	}
+	Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
+	DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
+	pod.Status.Phase = corev1.PodSucceeded
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  agentName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: message}},
+	}}
+	Expect(k8sClient.Status().Update(fx.ctx, pod)).To(Succeed())
+
+	now := metav1.Now()
+	job.Status.StartTime = &now
+	job.Status.CompletionTime = &now
+	job.Status.Conditions = append(job.Status.Conditions,
+		batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+		batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+	Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+}
