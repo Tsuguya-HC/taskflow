@@ -45,6 +45,9 @@ const (
 
 	// dirMore is one of the directories these examples declare.
 	dirMore = "more"
+	// claimName stands in for the claim a task's flow workspace is backed
+	// by; what it is called is the controller's business, not this one's.
+	claimName = "some-claim"
 )
 
 func task() *flowv1alpha1.Task {
@@ -978,7 +981,7 @@ func TestFlowWorkspacePinsMountsThatNameNoView(t *testing.T) {
 		})
 	})
 	job := build(t, Input{
-		Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 3, WorkspacePVC: "some-claim",
+		Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 3, WorkspacePVC: claimName,
 	})
 
 	for _, c := range job.Spec.Template.Spec.Containers {
@@ -1044,7 +1047,7 @@ func TestRefusesAHandlerSettingItsOwnLayoutOnAWritableMount(t *testing.T) {
 func TestATemplateVolumeStaysOffTheClaim(t *testing.T) {
 	job := build(t, Input{
 		Task: task(), Handler: handler(), Phase: phaseInvestigate,
-		RunID: 2, WorkspacePVC: "some-claim",
+		RunID: 2, WorkspacePVC: claimName,
 	})
 	spec := job.Spec.Template.Spec
 	for _, v := range spec.Volumes {
@@ -1221,7 +1224,7 @@ func TestWorkspaceClaimCarriesNoRun(t *testing.T) {
 func TestShelvesTheRunsThatHadNoPod(t *testing.T) {
 	job := build(t, Input{
 		Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 4,
-		WorkspacePVC: "some-claim", SweepRuns: []int32{1, 2, 3},
+		WorkspacePVC: claimName, SweepRuns: []int32{1, 2, 3},
 		Shelve: []ShelfEntry{{RunID: 2, Directory: "ok"}, {RunID: 3, Directory: dirMore}},
 	})
 

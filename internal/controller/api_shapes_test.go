@@ -361,7 +361,7 @@ var _ = Describe("the API refuses what the design forbids", func() {
 			Spec: flowv1alpha1.TaskFlowSpec{
 				Profile: flowv1alpha1.ProfileInvestigate,
 				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-					"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"おわり": "ok"}},
+					"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: "ok"}},
 				},
 			},
 		}
