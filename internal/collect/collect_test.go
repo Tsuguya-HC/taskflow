@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
 const dirMore = "more"
@@ -282,9 +284,9 @@ func box(data map[string]string) *corev1.ConfigMap {
 func TestBoxNotAnsweredYet(t *testing.T) {
 	for name, data := range map[string]map[string]string{
 		"nothing written": nil,
-		"empty value":     {"verdict": ""},
-		"only blanks":     {"verdict": "  \n"},
-		"reason alone":    {"reason": "まだ見ている"},
+		"empty value":     {contract.KeyVerdict: ""},
+		"only blanks":     {contract.KeyVerdict: "  \n"},
+		"reason alone":    {contract.KeyReason: "まだ見ている"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, answered := FromBox(box(data), declared)
@@ -299,7 +301,7 @@ func TestBoxNotAnsweredYet(t *testing.T) {
 }
 
 func TestBoxAnswers(t *testing.T) {
-	got, answered := FromBox(box(map[string]string{"verdict": " ok\n", "reason": " 見ました "}), declared)
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: " ok\n", contract.KeyReason: " 見ました "}), declared)
 	if !answered || got.Directory != "ok" {
 		t.Fatalf("answer = %+v, answered = %v; surrounding space is trimmed, the word is not", got, answered)
 	}
@@ -311,7 +313,7 @@ func TestBoxAnswers(t *testing.T) {
 // A word outside the vocabulary is not an error to report: it is an answer
 // that does not count, and ends where every other non-answer does.
 func TestBoxOutsideTheVocabulary(t *testing.T) {
-	got, answered := FromBox(box(map[string]string{"verdict": "approved"}), declared)
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: "approved"}), declared)
 	if !answered {
 		t.Fatal("answered = false; something was written, and the run is over either way")
 	}
@@ -326,11 +328,11 @@ func TestBoxOutsideTheVocabulary(t *testing.T) {
 // The value and the reason are both free text somebody else wrote, and both
 // end up in a status a person reads with kubectl.
 func TestBoxSanitizesWhatItReadsBack(t *testing.T) {
-	got, _ := FromBox(box(map[string]string{"verdict": "\x1b[31mapproved"}), declared)
+	got, _ := FromBox(box(map[string]string{contract.KeyVerdict: "\x1b[31mapproved"}), declared)
 	if strings.Contains(got.Reason, "\x1b") {
 		t.Fatalf("reason = %q; an escape sequence reached a terminal through status", got.Reason)
 	}
-	got, _ = FromBox(box(map[string]string{"verdict": "ok", "reason": "done\x1b]0;pwned\a"}), declared)
+	got, _ = FromBox(box(map[string]string{contract.KeyVerdict: "ok", contract.KeyReason: "done\x1b]0;pwned\a"}), declared)
 	if strings.Contains(got.Reason, "\x1b") {
 		t.Fatalf("reason = %q; an escape sequence reached a terminal through status", got.Reason)
 	}
@@ -343,7 +345,7 @@ func TestBoxSanitizesWhatItReadsBack(t *testing.T) {
 // vocabulary's prose must not walk over that and get the write refused.
 func TestBoxOutsideTheVocabularyReasonStaysBounded(t *testing.T) {
 	long := strings.Repeat("no", maxReasonRunes)
-	got, answered := FromBox(box(map[string]string{"verdict": long}), declared)
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: long}), declared)
 	if !answered {
 		t.Fatal("answered = false; something was written")
 	}

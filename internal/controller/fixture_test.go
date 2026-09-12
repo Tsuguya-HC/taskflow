@@ -242,10 +242,11 @@ func stateRunner(timeout time.Duration) func(*flowv1alpha1.TaskHandler) {
 	}
 }
 
-// box fetches the place one run of the starting phase is answered in, and
-// fails the spec when it is not there.
-func (fx *fixture) box(runID int32) *corev1.ConfigMap {
-	return fx.boxFor(phaseInvestigate, runID)
+// box fetches the place the starting phase's first run is answered in, and
+// fails the spec when it is not there. Later runs and the cleanup run go
+// through boxFor, which takes both.
+func (fx *fixture) box() *corev1.ConfigMap {
+	return fx.boxFor(phaseInvestigate, 1)
 }
 
 func (fx *fixture) boxFor(phase flowv1alpha1.Phase, runID int32) *corev1.ConfigMap {
@@ -257,8 +258,8 @@ func (fx *fixture) boxFor(phase flowv1alpha1.Phase, runID int32) *corev1.ConfigM
 }
 
 // answer writes into that place the way whoever is answering would.
-func (fx *fixture) answer(runID int32, verdict, reason string) {
-	fx.answerFor(phaseInvestigate, runID, verdict, reason)
+func (fx *fixture) answer(verdict, reason string) {
+	fx.answerFor(phaseInvestigate, 1, verdict, reason)
 }
 
 func (fx *fixture) answerFor(phase flowv1alpha1.Phase, runID int32, verdict, reason string) {

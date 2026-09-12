@@ -42,6 +42,9 @@ const (
 	workspaceVol = "work"
 	workspaceAt  = "/workspace"
 	agentUID     = int64(65533)
+
+	// dirMore is one of the directories these examples declare.
+	dirMore = "more"
 )
 
 func task() *flowv1alpha1.Task {
@@ -580,7 +583,7 @@ func TestRefusesATemplateClaimingAFrameworkAnnotation(t *testing.T) {
 // answer. Sorted, so the same declaration always renders the same.
 func TestDeclaredDirectoriesTravelAsJSON(t *testing.T) {
 	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1,
-		Directories: []string{"more", "ok", "a,b"}})
+		Directories: []string{dirMore, "ok", "a,b"}})
 	pod := job.Spec.Template.Spec
 	for _, group := range [][]corev1.Container{pod.InitContainers, pod.Containers} {
 		for _, c := range group {
@@ -1171,7 +1174,7 @@ func TestVerdictBoxNameStaysWithinTheLimit(t *testing.T) {
 // What the box carries is the declaration, put where whoever answers will see
 // it. It carries nothing else: the answer is theirs to write.
 func TestVerdictBoxCarriesTheDeclaration(t *testing.T) {
-	box := BuildVerdictBox(task(), phaseInvestigate, 3, []string{"more", "ok"})
+	box := BuildVerdictBox(task(), phaseInvestigate, 3, []string{dirMore, "ok"})
 
 	if len(box.Data) != 0 {
 		t.Fatalf("data = %v, want an empty box", box.Data)
@@ -1182,7 +1185,7 @@ func TestVerdictBoxCarriesTheDeclaration(t *testing.T) {
 	if got := box.Annotations[AnnotationChoices]; got != `["more","ok"]` {
 		t.Fatalf("choices = %q; the vocabulary is rendered the way the pod's is", got)
 	}
-	if got := BuildVerdictBox(task(), phaseInvestigate, 3, []string{"ok", "more"}).
+	if got := BuildVerdictBox(task(), phaseInvestigate, 3, []string{"ok", dirMore}).
 		Annotations[AnnotationChoices]; got != `["more","ok"]` {
 		t.Fatalf("choices = %q; the rendering must not depend on declaration order", got)
 	}

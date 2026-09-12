@@ -85,6 +85,12 @@ const (
 
 	frameworkPrefix = contract.Prefix
 
+	// kindTask is what every ownerReference the framework writes points at.
+	// Spelled once: the three objects it owns — the Job, the workspace claim,
+	// the verdict box — have to name the same kind or the garbage collector
+	// follows none of them.
+	kindTask = "Task"
+
 	// maxNameLength is the limit Kubernetes puts on an object name.
 	maxNameLength = 63
 	// phaseHashLength is how much of the phase digest goes into the name.
@@ -357,7 +363,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 			Annotations: annotations(in),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
-				Kind:               "Task",
+				Kind:               kindTask,
 				Name:               in.Task.Name,
 				UID:                in.Task.UID,
 				Controller:         ptr(true),
@@ -409,7 +415,7 @@ func BuildWorkspacePVC(task *flowv1alpha1.Task, vct *corev1.PersistentVolumeClai
 			Labels: objectLabels(task.UID, 0),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
-				Kind:               "Task",
+				Kind:               kindTask,
 				Name:               task.Name,
 				UID:                task.UID,
 				Controller:         ptr(true),
@@ -503,7 +509,7 @@ func BuildVerdictBox(
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
-				Kind:               "Task",
+				Kind:               kindTask,
 				Name:               task.Name,
 				UID:                task.UID,
 				Controller:         ptr(true),

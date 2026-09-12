@@ -63,7 +63,7 @@ var _ = Describe("a run nothing starts", func() {
 	It("opens a place for the answer instead of starting a Job", func() {
 		start()
 
-		box := fx.box(1)
+		box := fx.box()
 		Expect(box.Data).To(BeEmpty(), "the box is opened empty; the answer is somebody else's to write")
 		Expect(box.Annotations).To(HaveKeyWithValue(contract.AnnotationPhase, string(phaseInvestigate)))
 
@@ -95,7 +95,7 @@ var _ = Describe("a run nothing starts", func() {
 		Expect(run.JobName).To(BeEmpty(), "a run with a box has no Job")
 		Expect(run.Deadline).NotTo(BeNil())
 		Expect(run.Deadline.Time).To(BeTemporally("~",
-			fx.box(1).CreationTimestamp.Add(timeout), time.Second),
+			fx.box().CreationTimestamp.Add(timeout), time.Second),
 			"the wait is counted from the box, so a restart lands on the same instant")
 	})
 
@@ -130,11 +130,11 @@ var _ = Describe("a run nothing starts", func() {
 
 	It("does not open a second box for the same run", func() {
 		start()
-		created := fx.box(1).UID
+		created := fx.box().UID
 
 		fx.reconcile()
 
-		Expect(fx.box(1).UID).To(Equal(created), "the name is deterministic and the run keeps it")
+		Expect(fx.box().UID).To(Equal(created), "the name is deterministic and the run keeps it")
 	})
 
 	// The name is written down before the object is created, so a crash
@@ -153,7 +153,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		Expect(fx.reconcile().RequeueAfter).To(Equal(verdictPoll))
 
-		Expect(fx.box(1).Data).To(BeEmpty())
+		Expect(fx.box().Data).To(BeEmpty())
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "the run carries on where it left off")
 		Expect(fx.get().Status.CurrentRun.Deadline).NotTo(BeNil(), "and is dated once the box is really there")
 	})
@@ -272,7 +272,7 @@ var _ = Describe("a run nothing starts", func() {
 
 	It("moves on the word that was written", func() {
 		start()
-		fx.answer(1, "ok", "見ました")
+		fx.answer("ok", "見ました")
 
 		fx.reconcile()
 
@@ -287,7 +287,7 @@ var _ = Describe("a run nothing starts", func() {
 
 	It("escalates a word that is not one of the choices", func() {
 		start()
-		fx.answer(1, "approved", "")
+		fx.answer("approved", "")
 
 		fx.reconcile()
 
@@ -299,7 +299,7 @@ var _ = Describe("a run nothing starts", func() {
 
 	It("keeps waiting when the answer is written empty", func() {
 		start()
-		fx.answer(1, "  ", "")
+		fx.answer("  ", "")
 
 		Expect(fx.reconcile().RequeueAfter).To(Equal(verdictPoll))
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate),
@@ -404,7 +404,7 @@ var _ = Describe("a run nothing starts", func() {
 
 	It("fails a run whose place was taken away while it waited", func() {
 		start()
-		Expect(k8sClient.Delete(fx.ctx, fx.box(1))).To(Succeed())
+		Expect(k8sClient.Delete(fx.ctx, fx.box())).To(Succeed())
 
 		fx.reconcile()
 
@@ -415,7 +415,7 @@ var _ = Describe("a run nothing starts", func() {
 	It("fails a run whose box belongs to something else", func() {
 		start()
 
-		box := fx.box(1)
+		box := fx.box()
 		box.OwnerReferences = nil
 		Expect(k8sClient.Update(fx.ctx, box)).To(Succeed())
 
@@ -433,7 +433,7 @@ var _ = Describe("a run nothing starts", func() {
 	It("fails a run whose box was replaced under the same name", func() {
 		start()
 
-		Expect(k8sClient.Delete(fx.ctx, fx.box(1))).To(Succeed())
+		Expect(k8sClient.Delete(fx.ctx, fx.box())).To(Succeed())
 
 		task := fx.get()
 		controller := true
@@ -469,7 +469,7 @@ var _ = Describe("a run nothing starts", func() {
 		jobRunner()(&handler)
 		Expect(k8sClient.Update(fx.ctx, &handler)).To(Succeed())
 
-		fx.answer(1, "ok", "")
+		fx.answer("ok", "")
 		fx.reconcile()
 
 		Expect(fx.get().Status.Phase).To(Equal(phaseReport), "the run finished the way it started")
@@ -512,7 +512,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		fx.reconcile()
 		fx.reconcile()
-		fx.answer(1, "ok", "")
+		fx.answer("ok", "")
 		fx.reconcile() // the task reaches its ending, owing a cleanup
 		fx.reconcile() // opens the place the cleanup run is answered in
 
@@ -548,7 +548,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		fx.reconcile() // settles the starting phase
 		fx.reconcile() // opens the place run 1 is answered in
-		fx.answer(1, "ok", "")
+		fx.answer("ok", "")
 		fx.reconcile() // settles run 1: the task reaches its ending, owing a cleanup
 		fx.reconcile() // opens the place the cleanup run is answered in
 
