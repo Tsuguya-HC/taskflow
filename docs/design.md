@@ -409,14 +409,22 @@ runner の選択とは別に、**包む単位**という論点自体は残る。
 `jobTemplate` に**コンテナを複数置く**ことで表す。ワークスペースを共有した 1 Pod なので、
 順序も受け渡しも Pod の中で閉じる。
 
-> **スケッチ（未実装）**: 束縛側で複数の handler を並べる案。CRD には無い。
-> 1 Pod に畳めない検査（別 SA が要る等）が出てきたら要る。
+> **スケッチ（未実装）**: 1 Pod に畳めない検査（別 SA が要る等）は、1 フェーズに handler を並べるのではなく、
+> **並列フェーズ**として書く（[ADR-0013](adr/0013-parallel-phases.md)）。分岐元の binding に `join` を書くと、
+> 書かれた行き先（と `always`）を全部起動し、全部が `join.phase` に着いたら合流する。枝は行き先を選ばない
+> （`join.phase` か `Escalated` だけ）ので、判断は合流後の直列フェーズがする。合流先は `inputs` ビュー
+> （`/inputs/<枝のフェーズ>/`）で各枝の答えを読む。
 
 ```yaml sketch
-Review:
-  handlers: [lint, test, agent-review]
-  next: {検証: ok, 実装: rework, Escalated: stuck}
+Checks:
+  handler: pick-checks
+  next: {lint: lint, Escalated: stuck}
+  join: {phase: Review, always: [test]}
+lint: {handler: lint, next: {Review: done, Escalated: stuck}}
+test: {handler: test, next: {Review: done, Escalated: stuck}}
 ```
+
+1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
 
 合成規則は**固定**（設定可能にすると DSL 化する）:
 

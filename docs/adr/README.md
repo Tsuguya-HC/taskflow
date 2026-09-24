@@ -22,3 +22,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | [0010](0010-zero-before-it-happens.md) | accepted | 宣言された終端は、起きる前から 0 として出す |
 | [0011](0011-verdict-from-declared-state.md) | accepted | framework が起こさない run には、コントローラが run ごとの置き場を作る（`External` → `State`） |
 | [0012](0012-run-limit-per-phase.md) | accepted | 循環の上限はフェーズごとの実行回数（`maxRunsPerPhase`）。`reworkBudget` を置き換える |
+| [0013](0013-parallel-phases.md) | accepted | 並列フェーズは `join` で宣言し、分岐から合流までを閉じた領域にする。枝ごとに runID、読む口は `inputs` ビュー |
