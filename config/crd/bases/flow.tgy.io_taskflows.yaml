@@ -24,8 +24,8 @@ spec:
       name: Accepted
       priority: 1
       type: string
-    - jsonPath: .spec.reworkBudget
-      name: Budget
+    - jsonPath: .spec.maxRunsPerPhase
+      name: MaxRuns
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -130,6 +130,28 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              maxRunsPerPhase:
+                default: 1
+                description: |-
+                  MaxRunsPerPhase caps how many times any one phase may run in a task of
+                  this flow. A move to a phase that has already run this many times goes
+                  to Escalated instead (ADR-0012).
+
+                  It counts runs of a phase rather than the edges that led back to one.
+                  Counting edges charged a cycle once for every phase it re-entered, so
+                  the same number meant a different number of rounds in a longer loop;
+                  a count per phase says what it means — "review at most three times" —
+                  and is what the work actually costs. It is a phase and not a handler
+                  that is counted, because one handler may fill several phases on
+                  purpose, and those are separate places the flow can loop through.
+
+                  Nothing is declared per edge and nothing is stored beside the history:
+                  the controller counts the task's own history when it moves, so there
+                  is no annotation to forget and no second record to drift (P9). The
+                  default of 1 is a flow that never goes back.
+                format: int32
+                minimum: 1
+                type: integer
               profile:
                 description: |-
                   Profile is a validation schema, not a behaviour switch: it says which phases
@@ -139,15 +161,6 @@ spec:
                 enum:
                 - investigate
                 type: string
-              reworkBudget:
-                description: |-
-                  ReworkBudget caps how many times this flow may send work back. It is
-                  spent at runtime by the controller, never declared per edge — an edge
-                  that had to say "and decrement" would be an expression, and expressions
-                  cannot be checked without running them (P9).
-                format: int32
-                minimum: 0
-                type: integer
               start:
                 description: |-
                   Start names the phase a task begins at.

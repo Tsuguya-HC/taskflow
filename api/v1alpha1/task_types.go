@@ -237,11 +237,6 @@ type TaskStatus struct {
 	// +optional
 	RunID int32 `json:"runID,omitempty"`
 
-	// ReworkBudget remaining. Counted down by the controller as reworks are
-	// taken, never declared by the flow.
-	// +optional
-	ReworkBudget int32 `json:"reworkBudget,omitempty"`
-
 	// +optional
 	CurrentRun *RunRef `json:"currentRun,omitempty"`
 
@@ -268,7 +263,6 @@ type TaskStatus struct {
 // +kubebuilder:printcolumn:name="Flow",type=string,JSONPath=`.spec.flow`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Run",type=integer,JSONPath=`.status.runID`
-// +kubebuilder:printcolumn:name="Budget",type=integer,JSONPath=`.status.reworkBudget`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Task is one execution of a flow.

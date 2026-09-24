@@ -83,7 +83,7 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 						Next:    map[flowv1alpha1.Phase]string{phaseDone: dirSent},
 					},
 				},
-				ReworkBudget: 2,
+				MaxRunsPerPhase: 3,
 				TTL: &flowv1alpha1.TTLSpec{
 					Succeeded: &metav1.Duration{Duration: 3600000000000},
 				},
@@ -136,6 +136,26 @@ var _ = Describe("the API accepts the shapes design.md documents", func() {
 		got := &flowv1alpha1.TaskHandler{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(h), got)).To(Succeed())
 		Expect(got.Spec.Runner.Type).To(Equal(flowv1alpha1.RunnerJob))
+	})
+
+	// A flow that says nothing about its limit is one that never goes back.
+	// Left at zero instead, the transition would refuse every phase after the
+	// start as a broken flow.
+	It("defaults an omitted maxRunsPerPhase to 1", func() {
+		f := &flowv1alpha1.TaskFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: "defaults-max-runs", Namespace: resourceNamespace},
+			Spec: flowv1alpha1.TaskFlowSpec{
+				Profile:  flowv1alpha1.ProfileInvestigate,
+				Start:    "報告",
+				Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, f)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, f) })
+
+		got := &flowv1alpha1.TaskFlow{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(f), got)).To(Succeed())
+		Expect(got.Spec.MaxRunsPerPhase).To(BeEquivalentTo(1))
 	})
 
 	// The labels a network policy selects on live here, written by whoever
@@ -446,17 +466,19 @@ var _ = Describe("the API refuses what the design forbids", func() {
 		func(create func() error, reason string) {
 			invalid(create(), reason)
 		},
-		Entry("TaskFlow.reworkBudget below zero", func() error {
+		// Zero cannot be sent at all — omitempty drops it and the default
+		// fills in 1 — so the value that exercises the minimum is below it.
+		Entry("TaskFlow.maxRunsPerPhase below one", func() error {
 			flow := &flowv1alpha1.TaskFlow{
-				ObjectMeta: metav1.ObjectMeta{Name: "bad-rework-budget", Namespace: resourceNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-max-runs", Namespace: resourceNamespace},
 				Spec: flowv1alpha1.TaskFlowSpec{
-					Profile:      flowv1alpha1.ProfileInvestigate,
-					Bindings:     map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}}},
-					ReworkBudget: -1,
+					Profile:         flowv1alpha1.ProfileInvestigate,
+					Bindings:        map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{phaseDone: dirSent}}},
+					MaxRunsPerPhase: -1,
 				},
 			}
 			return k8sClient.Create(ctx, flow)
-		}, "reworkBudget"),
+		}, "maxRunsPerPhase"),
 		Entry("TaskFlow.maxInFlight below one", func() error {
 			zero := int32(0)
 			flow := &flowv1alpha1.TaskFlow{

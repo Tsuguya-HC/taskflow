@@ -66,21 +66,19 @@ func withEscalate() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	return b
 }
 
-func visited(phases ...flowv1alpha1.Phase) map[flowv1alpha1.Phase]bool {
-	v := map[flowv1alpha1.Phase]bool{}
+// ranOnce is the run counts of a task in which each phase named has run once.
+func ranOnce(phases ...flowv1alpha1.Phase) map[flowv1alpha1.Phase]int32 {
+	r := map[flowv1alpha1.Phase]int32{}
 	for _, p := range phases {
-		v[p] = true
+		r[p]++
 	}
-	return v
+	return r
 }
 
 func TestDeclaredEdges(t *testing.T) {
-	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if got.Next != phaseReport || got.Outcome != OutcomeDeclared {
 		t.Fatalf("got %q/%q, want 報告/Declared (%s)", got.Next, got.Outcome, got.Detail)
-	}
-	if got.Budget != 2 {
-		t.Fatalf("budget = %d, want it untouched", got.Budget)
 	}
 }
 
@@ -118,7 +116,7 @@ func TestDirectoriesComeFromTheDeclaration(t *testing.T) {
 func TestNoSingleAnswerEscalates(t *testing.T) {
 	for _, why := range []string{"nothing was written", "two directories were written", "the run timed out"} {
 		t.Run(why, func(t *testing.T) {
-			got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, NoAnswer: why, Visited: visited(phaseInvestigate), Budget: 2})
+			got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, NoAnswer: why, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 			if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
 				t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
 			}
@@ -132,7 +130,7 @@ func TestNoSingleAnswerEscalates(t *testing.T) {
 // The fail-closed path (P6) needs a message even when the caller did not
 // bother to say why — an empty NoAnswer must not become an empty Detail.
 func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
-	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
 	}
@@ -144,7 +142,7 @@ func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
 // The handler cannot invent this — the directory would not exist — but a flow
 // edited under a running task can leave one behind.
 func TestUndeclaredDirectoryEscalates(t *testing.T) {
-	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: "looks-fine", Visited: visited(phaseInvestigate), Budget: 2})
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: "looks-fine", Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
 	}
@@ -157,19 +155,16 @@ func TestUndeclaredDirectoryEscalates(t *testing.T) {
 // indistinguishable in the history from a deliberate hand-off.
 func TestDeclaredEscalationIsNotSilence(t *testing.T) {
 	got := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, Directory: dirEscalate,
-		Visited: visited(phaseInvestigate), Budget: 2})
+		Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeDeclined {
 		t.Fatalf("got %q/%q, want Escalated/Declined (%s)", got.Next, got.Outcome, got.Detail)
-	}
-	if got.Budget != 2 {
-		t.Fatalf("budget = %d, want it untouched — nothing runs after Escalated", got.Budget)
 	}
 	if !strings.Contains(got.Detail, dirEscalate) {
 		t.Fatalf("detail = %q, want the directory named in it", got.Detail)
 	}
 
 	silent := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, NoAnswer: "the run ran out of turns",
-		Visited: visited(phaseInvestigate), Budget: 2})
+		Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if silent.Next != got.Next {
 		t.Fatalf("silence went to %q and a declared escalation to %q; both stop the task", silent.Next, got.Next)
 	}
@@ -178,14 +173,14 @@ func TestDeclaredEscalationIsNotSilence(t *testing.T) {
 	}
 }
 
-// An exhausted budget is what turns a rework into an escalation, and a
+// A phase at its limit is what turns a move into an escalation, and a
 // declared escalation must not be mistaken for one: it is where the flow says
 // to go, not the last resort after the flow ran out of room.
-func TestDeclaredEscalationDoesNotConsultTheBudget(t *testing.T) {
+func TestDeclaredEscalationDoesNotConsultTheRunLimit(t *testing.T) {
 	got := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, Directory: dirEscalate,
-		Visited: visited(phaseInvestigate, flowv1alpha1.PhaseEscalated), Budget: 0})
+		Runs: ranOnce(phaseInvestigate, flowv1alpha1.PhaseEscalated), MaxRuns: 1})
 	if got.Outcome != OutcomeDeclined {
-		t.Fatalf("outcome = %q, want Declined even with no budget and Escalated marked visited", got.Outcome)
+		t.Fatalf("outcome = %q, want Declined even with Escalated counted at the limit", got.Outcome)
 	}
 }
 
@@ -257,7 +252,7 @@ func TestTheReservedEndingsNeedNoFlow(t *testing.T) {
 
 func TestBrokenFlowFails(t *testing.T) {
 	t.Run("a phase with no binding", func(t *testing.T) {
-		got := Next(Input{Bindings: sampleFlow(), Phase: "存在しない", Directory: dirOK, Budget: 2})
+		got := Next(Input{Bindings: sampleFlow(), Phase: "存在しない", Directory: dirOK, MaxRuns: 3})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
 			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
 		}
@@ -268,7 +263,7 @@ func TestBrokenFlowFails(t *testing.T) {
 	t.Run("two statuses sharing a directory", func(t *testing.T) {
 		b := sampleFlow()
 		b[phaseInvestigate].Next["中止"] = dirOK
-		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 2})
+		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: dirOK, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
 			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
 		}
@@ -281,64 +276,96 @@ func TestBrokenFlowFails(t *testing.T) {
 	t.Run("Failed declared as a destination", func(t *testing.T) {
 		b := sampleFlow()
 		b[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
-		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: "broken", Visited: visited(phaseInvestigate), Budget: 2})
+		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: "broken", Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
 			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
 		}
 	})
 }
 
-func TestReworkSpendsBudget(t *testing.T) {
-	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore, Visited: visited(phaseInvestigate), Budget: 2})
+// Going back is recorded as such, but costs nothing of its own: the limit is
+// on how often the destination runs, not on the edge.
+func TestReworkIsRecordedAgainstTheLimit(t *testing.T) {
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if got.Next != phaseInvestigate || got.Outcome != OutcomeRework {
 		t.Fatalf("got %q/%q, want 調査/Rework", got.Next, got.Outcome)
 	}
-	if got.Budget != 1 {
-		t.Fatalf("budget = %d, want 1", got.Budget)
+}
+
+func TestAPhaseAtItsLimitEscalates(t *testing.T) {
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore,
+		Runs: map[flowv1alpha1.Phase]int32{phaseInvestigate: 3}, MaxRuns: 3})
+	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeRunLimitReached {
+		t.Fatalf("got %q/%q, want Escalated/RunLimitReached", got.Next, got.Outcome)
+	}
+	if !strings.Contains(got.Detail, string(phaseInvestigate)) {
+		t.Fatalf("detail = %q, want the phase that hit its limit named", got.Detail)
 	}
 }
 
-func TestReworkWithoutBudgetEscalates(t *testing.T) {
-	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore, Visited: visited(phaseInvestigate), Budget: 0})
-	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeBudgetExhausted {
-		t.Fatalf("got %q/%q, want Escalated/BudgetExhausted", got.Next, got.Outcome)
-	}
-}
-
-// The first version of this rule decremented unconditionally, which made
-// reworkBudget: 0 mean "cannot run at all" instead of "never goes back".
-func TestForwardEdgesIgnoreBudget(t *testing.T) {
-	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Visited: visited(phaseInvestigate), Budget: 0})
+// The limit is on the destination. A phase that has not run yet is reachable
+// however often the phase being left has run — so a limit of 1 means "never
+// goes back", not "cannot run at all".
+func TestAPhaseThatHasNotRunIgnoresTheLimit(t *testing.T) {
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Runs: ranOnce(phaseInvestigate), MaxRuns: 1})
 	if got.Next != phaseReport || got.Outcome != OutcomeDeclared {
-		t.Fatalf("got %q/%q, want 報告/Declared with no budget", got.Next, got.Outcome)
-	}
-	if got.Budget != 0 {
-		t.Fatalf("budget = %d, want it untouched at 0 — a forward edge must not spend it", got.Budget)
+		t.Fatalf("got %q/%q, want 報告/Declared at a limit of 1", got.Next, got.Outcome)
 	}
 }
 
-// Budget only ever decreases, so a cycle cannot run forever.
-func TestCycleTerminates(t *testing.T) {
-	budget := int32(2)
-	phase := phaseInvestigate
-	seen := visited(phaseInvestigate)
+// An ending never runs, so no count can keep a task from reaching one.
+func TestTheLimitNeverStopsAnEnding(t *testing.T) {
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseReport, Directory: dirSent,
+		Runs: map[flowv1alpha1.Phase]int32{phaseInvestigate: 5, phaseReport: 5}, MaxRuns: 1})
+	if got.Next != phaseDone || got.Outcome != OutcomeDeclared {
+		t.Fatalf("got %q/%q, want おわり/Declared", got.Next, got.Outcome)
+	}
+}
 
-	for range 50 {
-		got := Next(Input{Bindings: sampleFlow(), Phase: phase, Directory: dirMore, Visited: seen, Budget: budget})
-		budget = got.Budget
-		phase = got.Next
-		seen[phase] = true
-		if IsTerminal(sampleFlow(), phase) {
-			if phase != flowv1alpha1.PhaseEscalated {
-				t.Fatalf("terminated at %q, want Escalated once the budget ran out", phase)
+// Below one no phase could follow the start. The schema refuses it; this is
+// the answer if it arrives anyway, and it is a broken flow rather than work
+// that ran out of rounds.
+func TestALimitBelowOneIsABrokenFlow(t *testing.T) {
+	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Runs: ranOnce(phaseInvestigate)})
+	if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
+		t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
+	}
+}
+
+// A two-phase loop runs each of its phases exactly MaxRuns times and then
+// stops. Under the budget this replaced, the forward edge back into the
+// review was charged as well, so a loop cost two for every round and the
+// number said nothing about how many rounds there would be (ADR-0012).
+func TestALoopRunsEachPhaseExactlyTheLimit(t *testing.T) {
+	const (
+		implement flowv1alpha1.Phase = "実装"
+		review    flowv1alpha1.Phase = "レビュー"
+		done      flowv1alpha1.Phase = "完了"
+	)
+	flow := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+		implement: {Handler: "impl", Next: map[flowv1alpha1.Phase]string{review: "ready"}},
+		review:    {Handler: "rev", Next: map[flowv1alpha1.Phase]string{done: "ok", implement: "again"}},
+	}
+	answer := map[flowv1alpha1.Phase]string{implement: "ready", review: "again"}
+
+	for _, limit := range []int32{1, 2, 3} {
+		runs := map[flowv1alpha1.Phase]int32{implement: 1}
+		phase := implement
+		for range 50 {
+			got := Next(Input{Bindings: flow, Phase: phase, Directory: answer[phase], Runs: runs, MaxRuns: limit})
+			phase = got.Next
+			if IsTerminal(flow, phase) {
+				if phase != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeRunLimitReached {
+					t.Fatalf("limit %d: stopped at %q/%q, want Escalated/RunLimitReached", limit, phase, got.Outcome)
+				}
+				break
 			}
-			if budget != 0 {
-				t.Fatalf("ended with budget %d, want 0", budget)
-			}
-			return
+			runs[phase]++
+		}
+		if runs[implement] != limit || runs[review] != limit {
+			t.Fatalf("limit %d: ran 実装 %d and レビュー %d times, want %d each", limit, runs[implement], runs[review], limit)
 		}
 	}
-	t.Fatal("did not terminate")
 }
 
 // The endings a flow declares have to be nameable before any task reaches

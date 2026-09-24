@@ -191,13 +191,26 @@ type TaskFlowSpec struct {
 	// +optional
 	Terminals map[Phase]TerminalSeverity `json:"terminals,omitempty"`
 
-	// ReworkBudget caps how many times this flow may send work back. It is
-	// spent at runtime by the controller, never declared per edge — an edge
-	// that had to say "and decrement" would be an expression, and expressions
-	// cannot be checked without running them (P9).
-	// +kubebuilder:validation:Minimum=0
+	// MaxRunsPerPhase caps how many times any one phase may run in a task of
+	// this flow. A move to a phase that has already run this many times goes
+	// to Escalated instead (ADR-0012).
+	//
+	// It counts runs of a phase rather than the edges that led back to one.
+	// Counting edges charged a cycle once for every phase it re-entered, so
+	// the same number meant a different number of rounds in a longer loop;
+	// a count per phase says what it means — "review at most three times" —
+	// and is what the work actually costs. It is a phase and not a handler
+	// that is counted, because one handler may fill several phases on
+	// purpose, and those are separate places the flow can loop through.
+	//
+	// Nothing is declared per edge and nothing is stored beside the history:
+	// the controller counts the task's own history when it moves, so there
+	// is no annotation to forget and no second record to drift (P9). The
+	// default of 1 is a flow that never goes back.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
 	// +optional
-	ReworkBudget int32 `json:"reworkBudget,omitempty"`
+	MaxRunsPerPhase int32 `json:"maxRunsPerPhase,omitempty"`
 
 	// MaxInFlight caps concurrent tasks of this flow.
 	// +kubebuilder:validation:Minimum=1
@@ -239,7 +252,7 @@ type TaskFlowStatus struct {
 // +kubebuilder:resource:shortName=tf
 // +kubebuilder:printcolumn:name="Profile",type=string,JSONPath=`.spec.profile`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
-// +kubebuilder:printcolumn:name="Budget",type=integer,JSONPath=`.spec.reworkBudget`
+// +kubebuilder:printcolumn:name="MaxRuns",type=integer,JSONPath=`.spec.maxRunsPerPhase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // TaskFlow is the type of a task: which phases exist, who fills them, and

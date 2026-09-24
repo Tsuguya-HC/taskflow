@@ -50,7 +50,7 @@ date: 2026-08-21
 | | 許す | 許さない |
 |---|---|---|
 | 遷移 | `next: {報告: ok, 調査: more}` | `when: "... == pass && budget > 0"` |
-| 予算 | 実行時にコントローラが数える | `{{=asInt(budget) - 1}}` |
+| 回数の上限 | 実行時にコントローラが history から数える | `{{=asInt(budget) - 1}}` |
 | 入力 | `input` の値をプロンプトへ差し込む | 入力の値による分岐 |
 
 理由は**検証可能性の一点**。テーブルは create 時に全件検査できる — 未知の verdict、
@@ -179,7 +179,7 @@ spec:
     報告:
       handler: notify-handler
       next: {おわり: sent}     # おわり は束縛が無い = そこで止まる
-  reworkBudget: 2
+  maxRunsPerPhase: 3         # 各フェーズは最大 3 回まで（§5「循環の上限はフェーズごとの実行回数」）
   maxInFlight: 2              # この flow の同時実行数上限
   ttl: {succeeded: 1h, failed: 168h}
   finally:                    # 任意。終端の後に 1 回だけ走る。終端は変えない（§5、ADR-0009）
@@ -255,14 +255,13 @@ framework の外になる。独立した 2 本の Task になり親子関係が�
 — 誰が使ってよいかを絞れない、RBAC の見通しが悪くなる、GitOps でどのアプリが所有するのか
 決まらない。手元に先例があるので繰り返さない。
 
-以下の旧 `spec` フィールドは TaskFlow 側へ移動: `profile` / `bindings` / `reworkBudget`。
+以下の旧 `spec` フィールドは TaskFlow 側へ移動: `profile` / `bindings` / `reworkBudget`（後に `maxRunsPerPhase` へ置き換え、[ADR-0012](adr/0012-run-limit-per-phase.md)）。
 参照は毎 reconcile で解決し直す（走行中の flow をスナップショットしない — [ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。
 
 ```yaml
 status:
   phase: Review
   runID: 3                    # 単調増加。パスと子リソース名に使う
-  reworkBudget: 1
   currentRun: {phase: Review, runID: 3, deadline: ..., workflowName: ...}
   history: [...]              # 上限付きリングバッファ
   conditions: [...]
@@ -765,7 +764,7 @@ finally:
 遷移表はコントローラが持たない。**`bindings[phase].next` が辺を宣言し、それが必須。**
 
 ```
-next(bindings, phase, directory, visited, budget) → phase
+next(bindings, phase, directory, runs, maxRuns) → phase
 ```
 
 コントローラ組み込みなのは**失敗系だけ**：
@@ -773,13 +772,14 @@ next(bindings, phase, directory, visited, budget) → phase
 ```
 非空ディレクトリがちょうど 1 つでない  → Escalated   （0 個も 2 個以上も時間切れも同じ）
 宣言に無いディレクトリ                → Escalated
+上限回数に達したフェーズへの遷移      → Escalated
 束縛の無いフェーズ                    → Failed
 同じディレクトリを指す 2 ステータス    → Failed（行き先が決まらない）
 next が Failed を名乗る               → Failed（予約語。宣言された辺として通さない）
 ```
 
 `next` が宣言した `Escalated` への辺だけは組み込みではなく **flow の表に従う**（上記）。
-訪問済み判定も予算も見ない — `Escalated` は終端で、その後に走る run が無いため。
+回数の上限も見ない — `Escalated` は終端で、その後に走る run が無いため。
 
 **失敗系は宣言で上書きできない。** ここを可変にすると P6（判定不能を pass に倒さない）が
 YAML 一行で破れる。
@@ -793,17 +793,31 @@ YAML 一行で破れる。
 だけ。ポリシーは「利用側が自分で決めた名前」に対して書ける — 辺を束縛側に置いたことで
 自由になったのは辺そのものであって、フェーズの名前を含めた束縛の集合全体が利用側のものになる。
 
-### 予算消費は宣言させず、実行時に判定する
+### 循環の上限はフェーズごとの実行回数（[ADR-0012](adr/0012-run-limit-per-phase.md)）
 
-`next` で自由に辺を張れると、減少する量のない循環が書けてしまう。
+`next` で自由に辺を張れると、終わらない循環が書けてしまう。
 `consumesBudget: true` のような注釈にすると付け忘れる。
 
-> **遷移先が「このタスクで既に訪問済みのフェーズ」なら、自動的に rework 辺とみなして
-> `reworkBudget` を 1 減らす。0 なら遷移せず `Escalated`。**
+> **遷移先のフェーズが、このタスクで既に `maxRunsPerPhase` 回走っているなら、遷移せず
+> `Escalated`（outcome `RunLimitReached`）。**
 
-注釈不要・迂回不可能。停止性が宣言の正しさに依存しなくなる。
-`reworkBudget: 0` のタスクは「一度も後戻りしない」という意味になり、
-**前進する辺しか通らない限り影響を受けない**（初版の無条件ルールはここがバグだった）。
+- **数えるのはフェーズの run**。辺ではない。回数は history から数える（走行中の run を含む）ので、
+  status に別の数を持たない — 同じ事実を 2 か所に持てば食い違うが、history から導くものは人間が読む
+  history と食い違いようがない
+- **注釈不要・迂回不可能。** フェーズは有限個で、どれも上限回数しか走れないので、run の総数に上限がある。
+  停止性が宣言の正しさに依存しない
+- **既定は 1** = 一度も後戻りしない。上限は遷移**先**に掛かるので、まだ走っていないフェーズへの
+  前進は、今いるフェーズが何回走っていても通る。終端は走らないので、上限が終端への到達を止めることもない
+- handler ではなくフェーズを数えるのは、同じ handler を複数フェーズに束縛する正当な使い方
+  （lint を Checks と Verifying に）があり、それぞれが flow の別の場所だから
+- 既に走ったフェーズへの遷移は outcome `Rework` として history に残る。**何も消費しない** —
+  記録は「前ではなく後ろへ行った」という事実だけ
+
+以前は「訪問済みのフェーズへの遷移で `reworkBudget` を 1 減らす」だった。差し戻した後に**前へ進む辺でも**
+訪問済みのフェーズに入るたびに引かれたので、`実装 ⇄ レビュー` の 1 周が 2 消費し、周の長さで消費量が
+変わった — 数字から「何周できるか」が読めなかった。並列フェーズ（#159）が入ると、並列の枝が 1 本の予算を
+奪い合い、どの枝が Escalated に倒れるかが終わった順で変わる。フェーズごとの回数なら、枝は互いに素な
+フェーズを持つので判定が枝ごとに閉じる。
 
 ### profile は「必須フェーズ」を強制する
 
@@ -884,24 +898,24 @@ flow の編集も同じく毎 reconcile で読み直す。矛盾は上の表の�
 
 ### 循環に必要なもの
 
-- **減少する量**：`reworkBudget` は減るだけ、絶対に増やさない。循環が複数あるなら辺ごとに別予算
+- **上限**：各フェーズの実行回数に `maxRunsPerPhase`。回数は history から数えるので、戻ることも増やすこともできない
 - **runID**：フェーズ名だけでは実行を識別できなくなるため。子リソース名を
   `<task>-<runID>-<フェーズ名のハッシュ>` と決定論的にする（`generateName` は使わない。
   形式と所有権検証は §4）。
   遅れて到着した古い run の verdict は runID 不一致で黙って捨てる
 
-### カウンタは 2 本
+### 数えるものは 2 つ
 
-| カウンタ | 増える条件 | 用途 |
+| 何を | 増える条件 | 用途 |
 |---|---|---|
 | `runID` | **決着した run の後だけ**（rework も前進も。インフラリトライでは動かない） | パス・子リソース名の識別子 |
-| `reworkBudget` | rework の時だけ減る | ループ終了保証 |
+| フェーズごとの run 数（history から導出） | そのフェーズの run が決着するたび | ループ終了保証（`maxRunsPerPhase`） |
 
 `runID` が数えるのは**タスクが決着させた run** であって、その run を起動するのに何回かかったかでは
 ない（ADR-0004）。何も決まっていない試行に番号を払うと `results/` の棚に穴が空き、穴はそこに穴が
 あると既に知っている者にしか読めない。同じ run の 2 回目を区別するのは Job 名の attempt。
 
-インフラ起因の失敗（OOMKilled / evicted / ImagePull / ノード落ち）は **rework 予算を消費しない**。
+インフラ起因の失敗（OOMKilled / evicted / ImagePull / ノード落ち）は **run 数に数えない**（history に載らない）。
 区別できない場合は安全側（Escalated）。
 
 ---
@@ -1466,7 +1480,7 @@ verdict 機構は「正直だが間違えるエージェント」を前提にし
 | ワークスペース | 作業ツリー・plan.md・diff | S3 prefix または PVC | タスク中 |
 | 経緯・メモ（対人） | 各フェーズの報告・判断理由 | 対人のタスクボード | 永続 |
 | 横断知識 | 過去タスクの教訓 | ベクトルストア | 永続 |
-| 制御状態 | phase / runID / reworkBudget | Task.status | タスク中 |
+| 制御状態 | phase / runID / history | Task.status | タスク中 |
 
 ### 「人間への報連相」と「フェーズ間の引き継ぎ」は別物
 
@@ -1598,7 +1612,8 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
 | コントローラが store を list して verdict を取る | コントローラが S3 認証情報と store の種類を知ることになる。termination message で足りる |
 | API キーをコントローラが管理 | 普通に `envFrom: secretRef`。ユーザーの pod spec の話 |
 | グローバルな遷移表をコントローラが持つ | `(Review, pass)` の行き先が profile 依存になり、遷移関数に profile 引数が要る。辺を束縛側に置けばこの分岐自体が消える |
-| 予算消費を `consumesBudget: true` で宣言 | 付け忘れる。訪問済みフェーズへの遷移を実行時に検出すれば迂回不可能 |
+| 予算消費を `consumesBudget: true` で宣言 | 付け忘れる。フェーズごとの実行回数を実行時に history から数えれば迂回不可能（ADR-0012） |
+| 訪問済みフェーズへの遷移ごとに予算を 1 減らす | 差し戻し後の前進でも引かれ、周の長さで消費量が変わる。並列の枝が 1 本の予算を奪い合い、結果が終わった順に依存する（ADR-0012） |
 | `next` に行き先のデフォルトを持たせる | 隠れた挙動。必須にして書かせる（P8） |
 | 実行時の構造矛盾を修復する | 曖昧なまま進むより止まる方が安い。`Failed` にして作り直させる |
 | フェーズ内に順序や `stopOnFailure` を持たせる | 安いゲートを前段のフェーズに置けば済む。機構を増やさない |
@@ -1640,7 +1655,7 @@ S3 publish、プロンプト調整。
 ### Step 1 — コントローラ
 
 `TaskFlow` + `TaskHandler` + `Task`、runner は `Job` のみ、profile は `investigate` のみ。
-循環の骨格（遷移表 / runID / reworkBudget / history）は最初から入れるが、
+循環の骨格（遷移表 / runID / 回数の上限 / history）は最初から入れるが、
 investigate では 1 つも発火しない。**正しさは単体テストで確かめ、実クラスタでは
 一番安全なタスクだけ回す。**
 
@@ -1654,7 +1669,7 @@ investigate では 1 つも発火しない。**正しさは単体テストで確
 
 ### Step 3 — implement 系
 
-Implementing / Review の循環を有効化。PVC store、rework 予算、長命 runner の要否を再評価。
+Implementing / Review の循環を有効化。PVC store、回数の上限、長命 runner の要否を再評価。
 
 ---
 
