@@ -68,54 +68,54 @@ func specOf(
 // ttl — the shape every flow had before either existed.
 func spec() *flowv1alpha1.TaskFlowSpec { return specOf(flow(), nil, nil) }
 
-func TestVisitedComesFromHistory(t *testing.T) {
+func TestRunsComesFromHistory(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase: phaseReport,
+		Phase: phaseInvestigate,
 		History: []flowv1alpha1.HistoryEntry{
 			{Phase: phaseInvestigate, RunID: 1, Directory: dirOK},
+			{Phase: phaseReport, RunID: 2, Directory: dirMore},
 		},
 	}
-	got := Visited(s, flow())
-	if !got[phaseInvestigate] {
-		t.Fatal("a phase in history must count as visited")
+	got := Runs(s, flow())
+	if got[phaseInvestigate] != 2 {
+		t.Fatalf("調査 ran %d times, want 2: once in history and once in flight — a self-loop back to it is a rework", got[phaseInvestigate])
 	}
-	if !got[phaseReport] {
-		t.Fatal("the phase in flight has run, so a self-loop back to it is a rework")
+	if got[phaseReport] != 1 {
+		t.Fatalf("報告 ran %d times, want 1", got[phaseReport])
 	}
-	if got[flowv1alpha1.Phase("見たことない")] {
-		t.Fatal("a phase never run must not count as visited")
+	if got[flowv1alpha1.Phase("見たことない")] != 0 {
+		t.Fatal("a phase never run must not have a count")
 	}
 }
 
 // A status the flow stops at has no handler, so the task never ran there.
-func TestVisitedIgnoresWhereItStopped(t *testing.T) {
+func TestRunsIgnoresWhereItStopped(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{Phase: phaseDone}
-	if Visited(s, flow())[phaseDone] {
+	if Runs(s, flow())[phaseDone] != 0 {
 		t.Fatal("nothing runs at a status with no binding")
 	}
 	esc := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated}
-	if Visited(esc, flow())[flowv1alpha1.PhaseEscalated] {
+	if Runs(esc, flow())[flowv1alpha1.PhaseEscalated] != 0 {
 		t.Fatal("nothing runs at Escalated either")
 	}
 }
 
 // TaskStatus.Phase is +optional: a task that has not been dispatched yet has
-// none set. Visited must not treat that as a phase named "" having run.
-func TestVisitedBeforeFirstDispatch(t *testing.T) {
-	got := Visited(&flowv1alpha1.TaskStatus{}, flow())
+// none set. Runs must not treat that as a phase named "" having run.
+func TestRunsBeforeFirstDispatch(t *testing.T) {
+	got := Runs(&flowv1alpha1.TaskStatus{}, flow())
 	if len(got) != 0 {
-		t.Fatalf("visited = %v, want empty before any run", got)
+		t.Fatalf("runs = %v, want empty before any run", got)
 	}
 }
 
 func TestAdvanceRecordsAndMoves(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:        phaseReport,
-		RunID:        2,
-		ReworkBudget: 2,
-		CurrentRun:   &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
+		Phase:      phaseReport,
+		RunID:      2,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
 	}
-	res := transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 1}
+	res := transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeRework}
 	Advance(s, spec(), dirMore, res, at)
 
 	if len(s.History) != 1 {
@@ -130,9 +130,6 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 	}
 	if s.RunID != 3 {
 		t.Fatalf("runID = %d, want 3", s.RunID)
-	}
-	if s.ReworkBudget != 1 {
-		t.Fatalf("budget = %d, want 1", s.ReworkBudget)
 	}
 	if s.CurrentRun == nil || s.CurrentRun.RunID != 3 || s.CurrentRun.Phase != phaseInvestigate {
 		t.Fatalf("currentRun = %+v, want Planning at run 3", s.CurrentRun)
@@ -261,16 +258,13 @@ func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 
 func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{}
-	Begin(s, phaseInvestigate, 2)
+	Begin(s, phaseInvestigate)
 
 	if s.Phase != phaseInvestigate {
 		t.Fatalf("phase = %q, want %q", s.Phase, phaseInvestigate)
 	}
 	if s.RunID != 1 {
 		t.Fatalf("runID = %d, want 1", s.RunID)
-	}
-	if s.ReworkBudget != 2 {
-		t.Fatalf("reworkBudget = %d, want 2", s.ReworkBudget)
 	}
 	if s.CurrentRun == nil || s.CurrentRun.Phase != phaseInvestigate || s.CurrentRun.RunID != 1 {
 		t.Fatalf("currentRun = %+v, want %q at run 1", s.CurrentRun, phaseInvestigate)
@@ -373,20 +367,21 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	}
 }
 
-func TestInfraRetryCostsNeitherARunNorBudget(t *testing.T) {
+// A retry is not a run of the phase either: nothing is added to the history
+// Runs counts, so the phase's limit is not spent on it.
+func TestInfraRetryCostsNeitherARunNorTheLimit(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:        phaseReport,
-		RunID:        4,
-		ReworkBudget: 1,
-		CurrentRun:   &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 4},
+		Phase:      phaseReport,
+		RunID:      4,
+		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 4},
 	}
 	RetryInfra(s)
 
 	if s.RunID != 4 || s.CurrentRun.RunID != 4 {
 		t.Fatalf("runID = %d, want it to stay 4: a runID counts decided runs, not attempts at starting one", s.RunID)
 	}
-	if s.ReworkBudget != 1 {
-		t.Fatalf("budget = %d, want 1 — nothing was judged", s.ReworkBudget)
+	if n := Runs(s, flow())[phaseReport]; n != 1 {
+		t.Fatalf("報告 ran %d times, want 1 — nothing was judged", n)
 	}
 	if s.Phase != phaseReport {
 		t.Fatalf("phase = %q, want to stay on Review", s.Phase)
@@ -412,15 +407,17 @@ func TestInfraRetriesExhausted(t *testing.T) {
 	}
 }
 
-// The counters exist to bound a cycle, so drive one: review keeps sending
-// work back and the budget keeps falling until the task lands on a human.
+// The history exists to bound a cycle, so drive one: 調査 keeps sending work
+// back to itself and its count keeps rising until the task lands on a human.
 // runID rises the whole way, which is what keeps each attempt's artifacts
 // separate.
-func TestCountersBoundACycle(t *testing.T) {
-	s := &flowv1alpha1.TaskStatus{Phase: phaseInvestigate, RunID: 1, ReworkBudget: 2}
+func TestHistoryBoundsACycle(t *testing.T) {
+	const limit = 3
+	s := &flowv1alpha1.TaskStatus{}
+	Begin(s, phaseInvestigate)
 
 	for range 20 {
-		// 調査 keeps asking for more of itself; the budget is the only thing
+		// 調査 keeps asking for more of itself; its limit is the only thing
 		// that stops it.
 		dir := dirMore
 		if s.Phase == phaseReport {
@@ -430,16 +427,16 @@ func TestCountersBoundACycle(t *testing.T) {
 			Bindings:  flow(),
 			Phase:     s.Phase,
 			Directory: dir,
-			Visited:   Visited(s, flow()),
-			Budget:    s.ReworkBudget,
+			Runs:      Runs(s, flow()),
+			MaxRuns:   limit,
 		})
 		Advance(s, spec(), dir, res, at)
 		if transition.IsTerminal(flow(), s.Phase) {
 			if s.Phase != flowv1alpha1.PhaseEscalated {
-				t.Fatalf("ended at %q, want Escalated once the budget was spent", s.Phase)
+				t.Fatalf("ended at %q, want Escalated once 調査 reached its limit", s.Phase)
 			}
-			if s.ReworkBudget != 0 {
-				t.Fatalf("budget = %d, want 0", s.ReworkBudget)
+			if n := Runs(s, flow())[phaseInvestigate]; n != limit {
+				t.Fatalf("調査 ran %d times, want exactly the limit of %d", n, limit)
 			}
 			// Every attempt got its own id, so no two runs share a directory.
 			ids := map[int32]bool{}
@@ -556,19 +553,19 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	// Begin, then every kind of move Advance can make, walked in sequence so
 	// each one starts from the state the last one left.
 	s := &flowv1alpha1.TaskStatus{}
-	Begin(s, phaseInvestigate, 1)
+	Begin(s, phaseInvestigate)
 	agrees(t, "Begin", s)
 
 	RetryInfra(s)
 	agrees(t, "RetryInfra", s)
 
 	Advance(s, spec(), dirMore, transition.Result{
-		Next: phaseInvestigate, Outcome: transition.OutcomeRework, Budget: 0,
+		Next: phaseInvestigate, Outcome: transition.OutcomeRework,
 	}, at)
 	agrees(t, "Advance on a rework", s)
 
 	Advance(s, spec(), dirOK, transition.Result{
-		Next: phaseReport, Outcome: transition.OutcomeDeclared, Budget: 0,
+		Next: phaseReport, Outcome: transition.OutcomeDeclared,
 	}, at)
 	agrees(t, "Advance on a declared edge", s)
 
@@ -576,7 +573,7 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	// above, since a stopped task cannot go on to the next case.
 	stopped := *s
 	Advance(&stopped, spec(), dirSent, transition.Result{
-		Next: phaseDone, Outcome: transition.OutcomeDeclared, Budget: 0,
+		Next: phaseDone, Outcome: transition.OutcomeDeclared,
 	}, at)
 	agrees(t, "Advance to a terminal the flow declared", &stopped)
 	if stopped.CurrentRun != nil {
@@ -585,7 +582,7 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 
 	escalated := *s
 	Advance(&escalated, spec(), dirMore, transition.Result{
-		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer, Budget: 0,
+		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer,
 	}, at)
 	agrees(t, "Advance to Escalated", &escalated)
 	if escalated.CurrentRun != nil {
@@ -604,7 +601,7 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	// tells "stopped, tidying up" from both "stopped" and "still working".
 	cleaning := *s
 	Advance(&cleaning, specWithCleanup(nil), dirSent, transition.Result{
-		Next: phaseDone, Outcome: transition.OutcomeDeclared, Budget: 0,
+		Next: phaseDone, Outcome: transition.OutcomeDeclared,
 	}, at)
 	if !InFinally(&cleaning) {
 		t.Fatalf("currentRun = %+v, want the cleanup run", cleaning.CurrentRun)

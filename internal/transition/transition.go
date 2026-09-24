@@ -24,6 +24,7 @@ limitations under the License.
 package transition
 
 import (
+	"fmt"
 	"slices"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
@@ -35,11 +36,14 @@ type Outcome string
 const (
 	// OutcomeDeclared followed an edge the flow declared.
 	OutcomeDeclared Outcome = "Declared"
-	// OutcomeRework followed a declared edge back to a phase already visited,
-	// spending a unit of budget.
+	// OutcomeRework followed a declared edge back to a phase that has already
+	// run. It costs nothing of its own: what bounds a cycle is how many times
+	// each phase may run, and this outcome only records that the edge went
+	// back rather than forward.
 	OutcomeRework Outcome = "Rework"
-	// OutcomeBudgetExhausted wanted to rework but had nothing left to spend.
-	OutcomeBudgetExhausted Outcome = "BudgetExhausted"
+	// OutcomeRunLimitReached wanted to move to a phase that has already run
+	// as many times as the flow allows.
+	OutcomeRunLimitReached Outcome = "RunLimitReached"
 	// OutcomeNoAnswer is a run that produced no single directory — none, or
 	// several, or it ran out of time. Not an approval; a human looks at it.
 	OutcomeNoAnswer Outcome = "NoAnswer"
@@ -55,8 +59,8 @@ const (
 	OutcomeStructural Outcome = "Structural"
 )
 
-// Input is everything the decision depends on. Passing the visited set and the
-// budget in, rather than reading them from a status, keeps the function
+// Input is everything the decision depends on. Passing the run counts and the
+// limit in, rather than reading them from a status, keeps the function
 // testable and keeps the caller honest about what it is asserting.
 type Input struct {
 	// Bindings is the flow's topology.
@@ -69,20 +73,19 @@ type Input struct {
 	// NoAnswer explains an empty Directory: nothing written, more than one
 	// written, timed out.
 	NoAnswer string
-	// Visited is every phase this task has already run. A destination in here
-	// makes the edge a rework, with no annotation required and none to forget.
-	Visited map[flowv1alpha1.Phase]bool
-	// Budget remaining for reworks.
-	Budget int32
+	// Runs is how many times each phase of this task has run, the run being
+	// settled included. A destination with a count makes the edge a rework,
+	// with no annotation required and none to forget.
+	Runs map[flowv1alpha1.Phase]int32
+	// MaxRuns is the flow's limit on runs of any one phase.
+	MaxRuns int32
 }
 
-// Result is where the task goes and what it cost.
+// Result is where the task goes and why.
 type Result struct {
 	Next flowv1alpha1.Phase
 	// Outcome explains the move; it is what gets recorded and surfaced.
 	Outcome Outcome
-	// Budget after the move. Only ever decreases.
-	Budget int32
 	// Detail is a short human-facing reason, for a status condition.
 	Detail string
 }
@@ -94,7 +97,7 @@ type Result struct {
 //	two statuses, one directory    -> Failed     (undecidable)
 //	Failed named as a destination  -> Failed     (not an answer)
 //	no single directory written    -> Escalated  (nothing was decided)
-//	a rework with no budget left   -> Escalated
+//	a phase at its run limit       -> Escalated
 //
 // Two further cases are answered below that the controller never actually
 // asks about, because Reconcile and collect settle them before a run gets
@@ -124,7 +127,6 @@ func Next(in Input) Result {
 		return Result{
 			Next:    flowv1alpha1.PhaseFailed,
 			Outcome: OutcomeStructural,
-			Budget:  in.Budget,
 			Detail:  "phase " + string(in.Phase) + " has no binding in this flow",
 		}
 	}
@@ -137,7 +139,6 @@ func Next(in Input) Result {
 		return Result{
 			Next:    flowv1alpha1.PhaseEscalated,
 			Outcome: OutcomeNoAnswer,
-			Budget:  in.Budget,
 			Detail:  detail,
 		}
 	}
@@ -159,7 +160,6 @@ func Next(in Input) Result {
 		return Result{
 			Next:    flowv1alpha1.PhaseFailed,
 			Outcome: OutcomeStructural,
-			Budget:  in.Budget,
 			Detail:  "directory " + in.Directory + " selects more than one status",
 		}
 	case found == 0:
@@ -177,7 +177,6 @@ func Next(in Input) Result {
 		return Result{
 			Next:    flowv1alpha1.PhaseEscalated,
 			Outcome: OutcomeNoAnswer,
-			Budget:  in.Budget,
 			Detail:  "no status is declared for directory " + in.Directory,
 		}
 	}
@@ -190,13 +189,12 @@ func Next(in Input) Result {
 	// protecting: no answer must never be one line away from the success
 	// path (§5). This is a destination, so that concern does not arise.
 	//
-	// It skips the visited and budget questions below because Escalated is
-	// terminal on its own say-so: there is no run after it to spend on.
+	// It skips the run limit below because Escalated is terminal on its own
+	// say-so: there is no run after it to count.
 	if dest == flowv1alpha1.PhaseEscalated {
 		return Result{
 			Next:    flowv1alpha1.PhaseEscalated,
 			Outcome: OutcomeDeclined,
-			Budget:  in.Budget,
 			Detail:  "escalated on purpose, by writing into " + in.Directory,
 		}
 	}
@@ -213,32 +211,44 @@ func Next(in Input) Result {
 		return Result{
 			Next:    flowv1alpha1.PhaseFailed,
 			Outcome: OutcomeStructural,
-			Budget:  in.Budget,
 			Detail:  "directory " + in.Directory + " is declared to reach Failed, which is the framework's own",
 		}
 	}
 
-	if in.Visited[dest] {
-		if in.Budget <= 0 {
-			return Result{
-				Next:    flowv1alpha1.PhaseEscalated,
-				Outcome: OutcomeBudgetExhausted,
-				Budget:  in.Budget,
-				Detail:  "rework to " + string(dest) + " with no budget left",
-			}
+	// A limit below one would refuse every phase, the start's successor
+	// included, and a flow that can run nothing past its first phase is not
+	// what anybody wrote. The schema's minimum and default keep it from
+	// arriving here; this answers it anyway rather than escalating every
+	// task of the flow as though the work had run out of rounds.
+	if in.MaxRuns < 1 {
+		return Result{
+			Next:    flowv1alpha1.PhaseFailed,
+			Outcome: OutcomeStructural,
+			Detail:  fmt.Sprintf("maxRunsPerPhase is %d, which lets no phase run", in.MaxRuns),
 		}
+	}
+
+	// A destination nothing binds never runs, so its count is always zero
+	// and the limit never stops a task from reaching an ending.
+	n := in.Runs[dest]
+	if n >= in.MaxRuns {
+		return Result{
+			Next:    flowv1alpha1.PhaseEscalated,
+			Outcome: OutcomeRunLimitReached,
+			Detail:  fmt.Sprintf("%s has already run %d of %d times", dest, n, in.MaxRuns),
+		}
+	}
+	if n > 0 {
 		return Result{
 			Next:    dest,
 			Outcome: OutcomeRework,
-			Budget:  in.Budget - 1,
-			Detail:  "rework to already-visited " + string(dest),
+			Detail:  fmt.Sprintf("rework to %s, which has run %d of %d times", dest, n, in.MaxRuns),
 		}
 	}
 
 	return Result{
 		Next:    dest,
 		Outcome: OutcomeDeclared,
-		Budget:  in.Budget,
 		Detail:  "declared edge to " + string(dest),
 	}
 }

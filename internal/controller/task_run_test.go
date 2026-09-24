@@ -63,7 +63,6 @@ var _ = Describe("starting a task", func() {
 		tk := get()
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate))
 		Expect(tk.Status.RunID).To(BeEquivalentTo(1))
-		Expect(tk.Status.ReworkBudget).To(BeEquivalentTo(2), "the budget is taken from the flow")
 		Expect(tk.Status.CurrentRun).NotTo(BeNil())
 	})
 

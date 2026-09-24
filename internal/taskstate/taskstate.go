@@ -120,20 +120,20 @@ func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
 	return flowv1alpha1.RunnerJob
 }
 
-// Visited is every phase this task has already run, derived from history
-// rather than stored beside it. Two records of the same fact drift; this one
-// cannot disagree with the history a human reads.
-func Visited(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding) map[flowv1alpha1.Phase]bool {
-	seen := make(map[flowv1alpha1.Phase]bool, len(status.History)+1)
+// Runs is how many times each phase of this task has run, derived from
+// history rather than stored beside it. Two records of the same fact drift;
+// this one cannot disagree with the history a human reads.
+func Runs(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding) map[flowv1alpha1.Phase]int32 {
+	runs := make(map[flowv1alpha1.Phase]int32, len(status.History)+1)
 	for _, h := range status.History {
-		seen[h.Phase] = true
+		runs[h.Phase]++
 	}
 	// The phase in flight has run even though it has not been recorded yet,
 	// which is what makes a self-loop count as a rework.
 	if status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) {
-		seen[status.Phase] = true
+		runs[status.Phase]++
 	}
-	return seen
+	return runs
 }
 
 // clampReason keeps a Reason within HistoryEntry.Reason's own CRD limit
@@ -160,10 +160,11 @@ func clampReason(s string) string {
 
 // Advance records the completed run and moves the task to res.Next.
 //
-// runID rises on every run — reworks and infrastructure retries alike —
-// because it names the run's directory and its child objects. reworkBudget
-// only falls, and only when a rework is actually taken; that asymmetry is
-// what bounds a cycle.
+// runID rises once for every run that settles, reworks included — it names
+// the run's directory and its child objects, and an infrastructure retry,
+// which settles nothing, leaves it alone (ADR-0004). What bounds a
+// cycle is not written here: it is the history this appends to, counted per
+// phase by Runs the next time the task moves.
 //
 // The whole flow spec is passed rather than the two or three fields this
 // needs. They are read together at one instant — the edges say where the
@@ -188,7 +189,6 @@ func Advance(
 	})
 
 	status.Phase = res.Next
-	status.ReworkBudget = res.Budget
 
 	// Three endings need a human: the framework's own two, and an ending the
 	// flow declared to be Failure. The first two mean nothing moves forward
@@ -361,10 +361,9 @@ func stamp(
 }
 
 // Begin puts a fresh task on the flow's starting phase.
-func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase, budget int32) {
+func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase) {
 	status.Phase = start
 	status.RunID = 1
-	status.ReworkBudget = budget
 	status.CurrentRun = &flowv1alpha1.RunRef{Phase: start, RunID: 1}
 }
 

@@ -373,7 +373,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("timed out"))
 	})
 
-	It("reworks along an edge back to a visited phase, spending budget", func() {
+	It("reworks along an edge back to a phase that has run", func() {
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
 				Handler: fx.name,
@@ -391,7 +391,6 @@ var _ = Describe("finishing a run", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate))
 		Expect(tk.Status.RunID).To(BeEquivalentTo(2))
-		Expect(tk.Status.ReworkBudget).To(BeEquivalentTo(1), "a self-loop is a rework and costs one")
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeRework)))
 		Expect(tk.Status.CurrentRun).NotTo(BeNil())
 		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(2))
@@ -399,6 +398,29 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 		second := fx.job(2)
 		Expect(second.Annotations["flow.tgy.io/prev-run-id"]).To(Equal("1"))
+	})
+
+	It("escalates a move to a phase that has run as often as the flow allows", func() {
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.MaxRunsPerPhase = 1
+			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
+				Handler: fx.name,
+				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: nextMore},
+			}
+		})
+		fx.makeHandler()
+		fx.makeTask()
+		job := start()
+
+		podOf(job, "", terminated(agentName, nextMore))
+		finish(job, "")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.History).To(HaveLen(1))
+		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeRunLimitReached)))
+		Expect(tk.Status.History[0].Reason).To(ContainSubstring("1 of 1"))
 	})
 
 	It("retries under the same runID when the handler never got to run", func() {
@@ -416,7 +438,6 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.RunID).To(BeEquivalentTo(1), "a runID counts decided runs, and nothing was decided")
 		Expect(tk.Status.History).To(BeEmpty(), "nothing was decided, so nothing is recorded")
 		Expect(tk.Status.CurrentRun.InfraRetries).To(BeEquivalentTo(1))
-		Expect(tk.Status.ReworkBudget).To(BeEquivalentTo(2), "an infrastructure retry costs no budget")
 
 		fx.reconcile()
 		second := fx.jobAttempt(1, 1)

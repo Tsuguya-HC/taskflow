@@ -124,7 +124,7 @@ func (fx *fixture) makeFlow(mut ...func(*flowv1alpha1.TaskFlow)) *flowv1alpha1.T
 			Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 				phaseInvestigate: {Handler: fx.name, Next: map[flowv1alpha1.Phase]string{phaseReport: "ok"}},
 			},
-			ReworkBudget: 2,
+			MaxRunsPerPhase: 3,
 		},
 	}
 	for _, m := range mut {

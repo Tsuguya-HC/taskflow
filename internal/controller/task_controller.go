@@ -810,8 +810,8 @@ func (r *TaskReconciler) settle(
 		Bindings: flow.Spec.Bindings,
 		Phase:    run.Phase,
 		NoAnswer: noAnswer,
-		Visited:  taskstate.Visited(&task.Status, flow.Spec.Bindings),
-		Budget:   task.Status.ReworkBudget,
+		Runs:     taskstate.Runs(&task.Status, flow.Spec.Bindings),
+		MaxRuns:  flow.Spec.MaxRunsPerPhase,
 	}
 	if answer != nil {
 		in.Directory = answer.Directory
@@ -1078,7 +1078,7 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
 		return r.fail(ctx, task, &flow.Spec, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
-	taskstate.Begin(&task.Status, flow.Spec.Start, flow.Spec.ReworkBudget)
+	taskstate.Begin(&task.Status, flow.Spec.Start)
 	return r.Status().Update(ctx, task)
 }
 

@@ -24,9 +24,6 @@ spec:
     - jsonPath: .status.runID
       name: Run
       type: integer
-    - jsonPath: .status.reworkBudget
-      name: Budget
-      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -357,12 +354,6 @@ spec:
                   answers it decides — see ReservedPhases — and the third is PhaseFinally,
                   which is not an answer at all but the name a cleanup run is recorded under.
                 type: string
-              reworkBudget:
-                description: |-
-                  ReworkBudget remaining. Counted down by the controller as reworks are
-                  taken, never declared by the flow.
-                format: int32
-                type: integer
               runID:
                 description: |-
                   RunID of the current or last run. It counts the runs this task has
