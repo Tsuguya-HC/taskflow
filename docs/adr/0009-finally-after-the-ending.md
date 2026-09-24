@@ -85,7 +85,7 @@
 
    | 場面 | 扱い |
    |---|---|
-   | `Escalated` に着いた（NoAnswer / Declined / BudgetExhausted / インフラ再試行の使い切り、`next` で宣言された辺のどれでも） | **走る**。終端の意味 5 値のうち finally の一番の動機 |
+   | `Escalated` に着いた（NoAnswer / Declined / RunLimitReached / インフラ再試行の使い切り、`next` で宣言された辺のどれでも） | **走る**。終端の意味 5 値のうち finally の一番の動機 |
    | flow 宣言終端（`terminals` の `Success` / `Failure` / `Undeclared`）に着いた | **走る**。終端の意味は変えない（決定 2） |
    | Task が削除された（TTL 前の手動削除、走行中の削除） | 走らない。ownerReference で Job も消える。外に残った物は sweep の仕事（§10） |
    | flow が読めずに `Failed` に着いた | 走らない。finally を読む先が無い |
