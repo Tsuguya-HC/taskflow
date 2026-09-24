@@ -55,15 +55,24 @@
    - **どこかの枝が `Escalated` に着いた時点で Task は `Escalated`。** 決定1 の下では残りの枝が何を返しても
      結果は変わらないので、残りの Job はその場で消す（fail-fast）。消した run は history に outcome
      `Cancelled` の 1 行を残す
+   - **同じ reconcile で複数の枝が既に決着していることがある。** その時点で決着している（Job が終わっている）
+     枝は、枝のフェーズ名の順に全部決着させて history に残す（それぞれ本来の outcome）。まだ走っている枝
+     だけを消して `Cancelled` にする。決着した枝のうち 1 つでも `Escalated` に着いていれば Task は
+     `Escalated`
    - 回数の上限（ADR-0012）は各フェーズに掛かる。枝は互いに素なフェーズを持つので、判定は枝ごとに閉じて
      終わった順に依存しない。合流先のフェーズは合流 1 回につき 1 回数える
+   - **待ち合わせ（起動した枝が全部着くまで待つ）が意味を持つのは、分岐元が起動した枝が走っている間だけ。**
+     その間に走っている run は枝だけで、枝から出る辺は S3 で `join.phase` と `Escalated` に縛られるので、
+     待ち合わせ中に外から `join.phase` へ着くことは無い。それ以外のときに他の辺から `join.phase` に着くのは
+     普通の直列の到達（例: 後段からの rework）で、`inputs` も直列の行（決定6）に従う
 
 5. **番号は枝ごとに、起動した時に払う。** 並列の枝はそれぞれが run で、`results/<runID>/` の棚・
    「subPath 無し = この run」（[ADR-0003](0003-run-view-and-sweep.md)）・prepare / publish はどれも
    今と同じ形で成り立つ。ADR-0003 決定2 が「並列化の日はコントローラのリスト計算だけが変わる」と書いた
-   とおり、sweep リストは「生きている run 以外の `work/<id>`」になる
+   とおり、sweep リストは「生きている run 以外の `work/<id>`」になる（[ADR-0004](0004-run-id-counts-runs-not-attempts.md)
+   決定4「sweep リストは変えない（`1..current-1`）」を覆す）
    - 払う順は枝のフェーズ名の順。同じ入力なら同じ番号になる
-   - [ADR-0004](0004-run-id-counts-runs-not-attempts.md) の「番号 = 決着した run の順序」は
+   - [ADR-0004](0004-run-id-counts-runs-not-attempts.md) 決定1 の「番号 = 決着した run の順序」は
      「**番号 = 起動した run の順序**」に改める。インフラ再試行で番号が動かないのは同じ
    - `Cancelled` の番号の棚は、あるとは限らない。Job を消すと publish は SIGTERM で封印するので、
      handler が書き終えていれば棚に載り、書き終えていなければ載らない。どちらでも history の `Cancelled`
@@ -84,12 +93,17 @@
    | `always` の枝 | 何も無い（この枝を選んだ答えが無い） |
    | 合流先 | `inputs/<枝のフェーズ>/` が枝の数だけ |
    | `start` の最初の run | 何も無い |
-   | finally | `inputs/<終端に着いた run のフェーズ>/`（決着した run が無ければ何も無い） |
+   | finally | `inputs/<終端に着いた run のフェーズ>/`。並列の途中で `Escalated` に着いたときは、`Escalated` に着いた枝の数だけ並ぶ（決着した run が無ければ何も無い） |
 
    ```sh
    cat /inputs/*/report.md   # 仕分け: 全観点のレポート。番号も前のフェーズ名も知らない
    ```
 
+   - finally が受け取る単一値の env（[ADR-0009](0009-finally-after-the-ending.md) 決定6の
+     `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME`）は「**終端を決めた run** の行」から引く。決定4の
+     とおり並列では複数の枝がフェーズ名の順に history へ積まれうるので、`Escalated` に着いたときは
+     `Escalated` に着いた枝のうち枝のフェーズ名の順で最初のものが終端を決めた run になる。他の枝は
+     `inputs` と history で見える
    - 前のフェーズ名を handler に直書きさせない（ADR-0004 が棚のキーを phase にする案を却下した理由）。
      glob で読めるので、handler は flow を跨いで使い回せる
    - ADR-0004 で「fan-out を実装する日に決める」と先送りした**入力ビュー**をここで決める。symlink は
@@ -110,9 +124,13 @@
   並列の枝は、1 フェーズの中の handler ではなく、それぞれがフェーズになる — 別の SA・別のモデル・別の
   回数上限を持てて、history にも 1 行ずつ残る。合成規則「答えるのはちょうど 1 つ」は捨てたのではなく、
   「判断は合流後の直列フェーズがする」に置き換わった
-- ADR-0004 の「番号 = 決着した run の順序」（決定5）
+- ADR-0004 の「番号 = 決着した run の順序」（決定1）
+- ADR-0004 決定4「sweep リストは変えない（`1..current-1`、自 run は Sweep 自身が拒否したまま）」。
+  ADR-0003 決定2 が「並列化の日はコントローラのリスト計算だけが変わる」と予告していた変化がこれに当たる
 - ADR-0003 決定1 の「覆すには」に書いた条件（並列 run で「subPath 無し = この run」の一意性が崩れる）は
   **踏まない** — 枝ごとに番号を払うので、各枝の「この run」は 1 つに定まる
+- [ADR-0009](0009-finally-after-the-ending.md) 決定6 の「outcome は finally の runID − 1 の行から引く」を
+  「終端を決めた run の行から引く」に改める（直列では両者は同じ行を指すので、直列の挙動は変わらない）
 
 **却下した案**:
 
