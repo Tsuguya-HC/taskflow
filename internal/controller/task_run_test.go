@@ -182,6 +182,73 @@ var _ = Describe("starting a task", func() {
 		Expect(jobs.Items).To(BeEmpty(), "nothing of the fork may start")
 	})
 
+	// A fork added to a phase the run never reaches must not stop a task
+	// running serially elsewhere in the same flow (ADR-0007: a run in flight
+	// keeps the definition it started under).
+	It("does not stop a task running an unrelated phase when the flow gains a fork elsewhere", func() {
+		reportHandler := fx.name + "-report"
+		flow := makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Bindings[phaseReport] = flowv1alpha1.PhaseBinding{
+				Handler: reportHandler,
+				Next:    map[flowv1alpha1.Phase]string{"完了": "ok"},
+			}
+		})
+		makeHandler()
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Name = reportHandler
+			h.Spec.Phase = phaseReport
+		})
+		makeTask()
+
+		reconcileOnce() // begins at 調査
+		reconcileOnce() // creates the Job for 調査
+
+		jobName := runner.JobName(name, phaseInvestigate, 1, 0)
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: resourceNamespace}, &job)).To(Succeed())
+
+		binding := flow.Spec.Bindings[phaseReport]
+		binding.Join = &flowv1alpha1.JoinSpec{Phase: "完了"}
+		flow.Spec.Bindings[phaseReport] = binding
+		Expect(k8sClient.Update(ctx, flow)).To(Succeed())
+
+		reconcileOnce()
+
+		tk := get()
+		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the run in flight is untouched by a fork elsewhere")
+		Expect(tk.Status.CurrentRun).NotTo(BeNil())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: resourceNamespace}, &job)).To(Succeed(),
+			"the Job in flight must not be abandoned")
+	})
+
+	// A run that has not started its own phase's attempt yet is still driven
+	// against the flow as it reads now, so a fork added to the phase it is
+	// actually sitting on stops it the same as one that forked before the
+	// task ever reached it.
+	It("fails a task whose current phase gains a fork mid-run", func() {
+		flow := makeFlow()
+		makeHandler()
+		makeTask()
+
+		reconcileOnce() // begins at 調査
+		reconcileOnce() // creates the Job for 調査
+
+		jobName := runner.JobName(name, phaseInvestigate, 1, 0)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: resourceNamespace}, &batchv1.Job{})).To(Succeed())
+
+		binding := flow.Spec.Bindings[phaseInvestigate]
+		binding.Join = &flowv1alpha1.JoinSpec{Phase: phaseReport}
+		flow.Spec.Bindings[phaseInvestigate] = binding
+		Expect(k8sClient.Update(ctx, flow)).To(Succeed())
+
+		reconcileOnce()
+
+		tk := get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(
+			HaveField("Message", ContainSubstring("does not run parallel phases yet"))))
+	})
+
 	It("fails a task whose handler is missing", func() {
 		makeFlow()
 		makeTask() // no handler

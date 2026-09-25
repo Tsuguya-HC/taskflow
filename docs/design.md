@@ -425,7 +425,10 @@ test: {handler: test, next: {Review: done, Escalated: stuck}}
 ```
 
 `join` の型と admission の検査（§5「厳格検証」の表）は入っているが、コントローラはまだ並列を走らせない。
-`join` を持つ flow の Task は、直列として動かすと flow が言っていないことをするので、始めずに `Failed` にする（P8）。
+直列として動かすと flow が言っていないことをするフェーズにだけ `Failed` にする（P8）: Task がまだ
+始まっていない状態で flow のどこかに `join` があるか、Task の今のフェーズ自身の binding が `join` を
+持つかのどちらか。無関係なフェーズを走っている Task は、その flow に別の `join` があっても止めない
+（ADR-0007: 走行中の run は Job が凍結した定義で走る）。
 
 1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
 
