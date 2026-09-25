@@ -167,10 +167,12 @@ spec:
                   bring a task last written by that older controller into step
                   (taskstate.AdoptLegacyRun).
 
-                  Deprecated: use CurrentRuns. This field is retired once a version
-                  exists that runs more than one phase at a time (ADR-0013 決定7, PR4) —
-                  a shape this field cannot represent — which is the boundary a rollback
-                  cannot cross, not this release.
+                  Outside tests, nothing but taskstate reads or writes it: everything else asks for the
+                  run in flight through CurrentRuns. It is retired once a version runs
+                  more than one phase at a time (ADR-0013 決定7) — a shape this field
+                  cannot represent — and that version, not this one, is the boundary a
+                  rollback cannot cross. It is not marked deprecated in the Go sense,
+                  because this release writes it on purpose.
                 properties:
                   deadline:
                     format: date-time
