@@ -107,7 +107,7 @@ func Fork(in Input) ForkResult {
 
 	var chosen []flowv1alpha1.Phase
 	escalating := false
-	for _, dir := range strings.Split(in.Directory, contract.DirectorySeparator) {
+	for dir := range strings.SplitSeq(in.Directory, contract.DirectorySeparator) {
 		var dests []flowv1alpha1.Phase
 		for dest, d := range binding.Next {
 			if d == dir {
@@ -122,13 +122,13 @@ func Fork(in Input) ForkResult {
 			return ForkResult{Next: flowv1alpha1.PhaseEscalated, Outcome: OutcomeNoAnswer,
 				Detail: "no status is declared for directory " + dir}
 		}
-		switch dest := dests[0]; {
-		case dest == flowv1alpha1.PhaseEscalated:
+		switch dest := dests[0]; dest {
+		case flowv1alpha1.PhaseEscalated:
 			escalating = true
-		case dest == flowv1alpha1.PhaseFailed:
+		case flowv1alpha1.PhaseFailed:
 			return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
 				Detail: "directory " + dir + " is declared to reach Failed, which is the framework's own"}
-		case dest == binding.Join.Phase:
+		case binding.Join.Phase:
 			return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
 				Detail: "directory " + dir + " leads straight to where the branches meet, which a fork may not do yet"}
 		default:

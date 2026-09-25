@@ -67,7 +67,7 @@ func afterFork(branches ...flowv1alpha1.Phase) *flowv1alpha1.TaskStatus {
 }
 
 func phasesOf(runs []flowv1alpha1.RunRef) []flowv1alpha1.Phase {
-	var out []flowv1alpha1.Phase
+	out := make([]flowv1alpha1.Phase, 0, len(runs))
 	for _, r := range runs {
 		out = append(out, r.Phase)
 	}
@@ -106,7 +106,7 @@ func TestAForkStartsItsBranches(t *testing.T) {
 
 // historyPhases is the phase named on each history line, in order.
 func historyPhases(s *flowv1alpha1.TaskStatus) []flowv1alpha1.Phase {
-	var out []flowv1alpha1.Phase
+	out := make([]flowv1alpha1.Phase, 0, len(s.History))
 	for _, h := range s.History {
 		out = append(out, h.Phase)
 	}
