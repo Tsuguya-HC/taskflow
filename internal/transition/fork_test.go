@@ -165,3 +165,24 @@ func TestAForkThatIsNotOne(t *testing.T) {
 		})
 	}
 }
+
+// StopsAFork is false for exactly the three outcomes that mean a branch's
+// line is not what decided anything: Declared and Rework both mean it
+// reached the join, and Cancelled means it was stopped before it could
+// answer at all. Every other outcome stopped the fork.
+func TestOutcomeStopsAFork(t *testing.T) {
+	cases := map[Outcome]bool{
+		OutcomeDeclared:        false,
+		OutcomeRework:          false,
+		OutcomeCancelled:       false,
+		OutcomeRunLimitReached: true,
+		OutcomeNoAnswer:        true,
+		OutcomeDeclined:        true,
+		OutcomeStructural:      true,
+	}
+	for outcome, want := range cases {
+		if got := outcome.StopsAFork(); got != want {
+			t.Errorf("%s.StopsAFork() = %v, want %v", outcome, got, want)
+		}
+	}
+}

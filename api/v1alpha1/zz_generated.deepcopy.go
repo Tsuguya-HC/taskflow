@@ -580,11 +580,6 @@ func (in *TaskStatus) DeepCopyInto(out *TaskStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.CurrentRun != nil {
-		in, out := &in.CurrentRun, &out.CurrentRun
-		*out = new(RunRef)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.ExpiresAt != nil {
 		in, out := &in.ExpiresAt, &out.ExpiresAt
 		*out = (*in).DeepCopy()

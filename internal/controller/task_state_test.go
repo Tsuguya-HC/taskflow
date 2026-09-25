@@ -128,35 +128,6 @@ var _ = Describe("a run nothing starts", func() {
 			"this close to a deadline shorter than verdictPoll, the wait is what remains, not the usual interval")
 	})
 
-	// A controller from before currentRuns kept its one run in currentRun.
-	// A task caught mid-run by the upgrade must keep that run: read as
-	// having none, it would be rebuilt without the box's name, and the box
-	// already standing under that name would look like a squatter. This is
-	// also the shape a rollback to that older controller would leave behind
-	// after it next wrote status — currentRuns gone, only the old field
-	// standing — so the same spec doubles as that simulation.
-	It("carries over a run an older controller wrote to currentRun", func() {
-		start()
-		tk := fx.get()
-		legacy := *taskstate.Current(&tk.Status)
-		tk.Status.CurrentRuns = nil
-		tk.Status.CurrentRun = &legacy
-		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
-		created := fx.box().UID
-
-		fx.reconcile() // carries the run over and writes it down
-		adopted := fx.get()
-		Expect(taskstate.Current(&adopted.Status)).To(HaveField("VerdictBox", legacy.VerdictBox))
-		Expect(adopted.Status.CurrentRun).To(Equal(&legacy),
-			"the old field stays standing as the mirror, so a rollback to the older controller still finds its run")
-		fx.reconcile()
-
-		after := fx.get()
-		Expect(after.Status.Phase).To(Equal(phaseInvestigate), "the run goes on rather than the task failing")
-		Expect(fx.box().UID).To(Equal(created), "the box the run already had is still the one it answers in")
-		Expect(taskstate.Current(&after.Status)).To(HaveField("VerdictBox", legacy.VerdictBox))
-	})
-
 	It("does not open a second box for the same run", func() {
 		start()
 		created := fx.box().UID
@@ -178,7 +149,6 @@ var _ = Describe("a run nothing starts", func() {
 
 		tk := fx.get()
 		taskstate.Current(&tk.Status).VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
-		syncLegacyMirror(tk) // keep currentRun in step, or AdoptLegacyRun spends this reconcile repairing it instead
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
 		Expect(fx.reconcile().RequeueAfter).To(Equal(verdictPoll))
@@ -198,7 +168,6 @@ var _ = Describe("a run nothing starts", func() {
 
 		tk := fx.get()
 		taskstate.Current(&tk.Status).VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
-		syncLegacyMirror(tk) // keep currentRun in step, or AdoptLegacyRun spends this reconcile repairing it instead
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
 			ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
@@ -398,7 +367,6 @@ var _ = Describe("a run nothing starts", func() {
 		tk := fx.get()
 		boxName := runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
 		taskstate.Current(&tk.Status).VerdictBox = boxName
-		syncLegacyMirror(tk) // keep currentRun in step, or AdoptLegacyRun spends this reconcile repairing it instead
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
 		landedLate := runner.BuildVerdictBox(tk, phaseInvestigate, 1, []string{"ok"})

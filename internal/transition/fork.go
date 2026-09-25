@@ -32,6 +32,20 @@ import (
 // heard from.
 const OutcomeCancelled Outcome = "Cancelled"
 
+// StopsAFork reports whether outcome means the line it is on decided a
+// fork's ending rather than merely finishing its own turn. A branch's only
+// destinations are its join or Escalated (or Failed, on a broken definition):
+// Declared and Rework mean it reached the join, and Cancelled means it was
+// stopped before it could answer at all, so none of those three decided
+// anything — everything else did.
+func (o Outcome) StopsAFork() bool {
+	switch o {
+	case OutcomeDeclared, OutcomeRework, OutcomeCancelled:
+		return false
+	}
+	return true
+}
+
 // Branches is every phase fork may start, in name order: the destinations its
 // run can choose, and those its join starts regardless. Escalated is where a
 // run goes instead of choosing, and the join is where branches meet rather

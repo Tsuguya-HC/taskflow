@@ -208,7 +208,6 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		// never produces for this flow.
 		tk.Status.Phase = flowv1alpha1.PhaseEscalated
 		tk.Status.CurrentRuns = []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}}
-		syncLegacyMirror(tk) // keep currentRun in step, or AdoptLegacyRun spends this reconcile repairing it instead
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue(), "the task must actually be owed a cleanup run for this path to mean anything")
 
