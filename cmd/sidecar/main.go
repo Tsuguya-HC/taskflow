@@ -82,6 +82,9 @@ type options struct {
 	// than one delimited string because the last element of each is a name
 	// the flow chose, and no delimiter is safe against a free string.
 	shelve paths
+	// many is publish-only: a fork's run, whose answer is every directory it
+	// wrote into rather than exactly one (ADR-0013).
+	many bool
 }
 
 // paths collects a flag given more than once. The zero value is an empty
@@ -121,6 +124,8 @@ func run(args []string) error {
 	fs.StringVar(&o.sealTo, contract.FlagSealTo, "", "publish only: move the run's directory here once sealed")
 	fs.StringVar(&o.sweep, contract.FlagSweep, "",
 		"prepare only: comma-separated runIDs whose leftovers beside this run are cleared away first")
+	fs.BoolVar(&o.many, contract.FlagMany, false,
+		"publish only: a fork's run, answering with every directory it wrote into")
 	fs.Var(&o.shelve, contract.FlagShelve,
 		"prepare only, repeatable: a sealed directory to lay for a run that never had a pod")
 	if err := fs.Parse(args); err != nil {
@@ -171,6 +176,9 @@ func checkFlags(cmd string, o options) error {
 	if cmd == cmdPrepare {
 		if o.sealTo != "" {
 			return fmt.Errorf("-%s is publish's to set, not prepare's", contract.FlagSealTo)
+		}
+		if o.many {
+			return fmt.Errorf("-%s is publish's to set, not prepare's", contract.FlagMany)
 		}
 		return nil
 	}
@@ -241,7 +249,7 @@ func publish(o options, declared []string, podUID string) error {
 		return reportFailure(o.termLog, cmdPublish, err)
 	}
 
-	ans := sidecar.Seal(o.out, declared)
+	ans := sidecar.Seal(o.out, declared, o.many)
 	// Printed before the move is attempted: a run whose move then fails
 	// still sealed to a real answer, and that answer belongs in the pod's
 	// own log even though it never reaches the termination message below —

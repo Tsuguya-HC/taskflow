@@ -335,7 +335,13 @@ func runIsSealed(run, name string) (bool, error) {
 // exactly one declared directory is non-empty, or there is no answer. Nothing
 // inside a directory is read — an entry's existence is the whole signal, and
 // a stray file is as good as a report for deciding that something was said.
-func Seal(run string, declared []string) Answer {
+//
+// A fork's run (many) answers with every directory it wrote into, one or more,
+// joined by contract.JoinDirectories: each one is a branch it chose to start
+// (ADR-0013). Nothing written is still no answer. Whether the ones written
+// make sense together — Escalated beside a branch does not — is the
+// controller's to judge, the same as which edge a single answer follows.
+func Seal(run string, declared []string, many bool) Answer {
 	if _, err := os.Stat(run); err != nil {
 		return Answer{Reason: fmt.Sprintf("%s is not there: %v", run, err)}
 	}
@@ -378,6 +384,15 @@ func Seal(run string, declared []string) Answer {
 		found = append(found, written{name, names})
 	}
 
+	if many && len(found) > 0 {
+		names := make([]string, 0, len(found))
+		parts := make([]string, 0, len(found))
+		for _, w := range found {
+			names = append(names, w.name)
+			parts = append(parts, w.name+": "+summarize(w.entries))
+		}
+		return Answer{Directory: contract.JoinDirectories(names), Reason: "wrote " + strings.Join(parts, "; ")}
+	}
 	switch len(found) {
 	case 1:
 		return Answer{Directory: found[0].name, Reason: "wrote " + summarize(found[0].entries)}

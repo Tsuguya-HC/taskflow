@@ -1369,3 +1369,26 @@ func TestRefusesTheInputsViewOnATemplateVolume(t *testing.T) {
 		t.Fatalf("err = %v, want ErrWorkspace", err)
 	}
 }
+
+// A fork's run is the one that may answer with more than one directory, and
+// publish is the end that has to be told (ADR-0013). Every other run's publish
+// is left to its rule of exactly one.
+func TestAForkTellsPublishItMayAnswerWithMore(t *testing.T) {
+	fork := build(t, Input{Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 2, WorkspacePVC: claimName, Fork: true})
+	publish := fork.Spec.Template.Spec.InitContainers[1]
+	if !slices.Contains(publish.Args, "--"+contract.FlagMany) {
+		t.Fatalf("publish args = %v; a fork's publish is told it may answer with more", publish.Args)
+	}
+	if slices.Contains(publish.Args[:len(publish.Args)-1], "--"+contract.FlagMany) {
+		t.Fatalf("publish args = %v; the flag is passed once", publish.Args)
+	}
+	prepare := fork.Spec.Template.Spec.InitContainers[0]
+	if slices.Contains(prepare.Args, "--"+contract.FlagMany) {
+		t.Fatalf("prepare args = %v; what a run may answer is not prepare's business", prepare.Args)
+	}
+
+	serial := build(t, Input{Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 2, WorkspacePVC: claimName})
+	if slices.Contains(serial.Spec.Template.Spec.InitContainers[1].Args, "--"+contract.FlagMany) {
+		t.Fatal("a run that is not a fork answers with exactly one; its publish is not told otherwise")
+	}
+}

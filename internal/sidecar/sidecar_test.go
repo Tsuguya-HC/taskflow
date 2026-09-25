@@ -27,9 +27,13 @@ import (
 	"testing"
 
 	"github.com/Tsuguya-HC/taskflow/internal/collect"
+	"github.com/Tsuguya-HC/taskflow/internal/contract"
 )
 
-var declared = []string{"ok", "more"}
+// dirMore is the second of the two directories every run here declares.
+const dirMore = "more"
+
+var declared = []string{"ok", dirMore}
 
 // prepared is a run directory Prepare has laid the vocabulary down in and
 // closed — what the handler sees at the root of its mount.
@@ -145,7 +149,7 @@ func TestSealFindsTheOneDirectoryWrittenInto(t *testing.T) {
 	out := prepared(t)
 	write(t, out, "more", "report.md")
 
-	got := Seal(out, declared)
+	got := Seal(out, declared, false)
 	if got.Directory != "more" {
 		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
 	}
@@ -156,8 +160,39 @@ func TestSealFindsTheOneDirectoryWrittenInto(t *testing.T) {
 
 func TestSealOfNothingWrittenIsNoAnswer(t *testing.T) {
 	out := prepared(t)
-	got := Seal(out, declared)
+	got := Seal(out, declared, false)
 	if got.Directory != "" || got.Reason == "" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// A fork's run answers with every directory it wrote into, joined in one
+// spelling whatever order they were written in (ADR-0013).
+func TestSealOfAForkAnswersWithEveryDirectoryWritten(t *testing.T) {
+	out := prepared(t)
+	write(t, out, "ok", "report.md")
+	write(t, out, dirMore, "focus.md")
+
+	got := Seal(out, declared, true)
+	if want := contract.JoinDirectories([]string{"ok", dirMore}); got.Directory != want {
+		t.Fatalf("directory = %q, want %q (%s)", got.Directory, want, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "focus.md") || !strings.Contains(got.Reason, "report.md") {
+		t.Fatalf("reason = %q; it should say what was written into each", got.Reason)
+	}
+
+	one := prepared(t)
+	write(t, one, dirMore, "focus.md")
+	if got := Seal(one, declared, true); got.Directory != dirMore {
+		t.Fatalf("a fork that chose one branch answers with it alone, got %+v", got)
+	}
+}
+
+// Writing nothing is silence for a fork too: many answers are allowed, none
+// is not.
+func TestSealOfAForkThatWroteNothingIsNoAnswer(t *testing.T) {
+	got := Seal(prepared(t), declared, true)
+	if got.Directory != "" || !strings.Contains(got.Reason, "nothing was written") {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -167,7 +202,7 @@ func TestSealOfTwoDirectoriesIsNoAnswer(t *testing.T) {
 	write(t, out, "ok", "a")
 	write(t, out, "more", "b")
 
-	got := Seal(out, declared)
+	got := Seal(out, declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q; two answers are no answer", got.Directory)
 	}
@@ -183,7 +218,7 @@ func TestSealCountsAnyEntry(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(out, "ok", "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := Seal(out, declared); got.Directory != "ok" {
+	if got := Seal(out, declared, false); got.Directory != "ok" {
 		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
 	}
 }
@@ -197,7 +232,7 @@ func TestSealSummarizesManyEntries(t *testing.T) {
 		write(t, out, "ok", fmt.Sprintf("f%d", i))
 	}
 
-	got := Seal(out, declared)
+	got := Seal(out, declared, false)
 	if got.Directory != "ok" {
 		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
 	}
@@ -222,14 +257,14 @@ func TestSealOfAMissingDeclaredDirectoryIsNoAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := Seal(out, declared)
+	got := Seal(out, declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q; a broken vocabulary must not yield an answer", got.Directory)
 	}
 }
 
 func TestSealWithoutPrepareIsNoAnswer(t *testing.T) {
-	got := Seal(filepath.Join(t.TempDir(), "never-made"), declared)
+	got := Seal(filepath.Join(t.TempDir(), "never-made"), declared, false)
 	if got.Directory != "" || got.Reason == "" {
 		t.Fatalf("got %+v", got)
 	}
@@ -277,7 +312,7 @@ func TestSealTreatsASymlinkDeclaredDirectoryAsNoAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := Seal(out, declared)
+	got := Seal(out, declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q; a symlink standing in for a declared directory must not count as an answer", got.Directory)
 	}
@@ -433,12 +468,12 @@ func TestMessageRoundTripsThroughCollect(t *testing.T) {
 		ans  Answer
 		want string
 	}{
-		{"answer", Seal(out, declared), "ok"},
+		{"answer", Seal(out, declared, false), "ok"},
 		{"no answer", Answer{Reason: "nothing was written into any of ok, more"}, ""},
 		{"reason that starts with a name", Answer{Reason: "ok was not written"}, ""},
 	} {
 		msg := tc.ans.Message()
-		got := collect.FromPod(podWith(msg), declared)
+		got := collect.FromPod(podWith(msg), declared, false)
 		if got.Directory != tc.want {
 			t.Fatalf("%s: message %q read back as %q, want %q", tc.name, msg, got.Directory, tc.want)
 		}
@@ -630,7 +665,7 @@ func TestMarkIsClosedInWithTheVocabulary(t *testing.T) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
 		t.Fatalf("mark = %v (%v); want a regular file nobody but its owner can write", info, err)
 	}
-	if got := Seal(out, declared); got.Directory != "" || !strings.Contains(got.Reason, "nothing was written") {
+	if got := Seal(out, declared, false); got.Directory != "" || !strings.Contains(got.Reason, "nothing was written") {
 		t.Fatalf("Seal over a marked run = %+v; the mark must not count as an answer", got)
 	}
 	if os.Getuid() != 0 {

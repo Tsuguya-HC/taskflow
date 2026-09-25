@@ -202,8 +202,8 @@ func needsAHuman(e transition.Ending) bool {
 // same default also reads an already-settled State run's now-empty history
 // line as Job, wrongly, with no way left to tell the two apart
 // (HistoryEntry.Runner's own doc carries the same caveat).
-func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
-	if run := Current(status); run != nil {
+func runnerOf(run *flowv1alpha1.RunRef) flowv1alpha1.RunnerType {
+	if run != nil {
 		if kind := run.Runner(); kind != "" {
 			return kind
 		}
@@ -215,13 +215,24 @@ func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
 // history rather than stored beside it. Two records of the same fact drift;
 // this one cannot disagree with the history a human reads.
 func Runs(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding) map[flowv1alpha1.Phase]int32 {
-	runs := make(map[flowv1alpha1.Phase]int32, len(status.History)+1)
+	runs := make(map[flowv1alpha1.Phase]int32, len(status.History)+len(status.CurrentRuns))
 	for _, h := range status.History {
 		runs[h.Phase]++
 	}
-	// The phase in flight has run even though it has not been recorded yet,
-	// which is what makes a self-loop count as a rework.
-	if status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) {
+	// A run in flight has run even though it has not been recorded yet,
+	// which is what makes a self-loop count as a rework. The runs in flight
+	// are counted rather than status.phase, because at a fork the two part:
+	// the task stands at the fork while its branches are what run (ADR-0013).
+	// With nothing in flight — a status written before its run was, the gap
+	// Reconcile's recovery closes — status.phase is the run about to start.
+	inFlight := false
+	for _, r := range status.CurrentRuns {
+		if !r.Phase.IsFinally() {
+			runs[r.Phase]++
+			inFlight = true
+		}
+	}
+	if !inFlight && status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) && !InFinally(status) {
 		runs[status.Phase]++
 	}
 	return runs
@@ -269,16 +280,43 @@ func Advance(
 	res transition.Result,
 	now metav1.Time,
 ) {
+	run := Current(status)
+	if run == nil {
+		// Only Reconcile's recovery ever settles a run it has not written
+		// down yet, and that run is by construction the one status.phase
+		// names; recording it under that name is what Advance always did.
+		run = &flowv1alpha1.RunRef{Phase: status.Phase, RunID: status.RunID}
+	}
+	record(status, run, directory, res.Outcome, res.Detail, now)
+	move(status, flow, res, now)
+}
+
+// record appends run's line to history: what it answered and why the task
+// moved as it did. The run is named rather than read off status because a
+// fork's branches are several runs at once, and each is recorded as it
+// settles (ADR-0013).
+func record(
+	status *flowv1alpha1.TaskStatus,
+	run *flowv1alpha1.RunRef,
+	directory string,
+	outcome transition.Outcome,
+	detail string,
+	now metav1.Time,
+) {
 	status.History = append(status.History, flowv1alpha1.HistoryEntry{
-		Phase:      status.Phase,
-		RunID:      status.RunID,
+		Phase:      run.Phase,
+		RunID:      run.RunID,
 		Directory:  directory,
-		Outcome:    string(res.Outcome),
-		Runner:     runnerOf(status),
-		Reason:     clampReason(res.Detail),
+		Outcome:    string(outcome),
+		Runner:     runnerOf(run),
+		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})
+}
 
+// move takes the task to res.Next: the next phase's run, or the ending and
+// everything an ending says.
+func move(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec, res transition.Result, now metav1.Time) {
 	status.Phase = res.Next
 
 	// Three endings need a human: the framework's own two, and an ending the
@@ -373,7 +411,7 @@ func FinishFinally(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(outcome),
-		Runner:     runnerOf(status),
+		Runner:     runnerOf(Current(status)),
 		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})

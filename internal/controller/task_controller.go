@@ -448,7 +448,7 @@ func (r *TaskReconciler) driveJobRun(
 		return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
 			"flow %q no longer says what run %d of %q may answer with", flow.Name, run.RunID, run.Phase))
 	}
-	answer := collect.FromPods(pods.Items, directories)
+	answer := collect.FromPods(pods.Items, directories, false)
 	return ctrl.Result{}, r.settleRun(ctx, task, flow, run, &answer, "")
 }
 
@@ -530,7 +530,7 @@ func (r *TaskReconciler) driveStateRun(
 		return ctrl.Result{}, err
 	}
 
-	answer, answered := collect.FromBox(box, directories)
+	answer, answered := collect.FromBox(box, directories, false)
 	if !answered {
 		remaining := run.Deadline.Sub(r.now())
 		if remaining > 0 {

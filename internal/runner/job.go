@@ -194,6 +194,10 @@ type Input struct {
 	// for a flow workspace, since a template volume has no shelf to lay
 	// anything on.
 	Shelve []ShelfEntry
+	// Fork says this run is a fork's (ADR-0013): it may answer with more than
+	// one of its directories, and publish is told so. Every other run answers
+	// with exactly one.
+	Fork bool
 	// Inputs are the answers that led to this run, for a handler that asks
 	// for them with the inputs view. The set is the controller's to compute
 	// — it is the one side that knows which runs led here — and it is only
@@ -363,7 +367,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
 	expandInputs(&tpl.Spec, in.Handler.Spec.Workspace.Volume, in.Inputs)
 	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec),
-		in.WorkspacePVC, in.RunID, in.SweepRuns, in.Shelve)
+		in.WorkspacePVC, in.RunID, in.SweepRuns, in.Shelve, in.Fork)
 
 	// The framework's annotations go on the pod as well as the Job: a
 	// container reads them through the downward API, and that reads the pod
@@ -772,6 +776,7 @@ func injectSidecars(
 	runID int32,
 	sweep []int32,
 	shelve []ShelfEntry,
+	fork bool,
 ) {
 	run := strconv.Itoa(int(runID))
 	pinSubPath(pod, ws.Volume, path.Join(workDir, run))
@@ -799,6 +804,9 @@ func injectSidecars(
 				path.Join(ws.MountPath, resultsDir, strconv.Itoa(int(entry.RunID)), entry.Directory))
 		}
 		publishArgs = []string{"--" + contract.FlagSealTo, path.Join(ws.MountPath, resultsDir, run)}
+	}
+	if fork {
+		publishArgs = append(publishArgs, "--"+contract.FlagMany)
 	}
 
 	// Both injected containers mount the volume at its root, so the run's
