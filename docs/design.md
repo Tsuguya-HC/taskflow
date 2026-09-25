@@ -424,6 +424,12 @@ lint: {handler: lint, next: {Review: done, Escalated: stuck}}
 test: {handler: test, next: {Review: done, Escalated: stuck}}
 ```
 
+`join` の型と admission の検査（§5「厳格検証」の表）は入っているが、コントローラはまだ並列を走らせない。
+直列として動かすと flow が言っていないことをするフェーズにだけ `Failed` にする（P8）: Task がまだ
+始まっていない状態で flow のどこかに `join` があるか、Task の今のフェーズ自身の binding が `join` を
+持つかのどちらか。無関係なフェーズを走っている Task は、その flow に別の `join` があっても止めない
+（ADR-0007: 走行中の run は Job が凍結した定義で走る）。
+
 1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
 
 合成規則は**固定**（設定可能にすると DSL 化する）:
@@ -870,6 +876,8 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | `bindings` のキーが `Finally`、または `next` の行き先が `Finally` | 予約語。片付けの run 名を、束縛できるフェーズや遷移の行き先に使わせない | webhook（ADR-0009） |
 | フェーズ名が空（`bindings` のキー、`next` の行き先） | 名前の無いフェーズは終端として素通りする。`spec.start` は `MinLength=1` で弾けるが、map のキーはスキーマで縛れない | webhook |
 | handler の `spec.phase` と binding のキーが不一致 | 取り違え | **入れない**。TaskFlow の admission が別オブジェクトの存在に依存してはいけない — handler が後から届く適用順で詰む（ADR-0006 決定4）。実行時の `brokenFlow` → `Failed` のまま |
+| フェーズ名（`bindings` のキー）がパス要素として不正 | 後続の run に答えを見せる `inputs/<フェーズ名>/` のディレクトリ名になる（[ADR-0013](adr/0013-parallel-phases.md) 決定6） | webhook（`contract.CheckDirectoryName`） |
+| `join` の形が閉じた領域にならない: 合流先が未束縛・自分自身、分岐元から合流先への直接の辺、選べる行き先が無い、`always` が行き先・合流先・予約語と重なる、枝が未束縛・再分岐・`start`・合流先と `Escalated` 以外へ出る・合流先へ着けない、外から枝へ入る辺、2 つの分岐元が枝を共有 | 待ち合わせる枝と合流先が実行前に決まらない（ADR-0013 決定2・3。v1 の枝はフェーズ 1 つ） | webhook |
 | 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない | webhook |
 | 束縛の無いステータス（＝終端）に到達する経路が 1 本も無い（`Escalated` / `Failed` 自体は除く） | 成功しえないタスク | webhook |
 | jobTemplate の予約フィールド（§4 の表） | 不変条件を壊す | §4「予約フィールド」の表が担保の実態を持つ |

@@ -76,6 +76,39 @@ type PhaseBinding struct {
 	// A destination with no binding of its own is where the task stops.
 	// +kubebuilder:validation:MinProperties=1
 	Next map[Phase]string `json:"next"`
+
+	// Join makes this phase a fork (ADR-0013). Its run may write into more
+	// than one of its directories, and every destination it wrote into — plus
+	// every phase Join.Always names — starts at once as a branch. Once every
+	// branch has reached Join.Phase, one run of that phase starts.
+	//
+	// Its presence is the whole declaration. A flag beside a separate
+	// destination would let a flow say one without the other.
+	// +optional
+	Join *JoinSpec `json:"join,omitempty"`
+}
+
+// JoinSpec says where a fork's branches meet, and which of them run whatever
+// the fork's run chose.
+//
+// The branches are the fork's own edges, so their number is fixed by the flow
+// and can be checked at admission; what the run decides is only which of them
+// to start (P9). What each branch may do is limited so that the fork and its
+// join enclose a region with one way in and one way out: a branch leaves only
+// to Join.Phase or to Escalated, and nothing outside reaches into it (ADR-0013
+// 決定2). For now a branch is exactly one phase (決定3).
+type JoinSpec struct {
+	// Phase is where the branches meet. It must be a phase this flow binds.
+	// +kubebuilder:validation:MinLength=1
+	Phase Phase `json:"phase"`
+
+	// Always names branches that start whatever the fork's run wrote. A
+	// check that must never be skipped belongs in the definition rather than
+	// in a prompt asked to remember it. A phase listed here is not also one
+	// of the fork's own destinations: it would have two ways of being chosen.
+	// +listType=set
+	// +optional
+	Always []Phase `json:"always,omitempty"`
 }
 
 // TTLSpec is how long a finished task sticks around. Cleanup is anchored on

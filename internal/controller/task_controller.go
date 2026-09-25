@@ -155,8 +155,29 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	// Admission accepts a fork (ADR-0013) before this controller can run
+	// one. Driving it as though it were serial would pick one branch or
+	// escalate every fork's run for answering twice, and neither is what
+	// the flow says, so a task that has not started yet stops on the
+	// definition instead of starting into it (P8). A task already running
+	// elsewhere in the flow is unaffected by a fork added somewhere it never
+	// reaches — the second check below is what still catches it if the flow
+	// is edited to fork the task's own current phase mid-run.
 	if task.Status.Phase == "" {
+		if fork := firstFork(&flow.Spec); fork != "" {
+			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
+				"flow %q forks at %q, and this controller does not run parallel phases yet", flow.Name, fork))
+		}
 		return ctrl.Result{}, r.begin(ctx, &task, flow)
+	}
+	// A run in flight keeps the definition it started under (ADR-0007), but
+	// a run that has not started this phase's attempt yet is still driven
+	// against the flow as it reads now — so a phase edited to fork after the
+	// task landed on it stops the task here, the same as one that forked
+	// before the task ever reached it.
+	if binding, bound := flow.Spec.Bindings[task.Status.Phase]; bound && binding.Join != nil {
+		return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
+			"flow %q forks at %q, and this controller does not run parallel phases yet", flow.Name, task.Status.Phase))
 	}
 	// A phase with no binding is terminal (§5 "束縛の無いステータスが終端") — but
 	// which of three things happened is not the same call. CurrentRun tells
@@ -187,6 +208,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		run = &flowv1alpha1.RunRef{Phase: task.Status.Phase, RunID: task.Status.RunID}
 	}
 	return r.driveRun(ctx, &task, flow, run, recovering)
+}
+
+// firstFork names a phase that forks, in name order, or "" when none does.
+func firstFork(flow *flowv1alpha1.TaskFlowSpec) flowv1alpha1.Phase {
+	var forks []flowv1alpha1.Phase
+	for phase, binding := range flow.Bindings {
+		if binding.Join != nil {
+			forks = append(forks, phase)
+		}
+	}
+	if len(forks) == 0 {
+		return ""
+	}
+	return slices.Min(forks)
 }
 
 // resolveFlow is the one route to a task's TaskFlow, and the two must not
