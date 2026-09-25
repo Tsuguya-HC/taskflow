@@ -124,6 +124,15 @@ const (
 	// read-only, at its root — sees exactly the completed runs and none in
 	// flight.
 	resultsDir = "results"
+	// inputsView is the subPath a handler writes, literally, on a read-only
+	// mount of the flow workspace to be shown what led to this run: the
+	// answer each run that brought the task here wrote, one directory per
+	// phase that wrote it (ADR-0013 決定6). It is not a place on the volume.
+	// The mount is replaced by one read-only mount per answer, at
+	// <mountPath>/<phase>, of results/<runID>/<directory> — so the handler
+	// reads what the phase before it said without knowing that phase's name
+	// or any run number, and nothing is laid on the volume to show it.
+	inputsView = "inputs"
 
 	// preferredSidecarUID is the uid the injected containers run as when
 	// nothing of the handler's does: distroless' nonroot, which is also the
@@ -185,6 +194,12 @@ type Input struct {
 	// for a flow workspace, since a template volume has no shelf to lay
 	// anything on.
 	Shelve []ShelfEntry
+	// Inputs are the answers that led to this run, for a handler that asks
+	// for them with the inputs view. The set is the controller's to compute
+	// — it is the one side that knows which runs led here — and it is only
+	// passed for a flow workspace, since only that has a shelf to show them
+	// from. Empty for a run nothing led to: a task's first.
+	Inputs []InputEntry
 	// Ending is the one this run follows, and nil for every run but the
 	// cleanup one — a phase's run has no ending yet, so there is nothing to
 	// tell it and nothing is set.
@@ -200,6 +215,15 @@ type Input struct {
 // the declared directories from the flow as it reads now would have the run
 // say something it was never asked (shelfHoles carries the same reasoning).
 type ShelfEntry struct {
+	RunID     int32
+	Directory string
+}
+
+// InputEntry is one answer that led to a run: which phase gave it, in which
+// run, and the directory it wrote. It is shown at <mountPath>/<Phase> under a
+// handler's inputs mount, from results/<RunID>/<Directory> on the shelf.
+type InputEntry struct {
+	Phase     flowv1alpha1.Phase
 	RunID     int32
 	Directory string
 }
@@ -337,6 +361,7 @@ func BuildJob(in Input) (*batchv1.Job, error) {
 	// A deep copy: the handler is a cached object shared with everything else
 	// reading it, and the caller would not expect building a Job to edit it.
 	tpl := in.Handler.Spec.JobTemplate.Template.DeepCopy()
+	expandInputs(&tpl.Spec, in.Handler.Spec.Workspace.Volume, in.Inputs)
 	injectSidecars(&tpl.Spec, *in.Handler.Spec.Workspace, in.SidecarImage, sidecarUID(&tpl.Spec),
 		in.WorkspacePVC, in.RunID, in.SweepRuns, in.Shelve)
 
@@ -615,6 +640,14 @@ func checkWorkspace(h *flowv1alpha1.TaskHandler, hasFlowWorkspace bool) error {
 			// results/results/<runID> under it. One left unset, though, is
 			// pinned to this run's view the same as a writable mount is,
 			// rather than showing the volume's root (§ADR-0003 決定1).
+			// The inputs view is shown from the results/ shelf, which only a
+			// flow workspace has; on a template volume there is nothing to
+			// show and the mount would silently be of a directory that does
+			// not exist.
+			if m.Name == ws.Volume && m.SubPath == inputsView && !isFlowWorkspace {
+				return fmt.Errorf("%w: container %q mounts the inputs view of %s, which only a flow workspace has",
+					ErrWorkspace, c.Name, ws.Volume)
+			}
 			if m.Name != ws.Volume || m.ReadOnly {
 				continue
 			}
@@ -781,6 +814,39 @@ func injectSidecars(
 	publish.Args = append(publish.Args, publishArgs...)
 	publish.RestartPolicy = ptr(corev1.ContainerRestartPolicyAlways)
 	pod.InitContainers = append([]corev1.Container{prepare, publish}, pod.InitContainers...)
+}
+
+// expandInputs replaces each of the handler's read-only mounts of the
+// workspace volume that asks for the inputs view with one read-only mount per
+// answer that led to this run, at <mountPath>/<phase>, of
+// results/<runID>/<directory>. With nothing to show, the mount is dropped: a
+// handler globbing the view finds nothing rather than an empty directory the
+// framework would otherwise have to lay somewhere. Called on the handler's own
+// containers only, before the injected ones are added; checkWorkspace has
+// already refused the view on anything but a flow workspace, and a writable
+// mount carrying any subPath of its own.
+func expandInputs(pod *corev1.PodSpec, volume string, inputs []InputEntry) {
+	expand := func(containers []corev1.Container) {
+		for i := range containers {
+			var mounts []corev1.VolumeMount
+			for _, m := range containers[i].VolumeMounts {
+				if m.Name != volume || m.SubPath != inputsView {
+					mounts = append(mounts, m)
+					continue
+				}
+				for _, in := range inputs {
+					shown := m
+					shown.MountPath = path.Join(m.MountPath, string(in.Phase))
+					shown.SubPath = path.Join(resultsDir, strconv.Itoa(int(in.RunID)), in.Directory)
+					shown.ReadOnly = true
+					mounts = append(mounts, shown)
+				}
+			}
+			containers[i].VolumeMounts = mounts
+		}
+	}
+	expand(pod.InitContainers)
+	expand(pod.Containers)
 }
 
 // pinSubPath aims every handler mount of the workspace volume that does not

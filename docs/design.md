@@ -1134,6 +1134,21 @@ Pod オブジェクトが消えたあとも生きているゾンビ publish が�
 開けば封印済みの run だけが並び、今走っている run は work/ にいるので見えない。readOnly の明示
 subPath は checkWorkspace の拒否対象ではない（拒否は書き込み可マウントの SubPath / SubPathExpr だけ）。
 
+**この run に至った答えは `subPath: inputs`（予約、readOnly）で読む**（[ADR-0013](adr/0013-parallel-phases.md) 決定6）。
+コントローラはそのマウントを、至った答えごとの readOnly マウント — 置き場 `<mountPath>/<その答えを書いた
+フェーズ名>`、中身 `results/<その run>/<書かれたディレクトリ>` — に展開して置き換える。handler は
+`cat /inputs/*/report.md` のように前のフェーズの名前も run 番号も知らずに読める。棚から見せるので flow
+workspace でだけ使え、template の volume で頼むと BuildJob が拒否する。
+
+| この run | `inputs/` に並ぶもの |
+|---|---|
+| 最初の run | 何も無い（マウントごと消える） |
+| それ以外の run | `inputs/<前の run のフェーズ>/` = 前の run が選んだディレクトリ。前の run が何も書かなかった（NoAnswer）なら何も無い |
+| finally | 同じ規則で、終端に着いた run の答え（`FLOW_ENDING_OUTCOME` と同じ run の行を見る） |
+
+「前の run」は直列の今は番号が 1 つ前の run（`inputsFor`）。並列の枝と合流先の行は ADR-0013 決定6 の表が
+スケッチで、並列を走らせる版で入る。
+
 **残骸は次の run の prepare が掃除する**（同 ADR-0003）。prepare は publish と同じくボリュームの
 ルートをマウントし（`work/` と `results/` の両方に届く必要がある — 後者は Pod を持たなかった run の
 棚を敷くため。ADR-0011 決定7）、自分の run ディレクトリを作ってから、コントローラが計算した sweep リスト（何が生きているかを知る
