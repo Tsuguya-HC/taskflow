@@ -57,7 +57,6 @@ func SetRun(status *flowv1alpha1.TaskStatus, run flowv1alpha1.RunRef) {
 			return cmp.Compare(a.Phase, b.Phase)
 		})
 	}
-	status.CurrentRun = legacyMirror(status)
 }
 
 // SettleFork records the fork's own run and takes the task where it said:
@@ -86,7 +85,6 @@ func SettleFork(
 		runs = append(runs, flowv1alpha1.RunRef{Phase: b, RunID: status.RunID})
 	}
 	status.CurrentRuns = runs
-	status.CurrentRun = legacyMirror(status)
 }
 
 // SettledBranch is one branch's run and where it went, gathered for
@@ -184,7 +182,6 @@ func SettleBranches(
 			})
 		}
 		if len(status.CurrentRuns) != 0 {
-			status.CurrentRun = legacyMirror(status)
 			return
 		}
 		status.CurrentRuns = nil
@@ -215,4 +212,28 @@ func SettleBranches(
 	status.CurrentRuns = nil
 	record(status, &deciding.Run, deciding.Directory, deciding.Result.Outcome, deciding.Result.Detail, now)
 	move(status, flow, deciding.Result, now)
+}
+
+// Branching reports whether the runs in flight are a fork's branches: the
+// task stands at a phase none of them names. That is the one shape in which
+// status.phase and the runs part other than the cleanup run (ADR-0013 決定8),
+// and the one Reconcile hands to the branch driver rather than the serial
+// one.
+func Branching(status *flowv1alpha1.TaskStatus) bool {
+	if Idle(status) || InFinally(status) {
+		return false
+	}
+	return Run(status, status.Phase) == nil
+}
+
+// RetryRun is RetryInfra for one run among several: the branch named phase is
+// started again under the same number, its attempt counted, with nothing of
+// the attempt that never started carried over (ADR-0004). A phase with no run
+// in flight is left alone.
+func RetryRun(status *flowv1alpha1.TaskStatus, phase flowv1alpha1.Phase) {
+	run := Run(status, phase)
+	if run == nil {
+		return
+	}
+	*run = flowv1alpha1.RunRef{Phase: run.Phase, RunID: run.RunID, InfraRetries: run.InfraRetries + 1}
 }

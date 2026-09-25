@@ -81,7 +81,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=taskflows;taskhandlers,verbs=get;list;watch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create
@@ -105,20 +105,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	if !task.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
-	}
-
-	// A run written by a controller from before currentRuns existed is
-	// brought into the shape this one keeps writing both fields in, before
-	// anything reads the run in flight, and written down at once rather than
-	// whenever the next write happens to come: a task left disagreeing that
-	// long is a task a rollback to that older controller would read wrong in
-	// the meantime. The write is an update of this task, so the watch brings
-	// it straight back. This controller never stops writing the old field
-	// itself (taskstate.SetCurrent) — retiring it is a later release's move,
-	// once nothing needs the single-run shape to fall back to (ADR-0013
-	// 決定7, PR4), and that release is the rollback boundary, not this one.
-	if taskstate.AdoptLegacyRun(&task.Status) {
-		return ctrl.Result{}, r.Status().Update(ctx, &task)
 	}
 
 	// A stopped task has one thing left to do, and its date is already on
@@ -169,29 +155,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Admission accepts a fork (ADR-0013) before this controller can run
-	// one. Driving it as though it were serial would pick one branch or
-	// escalate every fork's run for answering twice, and neither is what
-	// the flow says, so a task that has not started yet stops on the
-	// definition instead of starting into it (P8). A task already running
-	// elsewhere in the flow is unaffected by a fork added somewhere it never
-	// reaches — the second check below is what still catches it if the flow
-	// is edited to fork the task's own current phase mid-run.
 	if task.Status.Phase == "" {
-		if fork := firstFork(&flow.Spec); fork != "" {
-			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
-				"flow %q forks at %q, and this controller does not run parallel phases yet", flow.Name, fork))
-		}
 		return ctrl.Result{}, r.begin(ctx, &task, flow)
-	}
-	// A run in flight keeps the definition it started under (ADR-0007), but
-	// a run that has not started this phase's attempt yet is still driven
-	// against the flow as it reads now — so a phase edited to fork after the
-	// task landed on it stops the task here, the same as one that forked
-	// before the task ever reached it.
-	if binding, bound := flow.Spec.Bindings[task.Status.Phase]; bound && binding.Join != nil {
-		return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
-			"flow %q forks at %q, and this controller does not run parallel phases yet", flow.Name, task.Status.Phase))
 	}
 	// A phase with no binding is terminal (§5 "束縛の無いステータスが終端") — but
 	// which of three things happened is not the same call. The run in flight tells
@@ -213,6 +178,12 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.terminal(ctx, &task, flow)
 	}
 
+	// A fork's branches are several runs at once, each driven on its own
+	// and settled together (ADR-0013); everything else is one run at a time.
+	if taskstate.Branching(&task.Status) {
+		return r.driveBranches(ctx, &task, flow)
+	}
+
 	run := taskstate.Current(&task.Status)
 	recovering := taskstate.Idle(&task.Status)
 	if recovering {
@@ -224,18 +195,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return r.driveRun(ctx, &task, flow, run, recovering)
 }
 
-// firstFork names a phase that forks, in name order, or "" when none does.
-func firstFork(flow *flowv1alpha1.TaskFlowSpec) flowv1alpha1.Phase {
-	var forks []flowv1alpha1.Phase
-	for phase, binding := range flow.Bindings {
-		if binding.Join != nil {
-			forks = append(forks, phase)
-		}
-	}
-	if len(forks) == 0 {
-		return ""
-	}
-	return slices.Min(forks)
+// forks reports whether phase is a fork in flow: its binding declares a join.
+func forks(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) bool {
+	binding, bound := flow.Bindings[phase]
+	return bound && binding.Join != nil
 }
 
 // resolveFlow is the one route to a task's TaskFlow, and the two must not
@@ -448,7 +411,7 @@ func (r *TaskReconciler) driveJobRun(
 		return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
 			"flow %q no longer says what run %d of %q may answer with", flow.Name, run.RunID, run.Phase))
 	}
-	answer := collect.FromPods(pods.Items, directories, false)
+	answer := collect.FromPods(pods.Items, directories, forks(&flow.Spec, run.Phase))
 	return ctrl.Result{}, r.settleRun(ctx, task, flow, run, &answer, "")
 }
 
@@ -530,7 +493,7 @@ func (r *TaskReconciler) driveStateRun(
 		return ctrl.Result{}, err
 	}
 
-	answer, answered := collect.FromBox(box, directories, false)
+	answer, answered := collect.FromBox(box, directories, forks(&flow.Spec, run.Phase))
 	if !answered {
 		remaining := run.Deadline.Sub(r.now())
 		if remaining > 0 {
@@ -868,6 +831,9 @@ func (r *TaskReconciler) settle(
 			in.NoAnswer = answer.Reason
 		}
 	}
+	if forks(&flow.Spec, run.Phase) {
+		return r.settleFork(ctx, task, flow, run, in, answer)
+	}
 	res := transition.Next(in)
 	if answer != nil && answer.Directory != "" && answer.Reason != "" {
 		// What the handler said after naming its directory is the most
@@ -885,6 +851,33 @@ func (r *TaskReconciler) settle(
 		return err
 	}
 	r.announce(task, &flow.Spec, res.Next, res.Detail)
+	return nil
+}
+
+// settleFork settles a fork's own run (ADR-0013): its answer is every branch
+// it chose, and what it starts is transition.Fork's to decide — the branches,
+// each a run of its own, or the one place the task stops instead. The task
+// stays at the fork while its branches run.
+func (r *TaskReconciler) settleFork(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlow,
+	run *flowv1alpha1.RunRef,
+	in transition.Input,
+	answer *collect.Answer,
+) error {
+	res := transition.Fork(in)
+	if answer != nil && answer.Directory != "" && answer.Reason != "" {
+		res.Detail += ": " + answer.Reason
+	}
+	logf.FromContext(ctx).Info("fork's run finished",
+		"phase", run.Phase, "runID", run.RunID, "directory", in.Directory,
+		"outcome", res.Outcome, "branches", res.Branches, "next", res.Next)
+	taskstate.SettleFork(&task.Status, &flow.Spec, in.Directory, res, metav1.NewTime(r.now()))
+	if err := r.Status().Update(ctx, task); err != nil {
+		return err
+	}
+	r.announce(task, &flow.Spec, task.Status.Phase, res.Detail)
 	return nil
 }
 
@@ -1255,20 +1248,22 @@ func (r *TaskReconciler) ensureJob(
 		return nil, err
 	}
 
+	prev, inputs := ledBy(task, &flow.Spec, run)
 	job, err := runner.BuildJob(runner.Input{
 		Task:         task,
 		Handler:      handler,
 		Phase:        run.Phase,
 		RunID:        run.RunID,
 		Attempt:      run.InfraRetries,
-		PrevRunID:    previousRun(task),
+		PrevRunID:    prev,
 		Directories:  directories,
 		Ending:       endingFor(task, &flow.Spec, run),
 		SidecarImage: r.SidecarImage,
 		WorkspacePVC: workspacePVC,
-		SweepRuns:    sweepRuns(run.RunID),
+		SweepRuns:    sweepRuns(run.RunID, liveRuns(task, run)),
 		Shelve:       shelfHoles(task),
-		Inputs:       inputsFor(task, run),
+		Fork:         forks(&flow.Spec, run.Phase),
+		Inputs:       inputs,
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it
@@ -1396,36 +1391,18 @@ func shelfHoles(task *flowv1alpha1.Task) []runner.ShelfEntry {
 	return holes
 }
 
-// inputsFor is the answer that led to run: the one the run before it wrote,
-// read off history, and nothing when that run wrote none or there was no run
-// before it. While runs are strictly serial that is always exactly the run
-// numbered one less — for a phase's run it is the move that brought the task
-// here, and for the cleanup run it is the run finally's ending env is read
-// from as well (endingFor), so the two can never describe different runs. A
-// cleanup run never leads anywhere, so its own line is never an input.
-func inputsFor(task *flowv1alpha1.Task, run *flowv1alpha1.RunRef) []runner.InputEntry {
-	for _, h := range slices.Backward(task.Status.History) {
-		if h.RunID != run.RunID-1 {
-			continue
-		}
-		if h.Directory == "" || h.Phase.IsFinally() {
-			return nil
-		}
-		return []runner.InputEntry{{Phase: h.Phase, RunID: h.RunID, Directory: h.Directory}}
-	}
-	return nil
-}
-
-// sweepRuns is every run before this one — what prepare may clear out of
-// work/. With runs strictly serial, a prior run is either sealed (its work
-// directory already renamed onto the shelf, so there is nothing to remove)
-// or abandoned. The day runs overlap, this is the one place that learns to
-// subtract the live ones; prepare stays a program that deletes what it is
-// told (ADR-0003).
-func sweepRuns(current int32) []int32 {
+// sweepRuns is every run before this one that is not still running — what
+// prepare may clear out of work/. A prior run is either sealed (its work
+// directory already renamed onto the shelf, so there is nothing to remove),
+// abandoned, or one of a fork's other branches in flight beside this one,
+// which is live and left alone (ADR-0003, ADR-0013 決定5). prepare stays a
+// program that deletes what it is told.
+func sweepRuns(current int32, live []int32) []int32 {
 	var ids []int32
 	for id := int32(1); id < current; id++ {
-		ids = append(ids, id)
+		if !slices.Contains(live, id) {
+			ids = append(ids, id)
+		}
 	}
 	return ids
 }
@@ -1502,27 +1479,8 @@ func endingFor(
 	return &runner.Ending{
 		Meaning: string(transition.EndingOf(flow, task.Status.Phase)),
 		Phase:   task.Status.Phase,
-		Outcome: outcomeOf(task, run.RunID-1),
+		Outcome: endingOutcome(task, flow, run),
 	}
-}
-
-// outcomeOf is what was recorded for one run of this task, and empty when that
-// run left no record — it never settled, or never started at all.
-func outcomeOf(task *flowv1alpha1.Task, runID int32) string {
-	for _, h := range slices.Backward(task.Status.History) {
-		if h.RunID == runID {
-			return h.Outcome
-		}
-	}
-	return ""
-}
-
-// previousRun is the run before the one in flight, or 0 on the first attempt.
-func previousRun(task *flowv1alpha1.Task) int32 {
-	if len(task.Status.History) == 0 {
-		return 0
-	}
-	return task.Status.History[len(task.Status.History)-1].RunID
 }
 
 // SetupWithManager sets up the controller with the Manager.

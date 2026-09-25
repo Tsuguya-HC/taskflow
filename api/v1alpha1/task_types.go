@@ -246,23 +246,6 @@ type TaskStatus struct {
 	// +optional
 	CurrentRuns []RunRef `json:"currentRuns,omitempty"`
 
-	// CurrentRun is where a controller before ADR-0013 kept its one run in
-	// flight. This controller keeps writing it — a copy of the one entry in
-	// CurrentRuns, or nil when there are zero or more than one — so that
-	// rolling back to that controller still finds the run it knows how to
-	// read: it never reads CurrentRuns at all. Reading it happens only to
-	// bring a task last written by that older controller into step
-	// (taskstate.AdoptLegacyRun).
-	//
-	// Outside tests, nothing but taskstate reads or writes it: everything else asks for the
-	// run in flight through CurrentRuns. It is retired once a version runs
-	// more than one phase at a time (ADR-0013 決定7) — a shape this field
-	// cannot represent — and that version, not this one, is the boundary a
-	// rollback cannot cross. It is not marked deprecated in the Go sense,
-	// because this release writes it on purpose.
-	// +optional
-	CurrentRun *RunRef `json:"currentRun,omitempty"`
-
 	// ExpiresAt is when the controller deletes this task, set once it stops.
 	// The moment is fixed here rather than derived from the flow's ttl each
 	// time, so a task at Escalated keeps its date even after the flow that

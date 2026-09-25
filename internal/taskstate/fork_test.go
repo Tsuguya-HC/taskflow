@@ -92,9 +92,6 @@ func TestAForkStartsItsBranches(t *testing.T) {
 	if len(s.History) != 1 || s.History[0].Phase != phasePick || s.History[0].RunID != 1 || s.History[0].Directory != "logic/security" {
 		t.Fatalf("history = %+v, want the fork's own run as run 1", s.History)
 	}
-	if s.CurrentRun != nil {
-		t.Fatal("two runs in flight have no single-run mirror")
-	}
 
 	// While the branches run it is they, and not the fork, that are in
 	// flight: the fork has run once, each branch once.
@@ -433,5 +430,48 @@ func TestARunNotYetWrittenDownIsRecordedUnderStatus(t *testing.T) {
 	SettleFork(fork, forkFlow(), "logic", transition.ForkResult{Branches: []flowv1alpha1.Phase{phaseLogic}}, at)
 	if h := fork.History[0]; h.Phase != phasePick || h.RunID != 2 {
 		t.Fatalf("recorded %+v, want the fork as run 2", h)
+	}
+}
+
+func TestBranchingIsTheForksBranchesInFlight(t *testing.T) {
+	s := atFork()
+	if Branching(s) {
+		t.Fatal("the fork's own run in flight is not branching")
+	}
+	SettleFork(s, forkFlow(), "logic/security", transition.ForkResult{
+		Branches: []flowv1alpha1.Phase{phaseLogic, phaseSecurity}, Outcome: transition.OutcomeDeclared,
+	}, at)
+	if !Branching(s) {
+		t.Fatal("branches in flight at the fork are branching")
+	}
+	one := &flowv1alpha1.TaskStatus{Phase: phasePick, CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseLogic, RunID: 2}}}
+	if !Branching(one) {
+		t.Fatal("one branch left in flight is still branching")
+	}
+	if Branching(&flowv1alpha1.TaskStatus{Phase: phasePick}) {
+		t.Fatal("nothing in flight is not branching")
+	}
+	cleanup := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 4}}}
+	if Branching(cleanup) {
+		t.Fatal("the cleanup run is not a branch")
+	}
+}
+
+// A branch that never started is tried again under its own number, counted,
+// and the rest of the fork is left as it was.
+func TestRetryRunRetriesOneBranch(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{Phase: phasePick, CurrentRuns: []flowv1alpha1.RunRef{
+		{Phase: phaseLogic, RunID: 2, JobName: "l", InfraRetries: 1},
+		{Phase: phaseSecurity, RunID: 3, JobName: "s"},
+	}}
+	RetryRun(s, phaseLogic)
+	want := []flowv1alpha1.RunRef{{Phase: phaseLogic, RunID: 2, InfraRetries: 2}, {Phase: phaseSecurity, RunID: 3, JobName: "s"}}
+	if !slices.Equal(s.CurrentRuns, want) {
+		t.Fatalf("runs = %+v, want %+v", s.CurrentRuns, want)
+	}
+	RetryRun(s, "どこにも無い")
+	if !slices.Equal(s.CurrentRuns, want) {
+		t.Fatal("retrying a phase with no run in flight changed something")
 	}
 }

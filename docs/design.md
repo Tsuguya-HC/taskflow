@@ -409,13 +409,11 @@ runner の選択とは別に、**包む単位**という論点自体は残る。
 `jobTemplate` に**コンテナを複数置く**ことで表す。ワークスペースを共有した 1 Pod なので、
 順序も受け渡しも Pod の中で閉じる。
 
-> **スケッチ（未実装）**: 1 Pod に畳めない検査（別 SA が要る等）は、1 フェーズに handler を並べるのではなく、
-> **並列フェーズ**として書く（[ADR-0013](adr/0013-parallel-phases.md)）。分岐元の binding に `join` を書くと、
-> 書かれた行き先（と `always`）を全部起動し、全部が `join.phase` に着いたら合流する。枝は行き先を選ばない
-> （`join.phase` か `Escalated` だけ）ので、判断は合流後の直列フェーズがする。合流先は `inputs` ビュー
-> （`/inputs/<枝のフェーズ>/`）で各枝の答えを読む。
+1 Pod に畳めない検査（別 SA が要る等）は、1 フェーズに handler を並べるのではなく、**並列フェーズ**として
+書く（[ADR-0013](adr/0013-parallel-phases.md)）。分岐元の binding に `join` を書くと、その run が書いた
+行き先（と `always`）を全部起動し、全部が `join.phase` に着いたら合流先の run を 1 つ起動する:
 
-```yaml sketch
+```yaml
 Checks:
   handler: pick-checks
   next: {lint: lint, Escalated: stuck}
@@ -424,11 +422,14 @@ lint: {handler: lint, next: {Review: done, Escalated: stuck}}
 test: {handler: test, next: {Review: done, Escalated: stuck}}
 ```
 
-`join` の型と admission の検査（§5「厳格検証」の表）は入っているが、コントローラはまだ並列を走らせない。
-直列として動かすと flow が言っていないことをするフェーズにだけ `Failed` にする（P8）: Task がまだ
-始まっていない状態で flow のどこかに `join` があるか、Task の今のフェーズ自身の binding が `join` を
-持つかのどちらか。無関係なフェーズを走っている Task は、その flow に別の `join` があっても止めない
-（ADR-0007: 走行中の run は Job が凍結した定義で走る）。
+- 枝は行き先を選ばない（`join.phase` か `Escalated` だけ）。判断は合流後の直列フェーズがする。合流先は
+  `inputs` ビュー（`/inputs/<枝のフェーズ>/`、§7）で各枝の答えを読む
+- 枝が走っている間、`status.phase` は分岐元のまま、`currentRuns` に枝ごとの run が並ぶ（ADR-0013 決定8）。
+  番号は分岐元の run の次から枝の名前順に払う
+- その reconcile で終わった枝はまとめて決着させる（`taskstate.SettleBranches`）。1 本でも `Escalated`（や
+  `Failed`）に着いたら Task はそこで止まり、まだ走っている枝は `Cancelled` として記録して Job を消す
+  （fail-fast）。history には「決着した他の枝 → `Cancelled` の枝 → 終端を決めた枝」の順に積む
+- v1 の制限: 枝はフェーズ 1 つ、枝は Job runner だけ（State の枝は実行時に `Failed`）
 
 1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
 
@@ -765,8 +766,10 @@ finally:
   — 宣言していない flow はどちらの outcome も起こりえないため（ADR-0010）
 - **受け取るもの**: 終端の意味（5 値）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ
   経路で値として差し込む（`FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME`。finally の run
-  にだけ付く。`FLOW_PHASE` は他の run と同じく「この run が何か」= `Finally` を言う）。run が一度も
-  決着せずに `Failed` に着いた場合、outcome は空で渡す（推測で埋めない）。**3 値は dispatch 時点の
+  にだけ付く。`FLOW_PHASE` は他の run と同じく「この run が何か」= `Finally` を言う）。outcome は
+  **終端を決めた run** の行から引く — 直列なら番号が 1 つ前の run、並列の途中で枝が止めたならその枝
+  （ADR-0013 決定8。history の最後に積まれる）。run が一度も決着せずに `Failed` に着いた場合、outcome は
+  空で渡す（推測で埋めない）。**3 値は dispatch 時点の
   flow から読む**（Job の template と同じ扱い）。封印されるのは既に書かれたものだけで、TTL の選択も
   記録済みの `Ready` condition から決める（終端到達後の flow を読み直さない）
 - **走らない場面**は ADR-0009 の表が正。Task の削除では走らない（削除時の後始末は `metadata.finalizers` で
@@ -1023,8 +1026,7 @@ pod の中身が全部ユーザー定義になるため、**コントローラ�
 - 分岐元（`join` を持つ binding）の run だけは例外で、書かれたディレクトリ全部をソートして `/` でつないだ
   1 つの文字列を 1 行目に書く（publish の `--many`、`contract.JoinDirectories`）。照合は「`/` で分けた各片が
   宣言されたディレクトリで重複しない」— `/` はディレクトリ名に使えないので分け方は 1 通りで、パーサは
-  増えない（[ADR-0013](adr/0013-parallel-phases.md) 決定8）。この受け渡しと遷移関数（`transition.Fork`）は
-  入っているが、コントローラが分岐元の Job にこれを使うのは並列を走らせる版から
+  増えない（[ADR-0013](adr/0013-parallel-phases.md) 決定8）。分岐元の答えが起動する枝は `transition.Fork` が決める
 - 上限 4KB。verdict + 一行の理由には十分。**レポート本体はここに載せない**（store かログ基盤）
 - termination message が無い / 読めない / 語彙外 → 直接 Escalated
 - store への publish はユーザーのサイドカーの仕事であり、コントローラの関心事ではない
@@ -1148,16 +1150,18 @@ workspace でだけ使え、template の volume で頼むと BuildJob が拒否�
 | この run | `inputs/` に並ぶもの |
 |---|---|
 | 最初の run | 何も無い（マウントごと消える） |
-| それ以外の run | `inputs/<前の run のフェーズ>/` = 前の run が選んだディレクトリ。前の run が何も書かなかった（NoAnswer）なら何も無い |
-| finally | 同じ規則で、終端に着いた run の答え（`FLOW_ENDING_OUTCOME` と同じ run の行を見る） |
+| 直列の run（前進・rework） | `inputs/<前の run のフェーズ>/` = history の最後の run が選んだディレクトリ。何も書かなかった（NoAnswer）なら何も無い |
+| 選ばれた枝 | `inputs/<分岐元>/` = 分岐元がこの枝を選んだディレクトリ |
+| `always` の枝 | 何も無い |
+| 合流先 | `inputs/<枝のフェーズ>/` が合流した枝の数だけ |
+| finally | 終端を決めた run の答え（`FLOW_ENDING_OUTCOME` と同じ run）。並列の途中で止まったなら `Escalated` に着いた枝の数だけ。決めた run が無ければ何も無い |
 
-「前の run」は直列の今は番号が 1 つ前の run（`inputsFor`）。並列の枝と合流先の行は ADR-0013 決定6 の表が
-スケッチで、並列を走らせる版で入る。
+求めるのは `ledBy`（`prev-run-id` annotation も同じ規則で「この run に至った run」を名乗る）。
 
 **残骸は次の run の prepare が掃除する**（同 ADR-0003）。prepare は publish と同じくボリュームの
 ルートをマウントし（`work/` と `results/` の両方に届く必要がある — 後者は Pod を持たなかった run の
 棚を敷くため。ADR-0011 決定7）、自分の run ディレクトリを作ってから、コントローラが計算した sweep リスト（何が生きているかを知る
-のはコントローラだけ。直列の今は自 runID 未満の全部で、並列化の日はリスト計算だけが変わる）にある
+のはコントローラだけ。自 runID 未満のうち、並列の他の枝として今も走っている run を除いた全部）にある
 `work/<id>` を消す。封印済みは rename で work/ に居ないので、消えるのは封印できず死んだ run の
 残骸だけ。消せなければ（NFS の sillyrename ゴースト等）エラー = その run は始まらず infra retry へ
 — 係争中のボリュームで新しい仕事を始めない。Escalated で止まった Task には次の run が来ないので、

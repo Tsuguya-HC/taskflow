@@ -34,8 +34,15 @@ func TestSweepRuns(t *testing.T) {
 		{current: 3, want: []int32{1, 2}},
 	}
 	for _, c := range cases {
-		if got := sweepRuns(c.current); !reflect.DeepEqual(got, c.want) {
+		if got := sweepRuns(c.current, nil); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("sweepRuns(%d) = %v, want %v", c.current, got, c.want)
 		}
+	}
+}
+
+// A fork's other branches in flight are live, and are not debris to sweep.
+func TestSweepRunsLeavesLiveBranchesAlone(t *testing.T) {
+	if got := sweepRuns(5, []int32{2, 4, 6}); !reflect.DeepEqual(got, []int32{1, 3}) {
+		t.Fatalf("sweepRuns = %v, want [1 3]", got)
 	}
 }

@@ -179,7 +179,7 @@ type Input struct {
 	// SweepRuns are the runIDs whose work/ leftovers prepare clears away
 	// before this run starts. The set is the controller's to compute —
 	// which runs are live is only visible from the cluster's state — and
-	// today, with runs strictly serial, it is every run before this one.
+	// it is every run before this one that is not a fork's other branch still in flight.
 	// Sealed runs left work/ when their rename shelved them, so what this
 	// actually removes is the debris of attempts that died before sealing
 	// (ADR-0003). Only a flow workspace carries anything over from one

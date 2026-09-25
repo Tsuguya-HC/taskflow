@@ -36,7 +36,6 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
-	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 )
 
 const (
@@ -230,17 +229,6 @@ func (fx *fixture) get() *flowv1alpha1.Task {
 	var tk flowv1alpha1.Task
 	Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &tk)).To(Succeed())
 	return &tk
-}
-
-// syncLegacyMirror keeps status.currentRun matching status.currentRuns after
-// a spec mutates the latter directly (through the pointer Current returns,
-// or by replacing the slice outright) rather than through SetCurrent. Skip
-// this and the two disagree the way an actual crash never leaves them —
-// nothing but SetCurrent ever writes one without the other — so the next
-// reconcile spends itself on AdoptLegacyRun repairing the mirror instead of
-// doing what the spec means to drive at.
-func syncLegacyMirror(tk *flowv1alpha1.Task) {
-	taskstate.SetCurrent(&tk.Status, taskstate.Current(&tk.Status))
 }
 
 // stateRunner turns the fixture's handler into one the framework does not
