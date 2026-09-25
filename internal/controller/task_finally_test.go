@@ -240,6 +240,62 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			"an escalation tidied up after is no less an escalation")
 	})
 
+	// A cleanup run already in flight when a controller upgrades to
+	// ADR-0013 is one a controller before it would have left in
+	// status.currentRun — the one shape AdoptLegacyRun exists to carry
+	// over. Reconcile has to do that before it reads whether a run is in
+	// flight at all: get the order wrong here, where the run in flight is
+	// the reserved-phase branch's own cleanup run, and InFinally finds
+	// nothing — the cleanup run is treated as lost, and Escalated sits
+	// with nobody ever coming back to it. The old field is left standing as
+	// the mirror rather than cleared, so a rollback to that older controller
+	// would find the same run.
+	It("carries an escalation's cleanup run over from the legacy field, and keeps it running", func() {
+		fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		runPhase("") // exit 0, said nothing
+
+		fx.reconcile() // creates the cleanup Job, run 2
+		job := cleanupJob()
+
+		// The shape a controller before ADR-0013 would have left this task
+		// in: the one run in flight in the old field, nothing in the new one.
+		tk := fx.get()
+		legacy := taskstate.Current(&tk.Status)
+		Expect(legacy).NotTo(BeNil())
+		tk.Status.CurrentRun = legacy
+		tk.Status.CurrentRuns = nil
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile() // adopts the legacy run and writes it back at once
+
+		tk = fx.get()
+		Expect(tk.Status.CurrentRun).To(Equal(legacy), "the old field stays standing as the mirror of the one run in flight")
+		Expect(taskstate.Current(&tk.Status)).To(Equal(legacy), "the run moved over untouched")
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated), "adopting a run decides nothing")
+		Expect(tk.Status.ExpiresAt).To(BeNil(), "the cleanup this run belongs to has not finished yet")
+
+		// The next reconcile must see the run the same way it would have
+		// without the detour through the legacy field: the cleanup Job
+		// already running, nothing to recreate.
+		fx.reconcile()
+		still := cleanupJob()
+		Expect(still.UID).To(Equal(job.UID), "the same cleanup Job — adopting the run must not start it over")
+
+		finish(job, dirDone+"\nthe branch is gone")
+		fx.reconcile()
+
+		tk = fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated), "the escalation stands")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "the cleanup run settled")
+		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal(string(transition.OutcomeNoAnswer)))
+		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
+	})
+
 	It("says so when the cleanup run does not report it cleaned up", func() {
 		fx.makeFlow(withCleanup)
 		fx.makeHandler()

@@ -273,6 +273,7 @@ var _ = Describe("starting a task", func() {
 		tk := get()
 		tk.Status.Phase = phaseReport // unbound in this flow, so terminal
 		tk.Status.CurrentRuns = nil
+		tk.Status.CurrentRun = nil // no run anywhere, or AdoptLegacyRun spends this reconcile repairing the mirror instead
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
 		reconcileOnce()
@@ -299,6 +300,7 @@ var _ = Describe("starting a task", func() {
 		tk := get()
 		tk.Status.Phase = flowv1alpha1.PhaseEscalated
 		tk.Status.CurrentRuns = nil
+		tk.Status.CurrentRun = nil // no run anywhere, or AdoptLegacyRun spends this reconcile repairing the mirror instead
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, flow)).To(Succeed())
@@ -322,6 +324,7 @@ var _ = Describe("starting a task", func() {
 		tk := get()
 		tk.Status.Phase = phaseReport // unbound in this flow, so terminal
 		tk.Status.CurrentRuns = nil
+		tk.Status.CurrentRun = nil // no run anywhere, or AdoptLegacyRun spends this reconcile repairing the mirror instead
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, flow)).To(Succeed())

@@ -108,11 +108,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// A run written by a controller from before currentRuns existed is
-	// carried over before anything reads the run in flight, and written down
-	// at once rather than whenever the next write happens to come: the old
-	// field has to be gone from every stored task before the release that
-	// stops reading it. The write is an update of this task, so the watch
-	// brings it straight back.
+	// brought into the shape this one keeps writing both fields in, before
+	// anything reads the run in flight, and written down at once rather than
+	// whenever the next write happens to come: a task left disagreeing that
+	// long is a task a rollback to that older controller would read wrong in
+	// the meantime. The write is an update of this task, so the watch brings
+	// it straight back. This controller never stops writing the old field
+	// itself (taskstate.SetCurrent) — retiring it is a later release's move,
+	// once nothing needs the single-run shape to fall back to (ADR-0013
+	// 決定7, PR4), and that release is the rollback boundary, not this one.
 	if taskstate.AdoptLegacyRun(&task.Status) {
 		return ctrl.Result{}, r.Status().Update(ctx, &task)
 	}

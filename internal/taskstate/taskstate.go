@@ -48,6 +48,7 @@ limitations under the License.
 package taskstate
 
 import (
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -85,29 +86,79 @@ func Current(status *flowv1alpha1.TaskStatus) *flowv1alpha1.RunRef {
 }
 
 // SetCurrent makes run the one run in flight, or leaves none when run is nil.
+// It also keeps status.currentRun in step, as the one run in flight seen the
+// way a controller before ADR-0013 reads it — this is the expand half of the
+// migration, and the reason a rollback to that controller keeps working: it
+// never reads currentRuns at all, only this mirror. The field goes back to
+// nil the moment there is more than one run in flight (ADR-0013 決定7, PR4):
+// that shape has no single-run field to hold it in, and a rolled-back
+// controller finding none is the same as it finding a task that has not
+// started an attempt yet, which is the closer of the two wrong answers.
 func SetCurrent(status *flowv1alpha1.TaskStatus, run *flowv1alpha1.RunRef) {
 	if run == nil {
 		status.CurrentRuns = nil
-		return
+	} else {
+		status.CurrentRuns = []flowv1alpha1.RunRef{*run}
 	}
-	status.CurrentRuns = []flowv1alpha1.RunRef{*run}
+	status.CurrentRun = legacyMirror(status)
 }
 
-// AdoptLegacyRun carries over the one run a controller before ADR-0013 kept
-// in status.currentRun, and reports whether there was one. A task that was
-// mid-run across the upgrade keeps its run rather than being read as having
-// none — which Reconcile would take for a crash between two writes and start
-// the phase over. The old field is cleared either way, so the next write of
-// status drops it; when currentRuns already has something, that is the newer
-// record and wins.
+// legacyMirror is what status.currentRun should hold to mirror currentRuns —
+// a copy of the one run in flight, or nil when there is none or more than
+// one. Its own object, not a pointer into currentRuns: the two fields are
+// meant to be read independently by two controller versions that may run at
+// different times, and never through each other.
+func legacyMirror(status *flowv1alpha1.TaskStatus) *flowv1alpha1.RunRef {
+	if len(status.CurrentRuns) != 1 {
+		return nil
+	}
+	run := status.CurrentRuns[0]
+	return &run
+}
+
+// AdoptLegacyRun brings status.currentRun and status.currentRuns back into
+// the mirrored shape SetCurrent writes going forward, and reports whether it
+// changed anything. It exists for a task a controller before this one wrote
+// to, or wrote to again after this one did: that controller only ever
+// touches the old field, so a disagreement between the two means the old
+// field is the newer write and currentRuns is what has fallen behind — this
+// controller itself never leaves the two disagreeing, since SetCurrent
+// always writes both at once. Reading currentRuns empty and the old field
+// set — a task mid-run across the upgrade, never yet written by this
+// controller — is one instance of that same disagreement, and adopted the
+// same way: currentRuns rebuilt from the old field.
+//
+// Two runs or more in flight (ADR-0013 決定7, PR4) has no old-field shape to
+// read the other way: currentRuns is authoritative there instead, and the
+// old field, if a stale write left it set, is cleared to match — this
+// controller's own eventual write of a second branch would otherwise look
+// like a third writer overwriting fresh currentRuns with a stale ref.
+//
+// Two fields already agreeing is reported as no change, so a controller
+// upgraded for a while, with every write since going through SetCurrent,
+// does not pay for this on every reconcile.
+//
+// The old field is not removed here, nor by any other writer in this
+// package: expand keeps writing it so a rollback to the controller before
+// this one keeps working, and contract — retiring the field once a version
+// exists that no longer needs a single-run shape to fall back to (ADR-0013
+// 決定7, PR4) — is the boundary a rollback cannot cross.
 func AdoptLegacyRun(status *flowv1alpha1.TaskStatus) bool {
-	if status.CurrentRun == nil {
+	if len(status.CurrentRuns) >= 2 {
+		if status.CurrentRun == nil {
+			return false
+		}
+		status.CurrentRun = nil
+		return true
+	}
+	if equality.Semantic.DeepEqual(status.CurrentRun, legacyMirror(status)) {
 		return false
 	}
-	if len(status.CurrentRuns) == 0 {
+	if status.CurrentRun == nil {
+		status.CurrentRuns = nil
+	} else {
 		status.CurrentRuns = []flowv1alpha1.RunRef{*status.CurrentRun}
 	}
-	status.CurrentRun = nil
 	return true
 }
 

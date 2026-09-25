@@ -937,30 +937,135 @@ func TestFinallyHistorySaysHowTheRunWasDriven(t *testing.T) {
 
 // A run an older controller wrote to currentRun is carried into currentRuns,
 // and the old field is cleared so the next write drops it.
+// TestAdoptLegacyRun checks every shape the two fields can disagree in
+// against the mirror SetCurrent keeps: adopting a run only this controller's
+// predecessor wrote, repairing a mirror some other writer left stale, and —
+// the case that matters for not paying a write on every reconcile of a task
+// already upgraded — reporting no change when the two already agree.
 func TestAdoptLegacyRun(t *testing.T) {
-	legacy := &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2, InfraRetries: 1}
+	legacy := flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2, InfraRetries: 1}
 
-	s := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: legacy}
-	if !AdoptLegacyRun(s) {
-		t.Fatal("a status with a legacy run reported nothing to adopt")
-	}
-	if got := Current(s); got == nil || *got != *legacy {
-		t.Fatalf("currentRuns = %+v, want the legacy run %+v", s.CurrentRuns, legacy)
-	}
-	if s.CurrentRun != nil {
-		t.Fatal("the legacy field was left set, so the next write would keep it")
-	}
+	t.Run("old field only: adopted into currentRuns, and left standing as the mirror", func(t *testing.T) {
+		s := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: &legacy}
+		if !AdoptLegacyRun(s) {
+			t.Fatal("a status with a legacy run and nothing in currentRuns reported no change")
+		}
+		if got := Current(s); got == nil || *got != legacy {
+			t.Fatalf("currentRuns = %+v, want the legacy run %+v", s.CurrentRuns, legacy)
+		}
+		if s.CurrentRun == nil || *s.CurrentRun != legacy {
+			t.Fatalf("currentRun = %+v, want it left standing as the mirror of the one run now in currentRuns", s.CurrentRun)
+		}
+	})
 
-	// currentRuns already set is the newer record: it stays as it is.
-	newer := flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3}
-	both := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: legacy, CurrentRuns: []flowv1alpha1.RunRef{newer}}
-	AdoptLegacyRun(both)
-	if got := Current(both); got == nil || *got != newer || both.CurrentRun != nil {
-		t.Fatalf("with both set, got currentRuns %+v and currentRun %+v; want the newer run kept and the old field cleared",
-			both.CurrentRuns, both.CurrentRun)
-	}
+	t.Run("both already agree: no change", func(t *testing.T) {
+		s := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: &legacy, CurrentRuns: []flowv1alpha1.RunRef{legacy}}
+		if AdoptLegacyRun(s) {
+			t.Fatal("a status already mirrored reported a change")
+		}
+		if got := Current(s); got == nil || *got != legacy || s.CurrentRun == nil || *s.CurrentRun != legacy {
+			t.Fatalf("an already-agreeing status must be left exactly as it was, got currentRuns %+v currentRun %+v",
+				s.CurrentRuns, s.CurrentRun)
+		}
+	})
 
-	if AdoptLegacyRun(&flowv1alpha1.TaskStatus{}) {
-		t.Fatal("a status with no legacy run reported one")
-	}
+	// SetCurrent never leaves the two fields disagreeing, so a status found
+	// disagreeing was written by something that only touches the old field —
+	// the controller from before this one, or a hand-written patch — after
+	// this controller had already written currentRuns. That write is the
+	// newer one, and currentRuns is what has fallen behind.
+	t.Run("both set but disagreeing: currentRuns is rebuilt from the old field", func(t *testing.T) {
+		stale := flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 2}
+		s := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: &legacy, CurrentRuns: []flowv1alpha1.RunRef{stale}}
+		if !AdoptLegacyRun(s) {
+			t.Fatal("a stale currentRuns reported no change")
+		}
+		if got := Current(s); got == nil || *got != legacy {
+			t.Fatalf("currentRuns = %+v, want it rebuilt from the old field %+v", s.CurrentRuns, legacy)
+		}
+		if s.CurrentRun == nil || *s.CurrentRun != legacy {
+			t.Fatalf("currentRun = %+v, want it left standing as the mirror", s.CurrentRun)
+		}
+	})
+
+	// The same disagreement, but the older controller's last write moved the
+	// run on rather than stopping it: currentRuns must follow to the run it
+	// names now, not stay parked on the one it had before that write.
+	t.Run("the old field names a later run than currentRuns: currentRuns catches up", func(t *testing.T) {
+		before := flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 2}
+		after := flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3}
+		s := &flowv1alpha1.TaskStatus{CurrentRun: &after, CurrentRuns: []flowv1alpha1.RunRef{before}}
+		if !AdoptLegacyRun(s) {
+			t.Fatal("an old field naming a later run than currentRuns reported no change")
+		}
+		if got := Current(s); got == nil || *got != after {
+			t.Fatalf("currentRuns = %+v, want it caught up to the old field's run %+v", s.CurrentRuns, after)
+		}
+	})
+
+	// And the older controller's last write may have stopped the task
+	// outright: an old field gone back to nil is as much a newer write as one
+	// naming a different run, and currentRuns has to follow it to empty too.
+	t.Run("the old field went back to nil after currentRuns had a run: currentRuns is cleared", func(t *testing.T) {
+		before := flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 2}
+		s := &flowv1alpha1.TaskStatus{CurrentRun: nil, CurrentRuns: []flowv1alpha1.RunRef{before}}
+		if !AdoptLegacyRun(s) {
+			t.Fatal("an old field cleared after currentRuns had a run reported no change")
+		}
+		if got := Current(s); got != nil {
+			t.Fatalf("currentRuns = %+v, want it cleared along with the old field", s.CurrentRuns)
+		}
+		if s.CurrentRun != nil {
+			t.Fatalf("currentRun = %+v, want it left nil", s.CurrentRun)
+		}
+	})
+
+	t.Run("neither set: no change", func(t *testing.T) {
+		if AdoptLegacyRun(&flowv1alpha1.TaskStatus{}) {
+			t.Fatal("a status with no run anywhere reported a change")
+		}
+	})
+
+	t.Run("currentRuns holds two: the old field is repaired to nil", func(t *testing.T) {
+		branches := []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}, {Phase: phaseDone, RunID: 1}}
+		s := &flowv1alpha1.TaskStatus{CurrentRun: &legacy, CurrentRuns: branches}
+		if !AdoptLegacyRun(s) {
+			t.Fatal("an old field left standing beside two runs in flight reported no change")
+		}
+		if s.CurrentRun != nil {
+			t.Fatalf("currentRun = %+v, want nil: two runs in flight have no single-run shape to mirror", s.CurrentRun)
+		}
+		if len(s.CurrentRuns) != 2 {
+			t.Fatalf("currentRuns = %+v, want the two branches left untouched", s.CurrentRuns)
+		}
+	})
+}
+
+// TestSetCurrentMirrorsTheLegacyField pins the expand half of the migration:
+// every write through SetCurrent keeps status.currentRun in step, as its own
+// copy rather than a pointer aliasing currentRuns — the two are read by two
+// controller versions that must not be able to reach into each other's copy.
+func TestSetCurrentMirrorsTheLegacyField(t *testing.T) {
+	t.Run("one run: currentRun mirrors it, in a copy of its own", func(t *testing.T) {
+		run := &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 4}
+		s := &flowv1alpha1.TaskStatus{}
+		SetCurrent(s, run)
+		if s.CurrentRun == nil || *s.CurrentRun != *run {
+			t.Fatalf("currentRun = %+v, want it to mirror %+v", s.CurrentRun, run)
+		}
+		if s.CurrentRun == run {
+			t.Fatal("currentRun aliases the caller's ref; it must be an independent copy")
+		}
+		if &s.CurrentRuns[0] == s.CurrentRun {
+			t.Fatal("currentRun aliases currentRuns[0]; the two fields must not share storage")
+		}
+	})
+
+	t.Run("none: currentRun goes back to nil", func(t *testing.T) {
+		s := &flowv1alpha1.TaskStatus{CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport}, CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport}}}
+		SetCurrent(s, nil)
+		if s.CurrentRun != nil {
+			t.Fatalf("currentRun = %+v, want nil once nothing is in flight", s.CurrentRun)
+		}
+	})
 }

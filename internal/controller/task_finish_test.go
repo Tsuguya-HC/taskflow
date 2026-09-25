@@ -455,6 +455,38 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("never started"))
 	})
 
+	// The retry count an infrastructure retry left behind is exactly the
+	// kind of thing AdoptLegacyRun has to carry over rather than reset:
+	// the ref it moves is the whole RunRef, not just phase and runID, and
+	// a run adopted back to 0 would spend the handler's allowance again.
+	It("carries an infrastructure retry count over when a run comes back from the legacy field", func() {
+		fx.makeFlow()
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		fx.makeTask()
+		job := start()
+
+		podOf(job, "") // exists, but no container ever terminated: never pulled
+		finish(job, batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1))
+
+		// The shape a controller before ADR-0013 would have left this task
+		// in: the one run in flight in the old field, nothing in the new one.
+		legacy := taskstate.Current(&tk.Status)
+		tk.Status.CurrentRun = legacy
+		tk.Status.CurrentRuns = nil
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile() // adopts the legacy run and writes it back at once
+
+		tk = fx.get()
+		Expect(tk.Status.CurrentRun).To(Equal(legacy), "the old field stays standing as the mirror of the one run in flight")
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1),
+			"adopting the legacy run must not reset the retry count back to 0")
+	})
+
 	It("fails when the handler disappears before an infrastructure retry can be judged", func() {
 		fx.makeFlow()
 		fx.makeHandler()

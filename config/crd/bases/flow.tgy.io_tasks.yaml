@@ -160,10 +160,17 @@ spec:
               currentRun:
                 description: |-
                   CurrentRun is where a controller before ADR-0013 kept its one run in
-                  flight. It is read once, to carry such a run over into CurrentRuns,
-                  and never written; the release after the one that adopts it removes it.
+                  flight. This controller keeps writing it — a copy of the one entry in
+                  CurrentRuns, or nil when there are zero or more than one — so that
+                  rolling back to that controller still finds the run it knows how to
+                  read: it never reads CurrentRuns at all. Reading it happens only to
+                  bring a task last written by that older controller into step
+                  (taskstate.AdoptLegacyRun).
 
-                  Deprecated: use CurrentRuns.
+                  Deprecated: use CurrentRuns. This field is retired once a version
+                  exists that runs more than one phase at a time (ADR-0013 決定7, PR4) —
+                  a shape this field cannot represent — which is the boundary a rollback
+                  cannot cross, not this release.
                 properties:
                   deadline:
                     format: date-time
