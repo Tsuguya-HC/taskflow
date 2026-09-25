@@ -100,6 +100,24 @@ func TestRunsIgnoresWhereItStopped(t *testing.T) {
 	}
 }
 
+// While the cleanup run is in flight, status.phase stays at the ending the
+// task reached (ADR-0009) — which IsTerminal already reports as terminal, so
+// Runs must not count it a second time as "about to start". Finally itself is
+// counted through CurrentRuns, by the loop above, not through this fallback.
+func TestRunsDuringFinallyCountsNeitherTheEndingNorFinally(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{
+		Phase:       flowv1alpha1.PhaseEscalated,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}},
+	}
+	got := Runs(s, flow())
+	if got[flowv1alpha1.PhaseEscalated] != 0 {
+		t.Fatalf("Escalated ran %d times, want 0: it is where the task stopped, not a phase about to run", got[flowv1alpha1.PhaseEscalated])
+	}
+	if got[flowv1alpha1.PhaseFinally] != 0 {
+		t.Fatalf("Finally ran %d times, want 0: the cleanup run in flight is skipped by name", got[flowv1alpha1.PhaseFinally])
+	}
+}
+
 // TaskStatus.Phase is +optional: a task that has not been dispatched yet has
 // none set. Runs must not treat that as a phase named "" having run.
 func TestRunsBeforeFirstDispatch(t *testing.T) {
@@ -1068,4 +1086,45 @@ func TestSetCurrentMirrorsTheLegacyField(t *testing.T) {
 			t.Fatalf("currentRun = %+v, want nil once nothing is in flight", s.CurrentRun)
 		}
 	})
+}
+
+// Current agrees with legacyMirror on when there is one run to point at:
+// nil with none in flight, the run itself with exactly one, and nil again
+// with two or more — a fork's branches (ADR-0013), which Current cannot name
+// any one of.
+func TestCurrentIsNilUnlessExactlyOneRunIsInFlight(t *testing.T) {
+	if got := Current(&flowv1alpha1.TaskStatus{}); got != nil {
+		t.Fatalf("Current = %+v, want nil with nothing in flight", got)
+	}
+
+	run := flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2}
+	s := &flowv1alpha1.TaskStatus{CurrentRuns: []flowv1alpha1.RunRef{run}}
+	if got := Current(s); got == nil || *got != run {
+		t.Fatalf("Current = %+v, want %+v with exactly one run in flight", got, run)
+	}
+
+	two := &flowv1alpha1.TaskStatus{CurrentRuns: []flowv1alpha1.RunRef{
+		{Phase: phaseInvestigate, RunID: 1}, {Phase: phaseReport, RunID: 2},
+	}}
+	if got := Current(two); got != nil {
+		t.Fatalf("Current = %+v, want nil with two runs in flight: it cannot say which", got)
+	}
+}
+
+// Idle answers the question Current's nil cannot: whether nothing at all is
+// in flight, as opposed to a fork's branches Current cannot name any one of.
+func TestIdleIsTrueOnlyWithNoRunsInFlight(t *testing.T) {
+	if !Idle(&flowv1alpha1.TaskStatus{}) {
+		t.Fatal("Idle = false, want true with nothing in flight")
+	}
+	one := &flowv1alpha1.TaskStatus{CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 2}}}
+	if Idle(one) {
+		t.Fatal("Idle = true, want false with one run in flight")
+	}
+	two := &flowv1alpha1.TaskStatus{CurrentRuns: []flowv1alpha1.RunRef{
+		{Phase: phaseInvestigate, RunID: 1}, {Phase: phaseReport, RunID: 2},
+	}}
+	if Idle(two) {
+		t.Fatal("Idle = true, want false with a fork's branches in flight")
+	}
 }

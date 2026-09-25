@@ -22,16 +22,21 @@ limitations under the License.
 // can be tested without a cluster.
 //
 // This package keeps one invariant on status.currentRuns: whenever it is set,
-// it names the phase status.phase also names — with one exception, the cleanup
-// run, which is named PhaseFinally while status.phase stays at the ending the
-// task reached (ADR-0009). Every writer here keeps the two together — Begin
-// and Advance set both at once, RetryInfra rebuilds the ref from the run in
-// flight, and a task that has stopped has either no ref at all or the cleanup
-// one — owed the moment stop writes it, before the Job behind it exists.
-// Reconcile's recovery path, in task_controller.go, is the one writer
-// outside this package, and holds the same rule: finding no run in flight, it
-// rebuilds one from status.phase before persisting it. Nothing reads a flag to
-// know any of this, which is why it is written down here.
+// it names the phase status.phase also names — with two exceptions. The
+// cleanup run is named PhaseFinally while status.phase stays at the ending
+// the task reached (ADR-0009). And a fork's branches (ADR-0013 決定8) are
+// each named for themselves while status.phase stays at the fork they left:
+// status.phase names where the task stands, not what is running, for as long
+// as more than one thing is. Every writer here keeps the single-run half of
+// the rule together — Begin and Advance set both at once, RetryInfra rebuilds
+// the ref from the run in flight, and a task that has stopped has either no
+// ref at all or the cleanup one — owed the moment stop writes it, before the
+// Job behind it exists. Reconcile's recovery path, in task_controller.go, is
+// the one writer outside this package, and holds the same rule: finding no
+// run in flight, it rebuilds one from status.phase before persisting it —
+// which is only safe once currentRuns is confirmed empty, since a fork with
+// its branches in flight also has nothing Current can name. Nothing reads a
+// flag to know any of this, which is why it is written down here.
 //
 // The controller leans on it twice over. It decides a task is terminal by
 // looking up status.phase and then hands the run in flight to settle, so the two
@@ -73,16 +78,36 @@ const ReasonHandlerFailed = "HandlerFailed"
 // something else was left behind.
 const ReasonFinallyFailed = "FinallyFailed"
 
-// Current is the run a task has in flight, or nil when it has none. Until
-// forks run (ADR-0013), a task never has more than one, and Current is how
-// every caller that means "the run" says so rather than indexing the list.
-// The pointer is into status itself, so a caller filling in the run's Job or
-// box writes it where the next status update will carry it.
+// Current is the run a task has in flight, or nil when it has none or more
+// than one — the same rule legacyMirror keeps for status.currentRun, so the
+// two never disagree on when there is a single run to point at. A fork's
+// branches (ADR-0013) are the one time there is more than one: nil here does
+// not mean nothing is running, only that Current cannot say which. Whether a
+// task has no run in flight at all is Idle's question, not this one — a
+// caller that means "no run" checks Idle before calling Current, since nil
+// here reads that way whether currentRuns is empty or holds a fork's
+// branches, and falling back to a recovery path is only correct in the first
+// of those.
+//
+// Until forks run, a task never has more than one, and Current is how every
+// caller that means "the run" says so rather than indexing the list. The
+// pointer is into status itself, so a caller filling in the run's Job or box
+// writes it where the next status update will carry it.
 func Current(status *flowv1alpha1.TaskStatus) *flowv1alpha1.RunRef {
-	if len(status.CurrentRuns) == 0 {
+	if len(status.CurrentRuns) != 1 {
 		return nil
 	}
 	return &status.CurrentRuns[0]
+}
+
+// Idle reports whether a task has no run in flight at all — the question
+// Current cannot answer once forks run (ADR-0013), since its nil also covers
+// a fork's branches in flight. Idle is what a caller checks before treating
+// nil the way this package's history predates forks and treated it: as
+// nothing running, and so safe to rebuild a run for or otherwise recover
+// from.
+func Idle(status *flowv1alpha1.TaskStatus) bool {
+	return len(status.CurrentRuns) == 0
 }
 
 // SetCurrent makes run the one run in flight, or leaves none when run is nil.
@@ -232,7 +257,7 @@ func Runs(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]flowv
 			inFlight = true
 		}
 	}
-	if !inFlight && status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) && !InFinally(status) {
+	if !inFlight && status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) {
 		runs[status.Phase]++
 	}
 	return runs

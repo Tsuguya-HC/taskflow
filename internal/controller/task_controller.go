@@ -203,7 +203,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// cleanup run is the one legitimate way a stopped task still has one
 	// (ADR-0009), and no ref at all means the task was terminal on arrival.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
-		if taskstate.Current(&task.Status) != nil && !taskstate.InFinally(&task.Status) {
+		if !taskstate.Idle(&task.Status) && !taskstate.InFinally(&task.Status) {
 			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
 				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
 		}
@@ -214,7 +214,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	run := taskstate.Current(&task.Status)
-	recovering := run == nil
+	recovering := taskstate.Idle(&task.Status)
 	if recovering {
 		// A non-terminal task with nothing in flight means the status was
 		// written but the Job never got created — a crash between the two
@@ -273,8 +273,8 @@ func (r *TaskReconciler) terminal(
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
 ) (ctrl.Result, error) {
-	if taskstate.InFinally(&task.Status) {
-		return r.driveRun(ctx, task, flow, taskstate.Current(&task.Status), false)
+	if run := taskstate.Current(&task.Status); run != nil && taskstate.InFinally(&task.Status) {
+		return r.driveRun(ctx, task, flow, run, false)
 	}
 	return ctrl.Result{}, r.backfillExpiry(ctx, task, &flow.Spec)
 }
@@ -1151,7 +1151,7 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow
 	// surely — the ending is already decided — so it is left alone too, and a
 	// flow deleted while that run was owed cannot turn a task that finished
 	// into one that failed.
-	if task.Status.Phase != "" && (taskstate.Current(&task.Status) == nil || taskstate.InFinally(&task.Status)) {
+	if task.Status.Phase != "" && (taskstate.Idle(&task.Status) || taskstate.InFinally(&task.Status)) {
 		return nil
 	}
 	taskstate.Fail(&task.Status, reason, flow, metav1.NewTime(r.now()))
