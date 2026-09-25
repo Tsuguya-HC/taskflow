@@ -64,13 +64,13 @@ type TaskSpec struct {
 // an infrastructure retry comes back with the same number (ADR-0004), and
 // infraRetries is what tells those apart.
 //
-// A task's currentRun, when it has one, ordinarily names the phase the task
+// A task's run in flight, when it has one, ordinarily names the phase the task
 // is on. The one exception is the cleanup run a task that has reached its
-// ending may carry: there, currentRun.phase is the reserved name Finally
+// ending may carry: there, the run's phase is the reserved name Finally
 // while status.phase stays at the ending itself (ADR-0009), and
 // taskstate.InFinally is the predicate that tells that apart from a task
 // mid-flight. A task that has stopped for good, with no cleanup run in
-// flight or owed, has no currentRun at all.
+// flight or owed, has no run in flight at all.
 type RunRef struct {
 	Phase Phase `json:"phase"`
 	RunID int32 `json:"runID"`
@@ -237,6 +237,29 @@ type TaskStatus struct {
 	// +optional
 	RunID int32 `json:"runID,omitempty"`
 
+	// CurrentRuns is every run this task has in flight, one per phase. A
+	// serial task and a cleanup run have at most one; a fork has one per
+	// branch (ADR-0013 決定7). One list rather than a single run beside a
+	// list of branches, so that "what is running" is answered in one place.
+	// +listType=map
+	// +listMapKey=phase
+	// +optional
+	CurrentRuns []RunRef `json:"currentRuns,omitempty"`
+
+	// CurrentRun is where a controller before ADR-0013 kept its one run in
+	// flight. This controller keeps writing it — a copy of the one entry in
+	// CurrentRuns, or nil when there are zero or more than one — so that
+	// rolling back to that controller still finds the run it knows how to
+	// read: it never reads CurrentRuns at all. Reading it happens only to
+	// bring a task last written by that older controller into step
+	// (taskstate.AdoptLegacyRun).
+	//
+	// Outside tests, nothing but taskstate reads or writes it: everything else asks for the
+	// run in flight through CurrentRuns. It is retired once a version runs
+	// more than one phase at a time (ADR-0013 決定7) — a shape this field
+	// cannot represent — and that version, not this one, is the boundary a
+	// rollback cannot cross. It is not marked deprecated in the Go sense,
+	// because this release writes it on purpose.
 	// +optional
 	CurrentRun *RunRef `json:"currentRun,omitempty"`
 

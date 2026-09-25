@@ -160,7 +160,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport), "報告 is where the work ended")
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue(), "a stopped task owed a cleanup run holds its ref")
-		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(2))
+		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(2))
 		Expect(tk.Status.ExpiresAt).To(BeNil(),
 			"dating the task now would be dating it for good — a cleanup run could be deleted out from under itself")
 
@@ -183,7 +183,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 
 		tk = fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport), "the cleanup run never revises where the task ended")
-		Expect(tk.Status.CurrentRun).To(BeNil(), "nothing follows the cleanup run")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "nothing follows the cleanup run")
 		Expect(tk.Status.History).To(HaveLen(2))
 		h := tk.Status.History[1]
 		Expect(h.Phase).To(Equal(flowv1alpha1.PhaseFinally))
@@ -240,6 +240,62 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			"an escalation tidied up after is no less an escalation")
 	})
 
+	// A cleanup run already in flight when a controller upgrades to
+	// ADR-0013 is one a controller before it would have left in
+	// status.currentRun — the one shape AdoptLegacyRun exists to carry
+	// over. Reconcile has to do that before it reads whether a run is in
+	// flight at all: get the order wrong here, where the run in flight is
+	// the reserved-phase branch's own cleanup run, and InFinally finds
+	// nothing — the cleanup run is treated as lost, and Escalated sits
+	// with nobody ever coming back to it. The old field is left standing as
+	// the mirror rather than cleared, so a rollback to that older controller
+	// would find the same run.
+	It("carries an escalation's cleanup run over from the legacy field, and keeps it running", func() {
+		fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		runPhase("") // exit 0, said nothing
+
+		fx.reconcile() // creates the cleanup Job, run 2
+		job := cleanupJob()
+
+		// The shape a controller before ADR-0013 would have left this task
+		// in: the one run in flight in the old field, nothing in the new one.
+		tk := fx.get()
+		legacy := taskstate.Current(&tk.Status)
+		Expect(legacy).NotTo(BeNil())
+		tk.Status.CurrentRun = legacy
+		tk.Status.CurrentRuns = nil
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile() // adopts the legacy run and writes it back at once
+
+		tk = fx.get()
+		Expect(tk.Status.CurrentRun).To(Equal(legacy), "the old field stays standing as the mirror of the one run in flight")
+		Expect(taskstate.Current(&tk.Status)).To(Equal(legacy), "the run moved over untouched")
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated), "adopting a run decides nothing")
+		Expect(tk.Status.ExpiresAt).To(BeNil(), "the cleanup this run belongs to has not finished yet")
+
+		// The next reconcile must see the run the same way it would have
+		// without the detour through the legacy field: the cleanup Job
+		// already running, nothing to recreate.
+		fx.reconcile()
+		still := cleanupJob()
+		Expect(still.UID).To(Equal(job.UID), "the same cleanup Job — adopting the run must not start it over")
+
+		finish(job, dirDone+"\nthe branch is gone")
+		fx.reconcile()
+
+		tk = fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated), "the escalation stands")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "the cleanup run settled")
+		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal(string(transition.OutcomeNoAnswer)))
+		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
+	})
+
 	It("says so when the cleanup run does not report it cleaned up", func() {
 		fx.makeFlow(withCleanup)
 		fx.makeHandler()
@@ -283,7 +339,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport), "a missing cleanup handler does not fail the task")
-		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(2))
 		Expect(tk.Status.History[1].Phase).To(Equal(flowv1alpha1.PhaseFinally))
 		Expect(tk.Status.History[1].Reason).To(ContainSubstring("does not exist"))
@@ -340,7 +396,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		runPhase("ok\nnothing to report")
 
 		stopped := fx.get()
-		Expect(stopped.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&stopped.Status)).To(BeNil())
 		Expect(stopped.Status.ExpiresAt).NotTo(BeNil(), "a task owed no cleanup is dated the moment it stops")
 
 		flow.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanupName(), Done: dirDone}
@@ -348,7 +404,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(1), "nothing ran; the task was finished with before the flow said finally")
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", stopped.Status.ExpiresAt.Time))
 		var job batchv1.Job
@@ -381,7 +437,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport))
-		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(2))
+		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(2))
 		Expect(tk.Status.History).To(HaveLen(1))
 
 		fx.reconcile() // creates run 2's Job (報告)
@@ -403,7 +459,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.History).To(HaveLen(1), "run 2 never settled, so it left nothing behind")
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue())
-		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(3))
+		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(3))
 
 		fx.reconcile() // creates the cleanup Job, run 3
 		var cleanup batchv1.Job
@@ -492,8 +548,8 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport), "a decided ending does not move")
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue())
-		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(2), "nothing was decided, so no run was spent")
-		Expect(tk.Status.CurrentRun.InfraRetries).To(BeEquivalentTo(1))
+		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(2), "nothing was decided, so no run was spent")
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1))
 
 		fx.reconcile() // creates the retry's Job
 		var retry batchv1.Job

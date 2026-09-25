@@ -41,7 +41,7 @@ const (
 	PhaseFailed Phase = "Failed"
 
 	// PhaseFinally is the name the run declared by spec.finally is recorded
-	// under: currentRun names it while that run is in flight, and history
+	// under: currentRuns names it while that run is in flight, and history
 	// keeps the line it wrote. It never appears in status.phase, which is the
 	// ending the task reached and which the cleanup run does not change
 	// (ADR-0009), so it is not in ReservedPhases — a task is not "at" Finally

@@ -147,7 +147,7 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport))
-		Expect(tk.Status.CurrentRun).To(BeNil(), "報告 has no binding, so the task is done")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "報告 has no binding, so the task is done")
 		Expect(tk.Status.History).To(HaveLen(1))
 		h := tk.Status.History[0]
 		Expect(h.Phase).To(Equal(phaseInvestigate))
@@ -188,7 +188,7 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
-		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(1))
 		h := tk.Status.History[0]
 		Expect(h.Directory).To(Equal("escalate"))
@@ -229,7 +229,7 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseBroken))
-		Expect(tk.Status.CurrentRun).To(BeNil(), "失敗 has no binding, so the task is done")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "失敗 has no binding, so the task is done")
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeDeclared)),
 			"the move itself was an ordinary declared edge; what makes it news is the flow calling it a failure")
@@ -392,8 +392,8 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate))
 		Expect(tk.Status.RunID).To(BeEquivalentTo(2))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeRework)))
-		Expect(tk.Status.CurrentRun).NotTo(BeNil())
-		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(2))
+		Expect(taskstate.Current(&tk.Status)).NotTo(BeNil())
+		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(2))
 
 		fx.reconcile()
 		second := fx.job(2)
@@ -437,7 +437,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the same phase, tried again")
 		Expect(tk.Status.RunID).To(BeEquivalentTo(1), "a runID counts decided runs, and nothing was decided")
 		Expect(tk.Status.History).To(BeEmpty(), "nothing was decided, so nothing is recorded")
-		Expect(tk.Status.CurrentRun.InfraRetries).To(BeEquivalentTo(1))
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1))
 
 		fx.reconcile()
 		second := fx.jobAttempt(1, 1)
@@ -453,6 +453,38 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.History[0].RunID).To(BeEquivalentTo(1))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("never started"))
+	})
+
+	// The retry count an infrastructure retry left behind is exactly the
+	// kind of thing AdoptLegacyRun has to carry over rather than reset:
+	// the ref it moves is the whole RunRef, not just phase and runID, and
+	// a run adopted back to 0 would spend the handler's allowance again.
+	It("carries an infrastructure retry count over when a run comes back from the legacy field", func() {
+		fx.makeFlow()
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		fx.makeTask()
+		job := start()
+
+		podOf(job, "") // exists, but no container ever terminated: never pulled
+		finish(job, batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1))
+
+		// The shape a controller before ADR-0013 would have left this task
+		// in: the one run in flight in the old field, nothing in the new one.
+		legacy := taskstate.Current(&tk.Status)
+		tk.Status.CurrentRun = legacy
+		tk.Status.CurrentRuns = nil
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile() // adopts the legacy run and writes it back at once
+
+		tk = fx.get()
+		Expect(tk.Status.CurrentRun).To(Equal(legacy), "the old field stays standing as the mirror of the one run in flight")
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1),
+			"adopting the legacy run must not reset the retry count back to 0")
 	})
 
 	It("fails when the handler disappears before an infrastructure retry can be judged", func() {
@@ -538,7 +570,7 @@ var _ = Describe("finishing a run", func() {
 			res := fx.reconcile()
 			job := fx.job(1)
 
-			run := fx.get().Status.CurrentRun
+			run := taskstate.Current(&fx.get().Status)
 			Expect(run.Deadline).NotTo(BeNil())
 			Expect(run.Deadline.Time).To(BeTemporally("~", job.CreationTimestamp.Add(timeout), time.Second),
 				"the deadline is the Job's own, read off the Job")
@@ -558,7 +590,7 @@ var _ = Describe("finishing a run", func() {
 
 			tk := fx.get()
 			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
-			Expect(tk.Status.CurrentRun).To(BeNil())
+			Expect(taskstate.Current(&tk.Status)).To(BeNil())
 			Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 			Expect(tk.Status.History[0].Reason).To(ContainSubstring("timed out"))
 		})
