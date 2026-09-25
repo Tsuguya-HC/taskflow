@@ -158,6 +158,30 @@ var _ = Describe("starting a task", func() {
 		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 	})
 
+	// Admission accepts a fork before this controller can run one, and a
+	// fork driven as if it were serial would do something the flow never
+	// said. The task stops on the definition, and says why.
+	It("fails a task whose flow forks, until parallel phases are run", func() {
+		makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			b := f.Spec.Bindings[phaseInvestigate]
+			b.Join = &flowv1alpha1.JoinSpec{Phase: phaseReport}
+			f.Spec.Bindings[phaseInvestigate] = b
+		})
+		makeHandler()
+		makeTask()
+
+		reconcileOnce()
+
+		tk := get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(
+			HaveField("Message", ContainSubstring("does not run parallel phases yet"))))
+		var jobs batchv1.JobList
+		Expect(k8sClient.List(ctx, &jobs, client.InNamespace(resourceNamespace),
+			client.MatchingLabels{runner.LabelTaskUID: string(tk.UID)})).To(Succeed())
+		Expect(jobs.Items).To(BeEmpty(), "nothing of the fork may start")
+	})
+
 	It("fails a task whose handler is missing", func() {
 		makeFlow()
 		makeTask() // no handler

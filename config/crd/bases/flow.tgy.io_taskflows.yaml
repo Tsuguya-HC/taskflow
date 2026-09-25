@@ -82,6 +82,42 @@ spec:
                         plain RBAC can express.
                       minLength: 1
                       type: string
+                    join:
+                      description: |-
+                        Join makes this phase a fork (ADR-0013). Its run may write into more
+                        than one of its directories, and every destination it wrote into — plus
+                        every phase Join.Always names — starts at once as a branch. Once every
+                        branch has reached Join.Phase, one run of that phase starts.
+
+                        Its presence is the whole declaration. A flag beside a separate
+                        destination would let a flow say one without the other.
+                      properties:
+                        always:
+                          description: |-
+                            Always names branches that start whatever the fork's run wrote. A
+                            check that must never be skipped belongs in the definition rather than
+                            in a prompt asked to remember it. A phase listed here is not also one
+                            of the fork's own destinations: it would have two ways of being chosen.
+                          items:
+                            description: |-
+                              Phase is a status name. It is a free string chosen by whoever writes the
+                              flow: this framework does not know what the work is, so it has no business
+                              naming its stages. "調査" and "Planning" are equally valid.
+
+                              Three names are the framework's rather than the author's. Two of them are
+                              answers it decides — see ReservedPhases — and the third is PhaseFinally,
+                              which is not an answer at all but the name a cleanup run is recorded under.
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
+                        phase:
+                          description: Phase is where the branches meet. It must be
+                            a phase this flow binds.
+                          minLength: 1
+                          type: string
+                      required:
+                      - phase
+                      type: object
                     next:
                       additionalProperties:
                         type: string

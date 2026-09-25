@@ -155,6 +155,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	// Admission accepts a fork (ADR-0013) before this controller can run
+	// one. Driving it as though it were serial would pick one branch or
+	// escalate every fork's run for answering twice, and neither is what
+	// the flow says, so the task stops on the definition instead (P8).
+	if fork := firstFork(&flow.Spec); fork != "" {
+		return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
+			"flow %q forks at %q, and this controller does not run parallel phases yet", flow.Name, fork))
+	}
+
 	if task.Status.Phase == "" {
 		return ctrl.Result{}, r.begin(ctx, &task, flow)
 	}
@@ -187,6 +196,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		run = &flowv1alpha1.RunRef{Phase: task.Status.Phase, RunID: task.Status.RunID}
 	}
 	return r.driveRun(ctx, &task, flow, run, recovering)
+}
+
+// firstFork names a phase that forks, in name order, or "" when none does.
+func firstFork(flow *flowv1alpha1.TaskFlowSpec) flowv1alpha1.Phase {
+	var forks []flowv1alpha1.Phase
+	for phase, binding := range flow.Bindings {
+		if binding.Join != nil {
+			forks = append(forks, phase)
+		}
+	}
+	if len(forks) == 0 {
+		return ""
+	}
+	return slices.Min(forks)
 }
 
 // resolveFlow is the one route to a task's TaskFlow, and the two must not

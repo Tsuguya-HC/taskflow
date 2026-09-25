@@ -63,8 +63,19 @@ func Check(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 				"Finally is the name the cleanup run is recorded under, not a phase; the handler that runs "+
 					"after the ending goes in spec.finally"))
 		}
+		if phase != "" && !phase.IsReserved() && !phase.IsFinally() {
+			if err := contract.CheckDirectoryName(string(phase)); err != nil {
+				errs = append(errs, field.Invalid(key, string(phase),
+					"a phase's name is also the directory its answer is shown under to the runs it leads to "+
+						"(the inputs view, ADR-0013): "+err.Error()))
+			}
+		}
 		errs = append(errs, checkNext(spec.Bindings[phase], key.Child("next"))...)
+		if spec.Bindings[phase].Join != nil {
+			errs = append(errs, checkJoin(spec, phase, bindings)...)
+		}
 	}
+	errs = append(errs, checkBranchEntry(spec, bindings)...)
 
 	errs = append(errs, checkFinally(spec.Finally, path.Child("finally"))...)
 
@@ -131,6 +142,161 @@ func checkNext(binding flowv1alpha1.PhaseBinding, path *field.Path) field.ErrorL
 	return errs
 }
 
+// checkJoin judges one fork: where its branches meet, which branches it has,
+// and that each of them is a single phase that goes nowhere but the join or
+// Escalated (ADR-0013 決定2 and the v1 limits of 決定3). Whether anything
+// outside the fork reaches into a branch is a question about every binding at
+// once, and checkBranchEntry asks it.
+func checkJoin(spec *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase, bindings *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	path := bindings.Key(string(fork)).Child("join")
+	join := spec.Bindings[fork].Join
+	joinPath := path.Child("phase")
+
+	switch _, bound := spec.Bindings[join.Phase]; {
+	case join.Phase == fork:
+		errs = append(errs, field.Invalid(joinPath, string(join.Phase),
+			"a fork cannot be where its own branches meet"))
+	case !bound:
+		errs = append(errs, field.Invalid(joinPath, string(join.Phase),
+			"branches meet at a phase that runs once they all arrive, so it must be one this flow binds"))
+	}
+
+	chosen := 0
+	for _, dest := range sortedDestinations(spec.Bindings[fork].Next) {
+		switch {
+		case dest.IsReserved():
+		case dest == join.Phase:
+			errs = append(errs, field.Forbidden(bindings.Key(string(fork)).Child("next").Key(string(dest)),
+				"an edge from a fork straight to where its branches meet is not supported yet (ADR-0013 決定3)"))
+		default:
+			chosen++
+		}
+	}
+	if chosen == 0 {
+		errs = append(errs, field.Invalid(path, nil,
+			"a fork needs at least one destination besides Escalated for its run to choose; with none, "+
+				"the only thing its run could ever write is a refusal"))
+	}
+
+	next := spec.Bindings[fork].Next
+	for i, always := range join.Always {
+		key := path.Child("always").Index(i)
+		_, destination := next[always]
+		switch {
+		case always == "" || always.IsReserved() || always.IsFinally():
+			errs = append(errs, field.Invalid(key, string(always), "a branch must be a phase someone runs"))
+		case always == fork || always == join.Phase:
+			errs = append(errs, field.Invalid(key, string(always),
+				"a branch is neither the fork it starts from nor the phase it meets at"))
+		case destination:
+			errs = append(errs, field.Invalid(key, string(always),
+				"this phase is already one of the fork's destinations; a branch chosen both ways would have "+
+					"two answers to whether it runs"))
+		}
+	}
+
+	for _, branch := range branches(spec, fork) {
+		errs = append(errs, checkBranch(spec, branch, join.Phase, bindings.Key(string(branch)))...)
+	}
+	return errs
+}
+
+// checkBranch judges one branch against the v1 shape: a single phase, bound,
+// with no fork of its own, whose every edge leads to the join or Escalated
+// and at least one leads to the join.
+func checkBranch(
+	spec *flowv1alpha1.TaskFlowSpec,
+	branch, join flowv1alpha1.Phase,
+	path *field.Path,
+) field.ErrorList {
+	binding, bound := spec.Bindings[branch]
+	if !bound {
+		return field.ErrorList{field.Invalid(path, string(branch),
+			"a fork's branch must be a phase this flow binds; a branch with no handler has no one to run it")}
+	}
+	var errs field.ErrorList
+	if binding.Join != nil {
+		errs = append(errs, field.Forbidden(path.Child("join"),
+			"a branch that forks again is not supported yet (ADR-0013 決定3)"))
+	}
+	if branch == spec.Start {
+		errs = append(errs, field.Invalid(path, string(branch),
+			"a branch is entered only from its fork, and the start is entered from nowhere"))
+	}
+	meets := false
+	for _, dest := range sortedDestinations(binding.Next) {
+		switch dest {
+		case join:
+			meets = true
+		case flowv1alpha1.PhaseEscalated:
+		default:
+			errs = append(errs, field.Invalid(path.Child("next").Key(string(dest)), binding.Next[dest],
+				fmt.Sprintf("a branch leaves only to where its branches meet (%q) or to Escalated; anywhere else "+
+					"and the fork would wait for a branch that is no longer coming", join)))
+		}
+	}
+	if !meets {
+		errs = append(errs, field.Invalid(path.Child("next"), nil,
+			fmt.Sprintf("a branch must be able to reach %q, where its fork's branches meet", join)))
+	}
+	return errs
+}
+
+// checkBranchEntry refuses every way into a branch other than its own fork
+// (ADR-0013 S4): an edge from some other binding, or a branch claimed by two
+// forks. A run that entered a branch any other way would have no fork to wait
+// with, and no answer to which join it belongs to.
+func checkBranchEntry(spec *flowv1alpha1.TaskFlowSpec, bindings *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	owner := map[flowv1alpha1.Phase]flowv1alpha1.Phase{}
+	for _, fork := range sortedPhases(spec.Bindings) {
+		if spec.Bindings[fork].Join == nil {
+			continue
+		}
+		for _, branch := range branches(spec, fork) {
+			if first, taken := owner[branch]; taken {
+				errs = append(errs, field.Invalid(bindings.Key(string(fork)).Child("join"), string(branch),
+					fmt.Sprintf("%q is already a branch of %q; a branch belongs to one fork", branch, first)))
+				continue
+			}
+			owner[branch] = fork
+		}
+	}
+	for _, from := range sortedPhases(spec.Bindings) {
+		for _, dest := range sortedDestinations(spec.Bindings[from].Next) {
+			if fork, isBranch := owner[dest]; isBranch && fork != from {
+				errs = append(errs, field.Invalid(bindings.Key(string(from)).Child("next").Key(string(dest)),
+					spec.Bindings[from].Next[dest],
+					fmt.Sprintf("%q is a branch of %q and is entered only from there", dest, fork)))
+			}
+		}
+	}
+	return errs
+}
+
+// branches is every phase a fork may start: the destinations its run can
+// choose, and the ones it starts regardless. Escalated is where a run goes
+// instead of choosing, and the join is where branches meet rather than one of
+// them, so neither is a branch.
+func branches(spec *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase) []flowv1alpha1.Phase {
+	binding := spec.Bindings[fork]
+	var out []flowv1alpha1.Phase
+	for _, dest := range sortedDestinations(binding.Next) {
+		if !dest.IsReserved() && dest != binding.Join.Phase {
+			out = append(out, dest)
+		}
+	}
+	for _, always := range binding.Join.Always {
+		if always != "" && !always.IsReserved() && !always.IsFinally() &&
+			always != fork && always != binding.Join.Phase && !slices.Contains(out, always) {
+			out = append(out, always)
+		}
+	}
+	sortPhases(out)
+	return out
+}
+
 // checkFinally judges the cleanup run's declaration. Only the directory needs
 // judging here — the handler's name is a string this flow will look up in its
 // own namespace, and whether anything answers to it is not a question
@@ -157,7 +323,13 @@ func walk(spec *flowv1alpha1.TaskFlowSpec) (reached map[flowv1alpha1.Phase]bool,
 	for len(queue) > 0 {
 		phase := queue[0]
 		queue = queue[1:]
-		for _, dest := range sortedDestinations(spec.Bindings[phase].Next) {
+		dests := sortedDestinations(spec.Bindings[phase].Next)
+		if join := spec.Bindings[phase].Join; join != nil {
+			// A branch listed in always starts without an edge naming it,
+			// so it is reached the way a destination is.
+			dests = append(dests, join.Always...)
+		}
+		for _, dest := range dests {
 			if _, bound := spec.Bindings[dest]; !bound {
 				endings = endings || !dest.IsReserved()
 				continue
