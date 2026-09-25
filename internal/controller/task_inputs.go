@@ -59,8 +59,12 @@ func ledBy(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, run *flowv1
 	}
 
 	if arrived := arrivals(history, flow, run); len(arrived) > 0 {
+		// arrived reads backward from the end of history, so its first entry
+		// is the last branch history recorded — the one ADR-0013 決定8 means
+		// by prev-run-id, not simply whichever branch happened to draw the
+		// highest number.
+		prev = arrived[0].RunID
 		for _, h := range arrived {
-			prev = max(prev, h.RunID)
 			inputs = append(inputs, runner.InputEntry{Phase: h.Phase, RunID: h.RunID, Directory: h.Directory})
 		}
 		slices.SortFunc(inputs, func(a, b runner.InputEntry) int { return cmp.Compare(a.Phase, b.Phase) })
@@ -104,14 +108,30 @@ func decidingLine(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, clea
 		return -1
 	}
 	last := history[i]
-	if last.RunID == cleanup.RunID-1 {
-		return i
+	// Cancelled means, by definition, that this run's own answer never
+	// decided anything (transition.Outcome.StopsAFork) — checked ahead of
+	// forkOf, not after it, because forkOf reads the flow as it is now.
+	// failBranches stops a task exactly when the fork the branches ran under
+	// is gone from the current flow (its join, or its own binding, removed
+	// while they ran), so a Cancelled line's own phase can no longer be
+	// recognized as a branch by the time this asks — and it must not fall
+	// through to the serial RunID-1 rule below just because forkOf could not
+	// say so.
+	if transition.Outcome(last.Outcome) == transition.OutcomeCancelled {
+		return -1
 	}
+	// A fork's branch is numbered by where it stood among its siblings, not
+	// by the cleanup run's own number, so it is judged on its outcome alone —
+	// checked first, before the RunID-1 rule below ever gets a chance to
+	// match it by coincidence while a branch that reached the join sits on
+	// the last line instead.
 	if _, ok := forkOf(flow, last.Phase); ok {
-		switch transition.Outcome(last.Outcome) {
-		case transition.OutcomeDeclared, transition.OutcomeRework, transition.OutcomeCancelled:
-			return -1
+		if transition.Outcome(last.Outcome).StopsAFork() {
+			return i
 		}
+		return -1
+	}
+	if last.RunID == cleanup.RunID-1 {
 		return i
 	}
 	return -1
@@ -146,8 +166,7 @@ func escalatedBranches(lines []flowv1alpha1.HistoryEntry, flow *flowv1alpha1.Tas
 		if !isBranchOf(flow, fork, h.Phase) {
 			break
 		}
-		switch transition.Outcome(h.Outcome) {
-		case transition.OutcomeCancelled, transition.OutcomeDeclared, transition.OutcomeRework:
+		if !transition.Outcome(h.Outcome).StopsAFork() {
 			continue
 		}
 		inputs = append(inputs, answerOf(h)...)
@@ -215,13 +234,23 @@ func endingOutcome(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, cle
 	return ""
 }
 
-// liveRuns is the numbers of every run in flight besides run — a fork's other
-// branches — which prepare must not sweep away as though they were debris.
-func liveRuns(task *flowv1alpha1.Task, run *flowv1alpha1.RunRef) []int32 {
+// unsweptRuns is the numbers of every run prepare must not sweep away as
+// though it were debris: a fork's other branches still in flight besides
+// run, and every run history records as Cancelled. A cancelled branch's Job
+// is only asked to go (cancelBranches, background propagation) — its pod
+// keeps sealing its publish for the rest of its grace period regardless of
+// whether currentRuns still names it, so it is no more debris yet than a
+// branch still running is.
+func unsweptRuns(task *flowv1alpha1.Task, run *flowv1alpha1.RunRef) []int32 {
 	var live []int32
 	for _, r := range task.Status.CurrentRuns {
 		if r.Phase != run.Phase {
 			live = append(live, r.RunID)
+		}
+	}
+	for _, h := range task.Status.History {
+		if transition.Outcome(h.Outcome) == transition.OutcomeCancelled {
+			live = append(live, h.RunID)
 		}
 	}
 	return live

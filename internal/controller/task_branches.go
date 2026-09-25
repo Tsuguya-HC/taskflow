@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -34,6 +35,7 @@ import (
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/collect"
+	"github.com/Tsuguya-HC/taskflow/internal/runner"
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
@@ -56,7 +58,7 @@ func (r *TaskReconciler) driveBranches(
 		// The runs in flight are branches of a fork the flow no longer has:
 		// there is no join to meet at and nothing to judge their answers
 		// against, so the task stops on the definition (§5, P8).
-		return ctrl.Result{}, r.fail(ctx, task, &flow.Spec, fmt.Sprintf(
+		return ctrl.Result{}, r.failBranches(ctx, task, &flow.Spec, fmt.Sprintf(
 			"flow %q no longer forks at %q while its branches were running", flow.Name, fork))
 	}
 
@@ -72,7 +74,7 @@ func (r *TaskReconciler) driveBranches(
 		if err != nil {
 			var broken brokenFlow
 			if errors.As(err, &broken) {
-				return ctrl.Result{}, r.fail(ctx, task, &flow.Spec, broken.reason)
+				return ctrl.Result{}, r.failBranches(ctx, task, &flow.Spec, broken.reason)
 			}
 			return ctrl.Result{}, err
 		}
@@ -95,19 +97,18 @@ func (r *TaskReconciler) driveBranches(
 	}
 
 	if transition.IsTerminal(flow.Spec.Bindings, task.Status.Phase) {
-		// The task stopped on a branch's say-so. The branches that were still
-		// running are recorded as cancelled; their Jobs are stopped now that
-		// the record says so, because nothing they could answer would change
-		// where the task went (ADR-0013 決定4).
-		if err := r.cancelBranches(ctx, task, prior.CurrentRuns, settled); err != nil {
-			return ctrl.Result{}, err
-		}
 		detail := ""
 		if n := len(task.Status.History); n > 0 {
 			detail = task.Status.History[n-1].Reason
 		}
 		r.announce(task, &flow.Spec, task.Status.Phase, detail)
-		return ctrl.Result{}, nil
+		// The task stopped on a branch's say-so. The branches that were still
+		// running are recorded as cancelled; their Jobs are stopped now that
+		// the record says so, because nothing they could answer would change
+		// where the task went (ADR-0013 決定4). Announced before this runs, so
+		// a delete that fails here — and the requeue that follows — never
+		// costs the task its metric or its Event.
+		return ctrl.Result{}, r.reapCancelledJobs(ctx, task)
 	}
 	return ctrl.Result{RequeueAfter: wait}, nil
 }
@@ -222,26 +223,75 @@ func (r *TaskReconciler) judgeBranch(
 	return &taskstate.SettledBranch{Run: *run, Directory: in.Directory, Result: res}
 }
 
-// cancelBranches stops the Jobs of the branches that were still running when
-// another stopped the task: every run in flight before this reconcile that
-// did not settle in it. A Job already gone is what was wanted.
-func (r *TaskReconciler) cancelBranches(
-	ctx context.Context,
-	task *flowv1alpha1.Task,
-	inFlight []flowv1alpha1.RunRef,
-	settled []taskstate.SettledBranch,
-) error {
-	for _, run := range inFlight {
-		if run.JobName == "" || slices.ContainsFunc(settled, func(sb taskstate.SettledBranch) bool {
-			return sb.Run.Phase == run.Phase
-		}) {
+// reapCancelledJobs stops the Jobs of every run history records Cancelled,
+// for as long as they are still there and have not finished on their own. A
+// delete is a request, not a guarantee, and a Cancelled branch's pod may
+// still be sealing its publish through its grace period regardless — so
+// rather than trusting a delete issued elsewhere to have landed, this asks
+// the cluster what is actually there. It reads entirely from history and the
+// Job list, not from any run ref a caller might be holding, which is what
+// makes it safe to call again on any later reconcile, or after a controller
+// restart, and find whatever is still left.
+//
+// A Job jobFinished already calls done is left alone: it finished on its
+// own, cancelled or not, and its pod stays as autopsy material until its own
+// TTL (design.md) — this only reaches for the ones a cancellation is still
+// owed to.
+func (r *TaskReconciler) reapCancelledJobs(ctx context.Context, task *flowv1alpha1.Task) error {
+	cancelled := make(map[string]bool)
+	for _, h := range task.Status.History {
+		if transition.Outcome(h.Outcome) == transition.OutcomeCancelled {
+			cancelled[strconv.Itoa(int(h.RunID))] = true
+		}
+	}
+	if len(cancelled) == 0 {
+		return nil
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs, client.InNamespace(task.Namespace),
+		client.MatchingLabels{runner.LabelTaskUID: string(task.UID)}); err != nil {
+		return err
+	}
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		if !cancelled[job.Labels[runner.LabelRunID]] || job.DeletionTimestamp != nil {
 			continue
 		}
-		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: run.JobName, Namespace: task.Namespace}}
-		err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground))
-		if err != nil && !apierrors.IsNotFound(err) {
+		if finished, _ := jobFinished(job); finished {
+			continue
+		}
+		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}
 	return nil
+}
+
+// failBranches stops a task whose flow broke while a fork's branches were
+// running — the definition itself gave out, not one of the branches, so none
+// of them is answered for; every branch still in flight is recorded
+// Cancelled, and only then does the task fail.
+//
+// taskstate.Fail is called directly here rather than through r.fail: by the
+// time the branches are cancelled, currentRuns is empty and the task would
+// look Idle to the guard r.fail keeps against writing over an
+// already-finished task's history. That guard does not apply on this path —
+// a task with branches still running has not finished — so it must be
+// skipped rather than tripped.
+func (r *TaskReconciler) failBranches(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlowSpec,
+	reason string,
+) error {
+	now := metav1.NewTime(r.now())
+	taskstate.CancelBranches(&task.Status, reason, now)
+	taskstate.Fail(&task.Status, reason, flow, now)
+	if err := r.Status().Update(ctx, task); err != nil {
+		return err
+	}
+	r.announce(task, flow, flowv1alpha1.PhaseFailed, reason)
+	// Announced before this runs, so a delete that fails here — and the
+	// requeue that follows — never costs the task its metric or its Event.
+	return r.reapCancelledJobs(ctx, task)
 }

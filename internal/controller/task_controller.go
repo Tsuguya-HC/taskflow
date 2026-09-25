@@ -108,11 +108,18 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// A stopped task has one thing left to do, and its date is already on
-	// it; nothing below needs consulting, least of all the flow. The Jobs go
-	// with it through their ownerReference (§10).
+	// it; nothing below needs consulting, least of all the flow. Most of its
+	// Jobs go with it through their ownerReference (§10) — the one exception
+	// is a Cancelled branch's, which reapCancelledJobs keeps trying for as
+	// long as the date has not arrived, since a flow with no finally sets
+	// this date in the very same write that stops the task and this is the
+	// only path such a task reaches on every later reconcile until then.
 	if task.Status.ExpiresAt != nil {
 		remaining := task.Status.ExpiresAt.Sub(r.now())
 		if remaining > 0 {
+			if err := r.reapCancelledJobs(ctx, &task); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: remaining}, nil
 		}
 		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt)
@@ -169,8 +176,18 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// (ADR-0009), and no ref at all means the task was terminal on arrival.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
 		if !taskstate.Idle(&task.Status) && !taskstate.InFinally(&task.Status) {
-			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
-				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
+			reason := fmt.Sprintf(
+				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name)
+			// A fork's branches are named for themselves, not for the fork
+			// phase they stand at (ADR-0013 決定8), so losing the fork's own
+			// binding while they run is exactly the shape Branching reports:
+			// none of currentRuns names status.phase. Those branches are still
+			// owed the same cancellation any other broken-definition stop
+			// gives them — r.fail alone would leave them running unrecorded.
+			if taskstate.Branching(&task.Status) {
+				return ctrl.Result{}, r.failBranches(ctx, &task, &flow.Spec, reason)
+			}
+			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, reason)
 		}
 		// Same handling as the reserved-phase branch above, for a task that
 		// stopped at a phase the flow itself leaves unbound. The flow is
@@ -236,6 +253,14 @@ func (r *TaskReconciler) terminal(
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
 ) (ctrl.Result, error) {
+	// Ahead of the cleanup run, not after it: a Cancelled branch's Job that a
+	// status write outlived — the delete after it never ran, or did and
+	// failed, or the controller restarted in between — gets another try on
+	// every reconcile that lands here, cleanup run or not, and finally's own
+	// sweep is never built while one of these might still be found live.
+	if err := r.reapCancelledJobs(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 	if run := taskstate.Current(&task.Status); run != nil && taskstate.InFinally(&task.Status) {
 		return r.driveRun(ctx, task, flow, run, false)
 	}
@@ -1260,7 +1285,7 @@ func (r *TaskReconciler) ensureJob(
 		Ending:       endingFor(task, &flow.Spec, run),
 		SidecarImage: r.SidecarImage,
 		WorkspacePVC: workspacePVC,
-		SweepRuns:    sweepRuns(run.RunID, liveRuns(task, run)),
+		SweepRuns:    sweepRuns(run.RunID, unsweptRuns(task, run)),
 		Shelve:       shelfHoles(task),
 		Fork:         forks(&flow.Spec, run.Phase),
 		Inputs:       inputs,
@@ -1391,11 +1416,12 @@ func shelfHoles(task *flowv1alpha1.Task) []runner.ShelfEntry {
 	return holes
 }
 
-// sweepRuns is every run before this one that is not still running — what
-// prepare may clear out of work/. A prior run is either sealed (its work
-// directory already renamed onto the shelf, so there is nothing to remove),
-// abandoned, or one of a fork's other branches in flight beside this one,
-// which is live and left alone (ADR-0003, ADR-0013 決定5). prepare stays a
+// sweepRuns is every run before this one that prepare may safely clear out
+// of work/. A prior run is either sealed (its work directory already renamed
+// onto the shelf, so there is nothing to remove), abandoned, or still owed
+// its grace period — one of a fork's other branches in flight beside this
+// one, or one this task cancelled and whose Job is only asked to be gone
+// (ADR-0003, ADR-0013 決定5) — and live is left alone. prepare stays a
 // program that deletes what it is told.
 func sweepRuns(current int32, live []int32) []int32 {
 	var ids []int32

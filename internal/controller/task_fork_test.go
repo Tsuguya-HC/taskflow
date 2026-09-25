@@ -176,8 +176,8 @@ var _ = Describe("a fork", func() {
 
 		fx.reconcile()
 		join := jobOf(phaseReport, 5)
-		Expect(join.Spec.Template.Annotations).To(HaveKeyWithValue(contract.AnnotationPrevRunID, "4"),
-			"the join was led to by the last of its branches")
+		Expect(join.Spec.Template.Annotations).To(HaveKeyWithValue(contract.AnnotationPrevRunID, "3"),
+			"the join was led to by the last of its branches to arrive, not the one with the highest run number")
 	})
 
 	It("stops at the first branch to escalate, cancelling the ones still running", func() {
@@ -276,6 +276,34 @@ var _ = Describe("a fork", func() {
 		}, &again)).To(Succeed(), "the next attempt gets a Job of its own")
 	})
 
+	It("stops the Job a retried branch only just started, even though this reconcile is the first to know its name", func() {
+		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		forked(string(logic) + "/" + string(security))
+
+		// security never started; it is retried rather than judged, which
+		// clears its JobName in status — the reconcile after this one is the
+		// first that learns the new Job's name, via ensureJob.
+		fail(jobOf(security, 3), batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+		Expect(taskstate.Run(&fx.get().Status, security).JobName).To(BeEmpty())
+
+		// logic decides the ending in the very same reconcile that gives
+		// security's retried attempt its new Job: cancelBranches must reach
+		// for the name this reconcile just learned, not the one status held
+		// before it started.
+		answer(jobOf(logic, 2), dirStuck)
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		var retried batchv1.Job
+		err := k8sClient.Get(fx.ctx, types.NamespacedName{
+			Name: runner.JobName(fx.name, security, 3, 1), Namespace: resourceNamespace,
+		}, &retried)
+		Expect(apierrors.IsNotFound(err) || retried.DeletionTimestamp != nil).To(BeTrue(),
+			"the retried attempt's Job is stopped along with the rest, not left running under a name cancelBranches never saw")
+	})
+
 	It("stops the fork when a branch never started and its retries are spent", func() {
 		setUp()
 		forked(string(security))
@@ -330,6 +358,219 @@ var _ = Describe("a fork", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer forks"))))
+	})
+
+	// cancelledLines is every phase in tk's history recorded Cancelled.
+	cancelledLines := func(tk *flowv1alpha1.Task) []flowv1alpha1.Phase {
+		var out []flowv1alpha1.Phase
+		for _, h := range tk.Status.History {
+			if transition.Outcome(h.Outcome) == transition.OutcomeCancelled {
+				out = append(out, h.Phase)
+			}
+		}
+		return out
+	}
+
+	// jobGone reports whether phase's Job at runID is gone or on its way out.
+	jobGone := func(phase flowv1alpha1.Phase, runID int32) bool {
+		var job batchv1.Job
+		err := k8sClient.Get(fx.ctx, types.NamespacedName{
+			Name: runner.JobName(fx.name, phase, runID, 0), Namespace: resourceNamespace,
+		}, &job)
+		return apierrors.IsNotFound(err) || job.DeletionTimestamp != nil
+	}
+
+	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying who fills one that never started", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+
+		fail(jobOf(security, 3), batchv1.JobReasonBackoffLimitExceeded)
+
+		var flow flowv1alpha1.TaskFlow
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
+		delete(flow.Spec.Bindings, security)
+		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer says who fills run"))))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
+			"none of the branches was asked an answer, so all of them are cancelled rather than judged")
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped: it was still running when the flow broke", phase)
+		}
+		Expect(jobGone(security, 3)).To(BeFalse(),
+			"security's Job had already finished (it never started); cancelled or not, a finished Job's pod stays as autopsy material")
+	})
+
+	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying what a finished branch may answer with", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+
+		answer(jobOf(security, 3), dirDone)
+
+		var flow flowv1alpha1.TaskFlow
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
+		delete(flow.Spec.Bindings, security)
+		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer says what run"))))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
+			"the branch that finished is cancelled along with the rest: its answer was never read")
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped: it was still running when the flow broke", phase)
+		}
+		Expect(jobGone(security, 3)).To(BeFalse(),
+			"security's Job had already finished (it answered); cancelled or not, a finished Job's pod stays as autopsy material")
+	})
+
+	It("cancels a fork's branches when the fork phase itself loses its binding while they run", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+
+		// Unlike removing Join (which forks still sees, just no longer as a
+		// fork), deleting the binding outright is caught by Reconcile itself,
+		// ahead of driveBranches: status.phase names the fork while its
+		// branches run (ADR-0013 決定8), so this is the "phase lost its
+		// binding" path, not driveBranches's own "no longer forks" one.
+		var flow flowv1alpha1.TaskFlow
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
+		delete(flow.Spec.Bindings, phaseInvestigate)
+		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("lost its binding"))))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
+			"the branches were still running, unasked, when the fork's own binding disappeared")
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+	})
+
+	It("keeps a cancelled branch's work out of the cleanup run's sweep while its Job's grace period runs", func() {
+		// A flow of its own, not setUp: this is the one spec that needs every
+		// handler on the flow workspace, including the fork's own and the
+		// cleanup's, which setUp's mut only reaches for the branches and the
+		// join (task_workspace_test.go's onFlowWorkspace, spelled out here
+		// because its helpers are local to that file).
+		onFlowWorkspace := func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.Workspace.Volume = contract.WorkspaceVolume
+			spec := &h.Spec.JobTemplate.Template.Spec
+			spec.Volumes = nil
+			spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
+		}
+		cleanupName := fx.name + "-cleanup"
+		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirDone, flowv1alpha1.PhaseEscalated: dirStuck}
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanupName, Done: dirDone}
+			f.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+				phaseInvestigate: {
+					Handler: fx.name,
+					Next: map[flowv1alpha1.Phase]string{
+						security: string(security), logic: string(logic), flowv1alpha1.PhaseEscalated: dirStuck,
+					},
+					Join: &flowv1alpha1.JoinSpec{Phase: phaseReport, Always: []flowv1alpha1.Phase{tests}},
+				},
+				security:    {Handler: handlerFor(security), Next: toReport},
+				logic:       {Handler: handlerFor(logic), Next: toReport},
+				tests:       {Handler: handlerFor(tests), Next: toReport},
+				phaseReport: {Handler: handlerFor(phaseReport), Next: map[flowv1alpha1.Phase]string{phaseDone: "ok"}},
+			}
+		})
+		fx.makeHandler(onFlowWorkspace)
+		for _, phase := range []flowv1alpha1.Phase{security, logic, tests, phaseReport} {
+			fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+				h.Name = handlerFor(phase)
+				h.Spec.Phase = phase
+				onFlowWorkspace(h)
+			})
+		}
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Name = cleanupName
+			h.Spec.Phase = flowv1alpha1.PhaseFinally
+			onFlowWorkspace(h)
+		})
+
+		forked(string(logic) + "/" + string(security))
+		answer(jobOf(logic, 2), dirStuck) // decides Escalated; security(3) and tests(4) are cancelled
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(taskstate.Current(&tk.Status)).NotTo(BeNil(), "the flow declares a cleanup run")
+		Expect(taskstate.Current(&tk.Status).Phase).To(Equal(flowv1alpha1.PhaseFinally))
+
+		fx.reconcile() // creates the cleanup run's Job
+		cleanup := jobOf(flowv1alpha1.PhaseFinally, taskstate.Current(&fx.get().Status).RunID)
+		prepare := cleanup.Spec.Template.Spec.InitContainers[0]
+		var sweep string
+		for i, arg := range prepare.Args {
+			if arg == "--"+contract.FlagSweep && i+1 < len(prepare.Args) {
+				sweep = prepare.Args[i+1]
+			}
+		}
+		Expect(sweep).NotTo(BeEmpty(), "the fork's own settled run is swept, so the flag is present")
+		Expect(sweep).NotTo(ContainSubstring("3"), "security's Cancelled work stays while its Job's grace period runs")
+		Expect(sweep).NotTo(ContainSubstring("4"), "tests's Cancelled work stays while its Job's grace period runs")
+	})
+
+	It("reaps a cancelled branch's Job on later reconciles too, when a flow with no finally already dated the task", func() {
+		setUp()
+		var flow flowv1alpha1.TaskFlow
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
+		flow.Spec.TTL = &flowv1alpha1.TTLSpec{Failed: &metav1.Duration{Duration: time.Hour}}
+		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+
+		forked(string(logic) + "/" + string(security))
+		answer(jobOf(logic, 2), dirStuck) // decides Escalated; security(3) and tests(4) are cancelled
+		fx.reconcile()                    // settles Escalated; no finally, so ExpiresAt is set in the same write
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.ExpiresAt).NotTo(BeNil(), "no finally means the date is written the moment the task stops")
+		Expect(cancelledLines(tk)).To(ConsistOf(security, tests))
+
+		// Stands in for the delete this reconcile just issued having failed:
+		// a Job still carries security's Cancelled run number.
+		leftover := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      runner.JobName(fx.name, security, 3, 1),
+				Namespace: resourceNamespace,
+				Labels: map[string]string{
+					runner.LabelTaskUID: string(fx.taskUID),
+					runner.LabelRunID:   "3",
+				},
+			},
+			Spec: batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyNever,
+						Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(fx.ctx, leftover)).To(Succeed())
+
+		fx.reconcile() // ExpiresAt is set and remaining > 0: Reconcile's early-return path, not terminal's
+
+		var got batchv1.Job
+		err := k8sClient.Get(fx.ctx, types.NamespacedName{Name: leftover.Name, Namespace: resourceNamespace}, &got)
+		Expect(apierrors.IsNotFound(err) || got.DeletionTimestamp != nil).To(BeTrue(),
+			"the ExpiresAt early-return still gives a Cancelled branch's Job another try, not just terminal's own")
 	})
 
 })

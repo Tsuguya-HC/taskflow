@@ -429,6 +429,11 @@ test: {handler: test, next: {Review: done, Escalated: stuck}}
 - その reconcile で終わった枝はまとめて決着させる（`taskstate.SettleBranches`）。1 本でも `Escalated`（や
   `Failed`）に着いたら Task はそこで止まり、まだ走っている枝は `Cancelled` として記録して Job を消す
   （fail-fast）。history には「決着した他の枝 → `Cancelled` の枝 → 終端を決めた枝」の順に積む
+- Job の削除は status の書き込みの**後**に行う（先に書けば削除が失敗しても metric と Event は届く）。
+  削除そのものは history から読み直せる状態そのもの（`reapCancelledJobs`）にしてあり、その reconcile で
+  失敗しても、コントローラが再起動しても、後続の reconcile（cleanup run が始まる前も含む）が同じ
+  Cancelled 行を見つけて改めて消す。定義が壊れて `driveBranches` に入れないまま Task が Failed になる
+  経路（フェーズの binding 自体が消えた等）も同じ関数を通る
 - v1 の制限: 枝はフェーズ 1 つ、枝は Job runner だけ（State の枝は実行時に `Failed`）
 
 1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
@@ -593,7 +598,7 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 | フィールド | 拒否する理由 | 担保の実態 |
 |---|---|---|
 | `backoffLimit`（0 以外） | リトライ機構が 2 つになる。再試行してよいのは「何も走らなかった」ときだけで（`collect.Ran`）、それを判定し attempt を数えるのはコントローラ。Job 内リトライは走った handler を数えずに黙ってやり直す | **型から除去。** `JobTemplate` に対応するフィールドが無く、書けない |
-| `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化 | 同上 |
+| `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化（`Cancelled` と記録された並列の枝の Job だけが例外 — ADR-0013 決定4、`reapCancelledJobs`。まだ終わっていないものだけを対象にし、TTL を待たない） | 同上 |
 | `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） | 同上 |
 | `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる | 同上 |
 | `restartPolicy: OnFailure` | 同上（Pod 内再起動で run ディレクトリに前回の残骸が残る）。`Never` のみ許可 | **reconcile 時に Go コードで拒否**（`internal/runner/job.go` の `checkReserved`）。Task が動く時点で `Failed` になるのであって、`TaskHandler` の作成自体は防げていない |
@@ -1161,8 +1166,10 @@ workspace でだけ使え、template の volume で頼むと BuildJob が拒否�
 **残骸は次の run の prepare が掃除する**（同 ADR-0003）。prepare は publish と同じくボリュームの
 ルートをマウントし（`work/` と `results/` の両方に届く必要がある — 後者は Pod を持たなかった run の
 棚を敷くため。ADR-0011 決定7）、自分の run ディレクトリを作ってから、コントローラが計算した sweep リスト（何が生きているかを知る
-のはコントローラだけ。自 runID 未満のうち、並列の他の枝として今も走っている run を除いた全部）にある
-`work/<id>` を消す。封印済みは rename で work/ に居ないので、消えるのは封印できず死んだ run の
+のはコントローラだけ。自 runID 未満のうち、並列の他の枝として今も走っている run と、history が
+`Cancelled` と記録した run を除いた全部）にある `work/<id>` を消す。Job の削除は要求であって確約では
+ない（下記）ので、`Cancelled` の run は Job が消えたかどうかに関わらず外す — 猶予期間中の Pod がまだ
+publish を書きうる間は、sweep から見て走っている枝と同じ扱いになる。封印済みは rename で work/ に居ないので、消えるのは封印できず死んだ run の
 残骸だけ。消せなければ（NFS の sillyrename ゴースト等）エラー = その run は始まらず infra retry へ
 — 係争中のボリュームで新しい仕事を始めない。Escalated で止まった Task には次の run が来ないので、
 その残骸は検死素材として TTL まで残る。vct を書かない
@@ -1364,8 +1371,9 @@ Job controller が先に `DeadlineExceeded` を報告する。コントローラ
 とき**のためにあり、deadline + 猶予 1 分（`deadlineGrace`）で requeue して、まだ終わっていなければ
 読まずに Escalated にする。Pod が terminating で固まって Job の `Failed` 条件が付かない
 （1.31 以降、`Failed` は全 Pod 終了後にしか付かない）ケースがこの経路の対象。
-**Job は消さない**（RBAC に delete は無い）。Escalated 後も Job は Task の TTL で一緒に消えるまで残り、
-人間が中を見られる。
+この経路自身は Job を消さない。Escalated 後も Job は Task の TTL で一緒に消えるまで残り、
+人間が中を見られる。消すのは ADR-0013 決定4 で `Cancelled` と記録した、まだ終わっていない枝の Job
+だけ（`reapCancelledJobs`。§4 並列フェーズ、§7 sweep）。
 
 同時に分かったこと: apiserver（1.36）は Job の status 遷移を検証する。`Complete=True` には
 `SuccessCriteriaMet=True` と `startTime` / `completionTime` が、`Failed=True` には
@@ -1585,6 +1593,7 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 | 層 | 手段 |
 |---|---|
 | K8s 内（Workflow / PVC / ConfigMap） | **ownerReferences** で Task 所有 → カスケード |
+| 並列の枝（`Cancelled`）の Job | **`reapCancelledJobs`**（history の `Cancelled` の行を根拠に、Task の TTL を待たずに消す。終わった Job は残す。ADR-0013 決定4） |
 | Task 自身 | **TTL**（succeeded 1h / failed 168h）※ etcd 保護のため必須 |
 | K8s の外（S3 prefix / git ブランチ / レジストリのタグ） | **`task-uid` + 定期 sweep**（1 本に統合） |
 
@@ -1614,7 +1623,11 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
   flow 無しで終端なのと同じ理由）。flow が存在せず `Failed` になった Task は読む TTL が無い間は残る。これは意図した
   仕様で、**同名の flow が後から現れれば次の reconcile で backfill され、その TTL で消える**（下記）
 - `ttl` は CRD default（`succeeded: 1h` / `failed: 168h`）で埋まる。「必須」は validation ではなく default で満たす
-- コントローラは `expiresAt` を過ぎた Task を UID 前提条件付きで delete する。Job は ownerReference で追従する
+- コントローラは `expiresAt` を過ぎた Task を UID 前提条件付きで delete する。Job は ownerReference で追従する。
+  `Cancelled` と記録された枝の Job だけは待たない — `finally` を持たない flow は終端に着いた同じ書き込みで
+  `expiresAt` を焼くので、Reconcile 冒頭のその早期 return（`remaining > 0` で requeue するだけの分岐）でも
+  `reapCancelledJobs` を呼び、削除が前の reconcile やコントローラ再起動で取りこぼされていれば期限前でも拾う。
+  history に `Cancelled` の行が無い Task では List すら発生しない
 - この機能より前に終端へ着いた Task（`expiresAt` が無い）は、次の reconcile で早期 return する分岐の直前に
   flow の TTL から一度だけ焼く（backfill）。この reconcile 時点でも flow が無ければ焼かずに残り、上と同じく
   flow が後から現れるのを待つ

@@ -72,6 +72,7 @@ const (
 	phaseSort     flowv1alpha1.Phase = "sort"
 	answerDone                       = "done"
 	answerStuck                      = "stuck"
+	dirBothChosen                    = "logic/security"
 )
 
 // The review fork: pick chooses security and logic, tests always runs, and all
@@ -116,13 +117,16 @@ func TestLedByAtAFork(t *testing.T) {
 			flowv1alpha1.HistoryEntry{Phase: phaseSecurity, RunID: 2, Directory: answerDone, Outcome: string(transition.OutcomeDeclared)})}}
 		prev, got := ledBy(task, flow, &flowv1alpha1.RunRef{Phase: phaseSort, RunID: 4})
 		want := []runner.InputEntry{{Phase: phaseSecurity, RunID: 2, Directory: answerDone}, {Phase: phaseTests, RunID: 3, Directory: answerDone}}
-		if prev != 3 || !reflect.DeepEqual(got, want) {
-			t.Fatalf("ledBy = %d, %+v; want 3, %+v", prev, got, want)
+		// security is recorded last in history, even though its RunID (2) is
+		// lower than tests's (3): it is the branch that arrived last, which is
+		// what prev-run-id names (ADR-0013 決定8), not the highest RunID among them.
+		if prev != 2 || !reflect.DeepEqual(got, want) {
+			t.Fatalf("ledBy = %d, %+v; want 2, %+v", prev, got, want)
 		}
 	})
 	t.Run("the cleanup run after a branch stopped the task is shown every branch sent to Escalated", func(t *testing.T) {
 		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated, History: []flowv1alpha1.HistoryEntry{
-			{Phase: phasePick, RunID: 1, Directory: "logic/security", Outcome: string(transition.OutcomeDeclared)},
+			{Phase: phasePick, RunID: 1, Directory: dirBothChosen, Outcome: string(transition.OutcomeDeclared)},
 			{Phase: phaseTests, RunID: 4, Directory: answerDone, Outcome: string(transition.OutcomeDeclared)},
 			{Phase: phaseSecurity, RunID: 3, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
 			{Phase: phaseLogic, RunID: 2, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
@@ -136,4 +140,71 @@ func TestLedByAtAFork(t *testing.T) {
 			t.Fatalf("endingOutcome = %q, want the deciding branch's", got)
 		}
 	})
+	t.Run("the cleanup run is not shown a branch that was cancelled rather than sent to Escalated", func(t *testing.T) {
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated, History: []flowv1alpha1.HistoryEntry{
+			{Phase: phasePick, RunID: 1, Directory: dirBothChosen, Outcome: string(transition.OutcomeDeclared)},
+			{Phase: phaseTests, RunID: 4, Outcome: string(transition.OutcomeCancelled)},
+			{Phase: phaseSecurity, RunID: 3, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
+			{Phase: phaseLogic, RunID: 2, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
+		}}}
+		prev, got := ledBy(task, flow, &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 5})
+		want := []runner.InputEntry{{Phase: phaseLogic, RunID: 2, Directory: answerStuck}, {Phase: phaseSecurity, RunID: 3, Directory: answerStuck}}
+		if prev != 2 || !reflect.DeepEqual(got, want) {
+			t.Fatalf("ledBy = %d, %+v; want 2 (the deciding branch), %+v (the cancelled branch left out)", prev, got, want)
+		}
+	})
+	t.Run("the cleanup run is not shown a branch that reworked rather than being sent to Escalated", func(t *testing.T) {
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated, History: []flowv1alpha1.HistoryEntry{
+			{Phase: phasePick, RunID: 1, Directory: dirBothChosen, Outcome: string(transition.OutcomeDeclared)},
+			{Phase: phaseTests, RunID: 4, Directory: answerDone, Outcome: string(transition.OutcomeRework)},
+			{Phase: phaseSecurity, RunID: 3, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
+			{Phase: phaseLogic, RunID: 2, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
+		}}}
+		prev, got := ledBy(task, flow, &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 5})
+		want := []runner.InputEntry{{Phase: phaseLogic, RunID: 2, Directory: answerStuck}, {Phase: phaseSecurity, RunID: 3, Directory: answerStuck}}
+		if prev != 2 || !reflect.DeepEqual(got, want) {
+			t.Fatalf("ledBy = %d, %+v; want 2 (the deciding branch), %+v (the reworked branch left out)", prev, got, want)
+		}
+	})
+}
+
+// decidingLine must judge a fork's branch on its outcome before ever
+// checking the RunID-1 rule meant for a serial flow's last line: a branch
+// numbered one below the cleanup run by pure coincidence, but which reached
+// the join rather than stopping the task, is not the line that decided the
+// ending.
+func TestDecidingLineJudgesAForksBranchByOutcomeBeforeRunIDCoincidence(t *testing.T) {
+	flow := reviewFork()
+	history := []flowv1alpha1.HistoryEntry{
+		{Phase: phasePick, RunID: 1, Directory: string(phaseSecurity), Outcome: string(transition.OutcomeDeclared)},
+		{Phase: phaseSecurity, RunID: 2, Directory: answerDone, Outcome: string(transition.OutcomeDeclared)},
+	}
+	task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated, History: history}}
+	if i := decidingLine(task, flow, &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3}); i != -1 {
+		t.Fatalf("decidingLine = %d, want -1: a branch that reached the join never decided the ending, whatever its RunID", i)
+	}
+}
+
+// A Cancelled line must never be read as the one that decided the ending,
+// even when the fork it belonged to can no longer be recognized as one —
+// exactly the shape failBranches leaves behind when the branches' own
+// binding is removed from the flow while they run (§5, ADR-0009 決定6).
+// forkOf reads the current flow, so without this check first, a Cancelled
+// branch numbered one below the cleanup run by coincidence would fall
+// through to the serial RunID-1 rule and be mistaken for it.
+func TestDecidingLineNeverCountsACancelledLineEvenWhenTheForkIsGone(t *testing.T) {
+	flow := reviewFork()
+	delete(flow.Bindings, phasePick) // the fork itself is gone, as failBranches's own trigger requires
+	history := []flowv1alpha1.HistoryEntry{
+		{Phase: phasePick, RunID: 1, Directory: string(phaseSecurity), Outcome: string(transition.OutcomeDeclared)},
+		{Phase: phaseSecurity, RunID: 2, Outcome: string(transition.OutcomeCancelled)},
+	}
+	task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseFailed, History: history}}
+	cleanup := &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3} // one past the Cancelled line's RunID by coincidence
+	if i := decidingLine(task, flow, cleanup); i != -1 {
+		t.Fatalf("decidingLine = %d, want -1: a Cancelled line never decided anything, whatever its RunID", i)
+	}
+	if got := endingOutcome(task, flow, cleanup); got != "" {
+		t.Fatalf("endingOutcome = %q, want empty", got)
+	}
 }

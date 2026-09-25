@@ -214,6 +214,21 @@ func SettleBranches(
 	move(status, flow, deciding.Result, now)
 }
 
+// CancelBranches records every run still in flight as Cancelled and clears
+// them — the shape SettleBranches (決定4) gives a branch that was not the one
+// to decide, except here nothing decided anything: the flow's own definition
+// broke while they ran, so every branch stops the same way, under the same
+// reason. It returns what it cancelled, so the caller can stop their Jobs
+// the way any other cancelled branch's is.
+func CancelBranches(status *flowv1alpha1.TaskStatus, reason string, now metav1.Time) []flowv1alpha1.RunRef {
+	cancelled := slices.Clone(status.CurrentRuns)
+	for i := range cancelled {
+		record(status, &cancelled[i], "", transition.OutcomeCancelled, reason, now)
+	}
+	status.CurrentRuns = nil
+	return cancelled
+}
+
 // Branching reports whether the runs in flight are a fork's branches: the
 // task stands at a phase none of them names. That is the one shape in which
 // status.phase and the runs part other than the cleanup run (ADR-0013 決定8),

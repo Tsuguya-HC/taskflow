@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -208,6 +209,76 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		}))).To(BeNumerically("==", 1))
 	})
 
+	// orphanJob stands in for a Cancelled run's Job that a status write
+	// outlived — the delete after it never ran, failed, or the controller
+	// restarted in between. It is built by hand rather than driven through a
+	// fork, because reapCancelledJobs reads history and the Job list, not any
+	// ref a caller happens to be holding: whatever carries the right labels
+	// counts, however it came to exist.
+	orphanJob := func(fx *fixture, runID int32, finished bool) *batchv1.Job {
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      runner.JobName(fx.name, "orphan", runID, 0),
+				Namespace: resourceNamespace,
+				Labels: map[string]string{
+					runner.LabelTaskUID: string(fx.taskUID),
+					runner.LabelRunID:   strconv.Itoa(int(runID)),
+				},
+			},
+			Spec: batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyNever,
+						Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(fx.ctx, job)).To(Succeed())
+		if finished {
+			now := metav1.Now()
+			job.Status.StartTime = &now
+			job.Status.CompletionTime = &now
+			job.Status.Conditions = append(job.Status.Conditions,
+				batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+				batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+			Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+		}
+		return job
+	}
+
+	It("finishes deleting a cancelled run's Job on a later reconcile, ahead of the cleanup run", func() {
+		fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		runPhase("ok\nnothing to report")
+
+		// A Cancelled line this task never actually produced (this flow
+		// never forks) — reapCancelledJobs does not care how it got there,
+		// only that history says so.
+		tk := fx.get()
+		tk.Status.History = append(tk.Status.History,
+			flowv1alpha1.HistoryEntry{Phase: "枝A", RunID: 98, Outcome: string(transition.OutcomeCancelled)},
+			flowv1alpha1.HistoryEntry{Phase: "枝B", RunID: 99, Outcome: string(transition.OutcomeCancelled)})
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		finished := orphanJob(fx, 98, true)
+		stillRunning := orphanJob(fx, 99, false)
+
+		fx.reconcile() // reapCancelledJobs runs ahead of creating the cleanup Job
+
+		var got batchv1.Job
+		err := k8sClient.Get(fx.ctx, types.NamespacedName{Name: stillRunning.Name, Namespace: resourceNamespace}, &got)
+		Expect(apierrors.IsNotFound(err) || got.DeletionTimestamp != nil).To(BeTrue(),
+			"the Job a delete never reached the first time is caught on this later reconcile")
+
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: finished.Name, Namespace: resourceNamespace}, &got)).To(Succeed())
+		Expect(got.DeletionTimestamp).To(BeNil(), "a Job that already finished keeps its pod as autopsy material")
+
+		Expect(cleanupJob()).NotTo(BeNil(), "the cleanup run is still started; the reap ahead of it does not block it")
+	})
+
 	// Escalated is the motive for the whole feature: nothing can be bound to
 	// it, so until now a task that ended there had no run left in which to put
 	// anything back.
@@ -358,10 +429,9 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no cleanup run was started")
 	})
 
-	// outcomeOf looks the ending's run up by number rather than reading
-	// history's last line, because a run that never settles leaves the two
-	// disagreeing: the tail is then some earlier run's verdict, not this
-	// ending's (決定 6, P8).
+	// decidingLine looks the ending's run up rather than reading history's
+	// last line, because a run that never settles leaves the two disagreeing:
+	// the tail is then some earlier run's verdict, not this ending's (決定 6, P8).
 	It("tells the cleanup run nothing when the run before it never settled, rather than history's last line", func() {
 		reportHandler := fx.name + "-report"
 		flow := fx.makeFlow(withCleanup, func(f *flowv1alpha1.TaskFlow) {
