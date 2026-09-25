@@ -48,6 +48,40 @@ var _ = Describe("a flow with a workspace", func() {
 		spec.Volumes = nil
 		spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
 	}
+	// answer finishes job as though its publish container had named dir:
+	// a pod that terminated with dir as its message, and the Job complete —
+	// the same shape task_finish_test.go's specs drive, spelled out here
+	// because its helpers are local to that file.
+	answer := func(job *batchv1.Job, dir string) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      job.Name,
+				Namespace: resourceNamespace,
+				Labels:    map[string]string{batchv1.ControllerUidLabel: string(job.UID)},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+			},
+		}
+		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
+		pod.Status.Phase = corev1.PodSucceeded
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  agentName,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: dir}},
+		}}
+		Expect(k8sClient.Status().Update(fx.ctx, pod)).To(Succeed())
+
+		now := metav1.Now()
+		job.Status.StartTime = &now
+		job.Status.CompletionTime = &now
+		job.Status.Conditions = append(job.Status.Conditions,
+			batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+			batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+	}
+
 	pvcKey := func(tk *flowv1alpha1.Task) types.NamespacedName {
 		return types.NamespacedName{Name: runner.WorkspacePVCName(tk.Name, tk.UID), Namespace: resourceNamespace}
 	}
@@ -169,36 +203,7 @@ var _ = Describe("a flow with a workspace", func() {
 		fx.reconcile() // creates the claim and the first Job
 		job := fx.job(1)
 
-		// A pod whose publish container named "more", which is the self-loop
-		// edge — the same shape task_finish_test.go's rework spec drives,
-		// spelled out here because its helpers are local to that file.
-		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      job.Name,
-				Namespace: resourceNamespace,
-				Labels:    map[string]string{batchv1.ControllerUidLabel: string(job.UID)},
-			},
-			Spec: corev1.PodSpec{
-				RestartPolicy: corev1.RestartPolicyNever,
-				Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
-			},
-		}
-		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
-		pod.Status.Phase = corev1.PodSucceeded
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:  agentName,
-			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Message: nextMore}},
-		}}
-		Expect(k8sClient.Status().Update(fx.ctx, pod)).To(Succeed())
-
-		now := metav1.Now()
-		job.Status.StartTime = &now
-		job.Status.CompletionTime = &now
-		job.Status.Conditions = append(job.Status.Conditions,
-			batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
-			batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
-		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+		answer(job, nextMore)
 
 		fx.reconcile() // the rework lands on run 2
 		Expect(fx.get().Status.RunID).To(BeEquivalentTo(2))
@@ -210,6 +215,47 @@ var _ = Describe("a flow with a workspace", func() {
 			contract.SubcommandPrepare, "--" + contract.FlagOut, "/workspace/work/2",
 			"--" + contract.FlagSweep, "1",
 		}), "run 1 sealed, but the sweep list names every run before this one either way")
+	})
+
+	// The inputs view is what a handler reads the answer that led to its run
+	// through (ADR-0013 決定6): the run before wrote "more" into its own
+	// directory, and the next run finds it under the phase that wrote it,
+	// read-only, straight off the shelf — knowing neither the run's number
+	// nor that phase's name. The first run of a task has nothing that led to
+	// it, so its view is simply absent.
+	It("shows the next run the answer that led to it", func() {
+		fx.makeFlow(withWorkspace, func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
+				Handler: fx.name,
+				Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseInvestigate: nextMore},
+			}
+		})
+		fx.makeHandler(onFlowWorkspace, func(h *flowv1alpha1.TaskHandler) {
+			c := &h.Spec.JobTemplate.Template.Spec.Containers[0]
+			c.VolumeMounts = append(c.VolumeMounts,
+				corev1.VolumeMount{Name: contract.WorkspaceVolume, MountPath: "/inputs", SubPath: "inputs", ReadOnly: true})
+		})
+		fx.makeTask()
+
+		fx.reconcile() // settles the starting phase
+		fx.reconcile() // creates the claim and the first Job
+		first := fx.job(1)
+		Expect(first.Spec.Template.Spec.Containers[0].VolumeMounts).NotTo(ContainElement(
+			HaveField("MountPath", HavePrefix("/inputs"))), "nothing led to the first run")
+
+		answer(first, nextMore)
+		fx.reconcile() // the rework lands on run 2
+		fx.reconcile() // creates the second Job
+
+		mounts := fx.job(2).Spec.Template.Spec.Containers[0].VolumeMounts
+		Expect(mounts).To(ContainElement(corev1.VolumeMount{
+			Name:      contract.WorkspaceVolume,
+			MountPath: "/inputs/" + string(phaseInvestigate),
+			SubPath:   "results/1/" + nextMore,
+			ReadOnly:  true,
+		}))
+		Expect(mounts).NotTo(ContainElement(HaveField("SubPath", "inputs")),
+			"the view is replaced by what it shows, not mounted as a directory of its own")
 	})
 
 	// A retry is not a new run, so it comes back to the same directory rather

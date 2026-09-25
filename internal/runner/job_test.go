@@ -1301,3 +1301,71 @@ func TestNoShelfOnATemplateVolume(t *testing.T) {
 		}
 	}
 }
+
+// reader adds a container that asks for the inputs view of the flow
+// workspace, beside the handler's own agent.
+func reader(h *flowv1alpha1.TaskHandler) {
+	spec := &h.Spec.JobTemplate.Template.Spec
+	spec.Containers = append(spec.Containers, corev1.Container{
+		Name: "reader", Image: "example.invalid/reader:v0",
+		VolumeMounts: []corev1.VolumeMount{{Name: contract.WorkspaceVolume, MountPath: "/inputs", SubPath: "inputs", ReadOnly: true}},
+	})
+}
+
+func mountsOf(t *testing.T, job *batchv1.Job, container string) []corev1.VolumeMount {
+	t.Helper()
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name == container {
+			return c.VolumeMounts
+		}
+	}
+	t.Fatalf("no container %q in the Job", container)
+	return nil
+}
+
+// Each answer that led here is shown at <mountPath>/<phase>, read-only,
+// straight from the shelf (ADR-0013 決定6): the handler reads it without
+// knowing the run's number or the phase's name in advance.
+func TestTheInputsViewShowsEachAnswerThatLedHere(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(flowWorkspace, reader), Phase: phaseInvestigate, RunID: 4, WorkspacePVC: claimName,
+		Inputs: []InputEntry{{Phase: "security", RunID: 2, Directory: "done"}, {Phase: "tests", RunID: 3, Directory: "done"}},
+	})
+
+	want := []corev1.VolumeMount{
+		{Name: contract.WorkspaceVolume, MountPath: "/inputs/security", SubPath: "results/2/done", ReadOnly: true},
+		{Name: contract.WorkspaceVolume, MountPath: "/inputs/tests", SubPath: "results/3/done", ReadOnly: true},
+	}
+	if got := mountsOf(t, job, "reader"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reader mounts = %+v, want %+v", got, want)
+	}
+	if got := mountsOf(t, job, "agent")[0].SubPath; got != "work/4" {
+		t.Fatalf("agent subPath = %q; a mount that does not ask for the view is untouched by it", got)
+	}
+}
+
+// Nothing led to a task's first run, so its view is absent rather than an
+// empty directory the framework would have to lay somewhere.
+func TestTheInputsViewWithNothingToShowIsDropped(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(flowWorkspace, reader), Phase: phaseInvestigate, RunID: 1, WorkspacePVC: claimName})
+	if got := mountsOf(t, job, "reader"); len(got) != 0 {
+		t.Fatalf("reader mounts = %+v, want none", got)
+	}
+}
+
+// The view is shown from the results/ shelf, which a template volume does not
+// have; asking for it there would mount a directory that does not exist.
+func TestRefusesTheInputsViewOnATemplateVolume(t *testing.T) {
+	h := handler(func(h *flowv1alpha1.TaskHandler) {
+		spec := &h.Spec.JobTemplate.Template.Spec
+		spec.Containers = append(spec.Containers, corev1.Container{
+			Name: "reader", Image: "example.invalid/reader:v0",
+			VolumeMounts: []corev1.VolumeMount{{Name: h.Spec.Workspace.Volume, MountPath: "/inputs", SubPath: "inputs", ReadOnly: true}},
+		})
+	})
+	_, err := BuildJob(Input{Task: task(), Handler: h, Phase: phaseInvestigate, RunID: 2, SidecarImage: sidecarImage,
+		Inputs: []InputEntry{{Phase: phaseInvestigate, RunID: 1, Directory: "ok"}}})
+	if !errors.Is(err, ErrWorkspace) {
+		t.Fatalf("err = %v, want ErrWorkspace", err)
+	}
+}

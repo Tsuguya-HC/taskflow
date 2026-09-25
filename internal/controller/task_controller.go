@@ -1268,6 +1268,7 @@ func (r *TaskReconciler) ensureJob(
 		WorkspacePVC: workspacePVC,
 		SweepRuns:    sweepRuns(run.RunID),
 		Shelve:       shelfHoles(task),
+		Inputs:       inputsFor(task, run),
 	})
 	if err != nil {
 		// A template that breaks an invariant is a definition problem, so it
@@ -1393,6 +1394,26 @@ func shelfHoles(task *flowv1alpha1.Task) []runner.ShelfEntry {
 		holes = append(holes, runner.ShelfEntry{RunID: h.RunID, Directory: h.Directory})
 	}
 	return holes
+}
+
+// inputsFor is the answer that led to run: the one the run before it wrote,
+// read off history, and nothing when that run wrote none or there was no run
+// before it. While runs are strictly serial that is always exactly the run
+// numbered one less — for a phase's run it is the move that brought the task
+// here, and for the cleanup run it is the run finally's ending env is read
+// from as well (endingFor), so the two can never describe different runs. A
+// cleanup run never leads anywhere, so its own line is never an input.
+func inputsFor(task *flowv1alpha1.Task, run *flowv1alpha1.RunRef) []runner.InputEntry {
+	for _, h := range slices.Backward(task.Status.History) {
+		if h.RunID != run.RunID-1 {
+			continue
+		}
+		if h.Directory == "" || h.Phase.IsFinally() {
+			return nil
+		}
+		return []runner.InputEntry{{Phase: h.Phase, RunID: h.RunID, Directory: h.Directory}}
+	}
+	return nil
 }
 
 // sweepRuns is every run before this one — what prepare may clear out of
