@@ -39,6 +39,10 @@ const (
 	dirStuck = "stuck"
 )
 
+// The field every refusal of join.always is reported under: each case lists
+// exactly one phase there.
+const fieldPickAlways = `spec.bindings[観点出し].join.always[0]`
+
 func forkFlow() *flowv1alpha1.TaskFlowSpec {
 	toSort := func() map[flowv1alpha1.Phase]string {
 		return map[flowv1alpha1.Phase]string{phaseSort: dirDone, flowv1alpha1.PhaseEscalated: dirStuck}
@@ -116,7 +120,7 @@ func TestRefusesAMalformedFork(t *testing.T) {
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phasePick].Join.Always = []flowv1alpha1.Phase{phaseSecurity}
 			},
-			field:   `spec.bindings[観点出し].join.always[0]`,
+			field:   fieldPickAlways,
 			mention: "already one of the fork's destinations",
 		},
 		{
@@ -124,7 +128,7 @@ func TestRefusesAMalformedFork(t *testing.T) {
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phasePick].Join.Always = []flowv1alpha1.Phase{phaseSort}
 			},
-			field:   `spec.bindings[観点出し].join.always[0]`,
+			field:   fieldPickAlways,
 			mention: "neither the fork",
 		},
 		{
@@ -132,7 +136,7 @@ func TestRefusesAMalformedFork(t *testing.T) {
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phasePick].Join.Always = []flowv1alpha1.Phase{phasePick}
 			},
-			field:   `spec.bindings[観点出し].join.always[0]`,
+			field:   fieldPickAlways,
 			mention: "neither the fork",
 		},
 		{
@@ -140,7 +144,7 @@ func TestRefusesAMalformedFork(t *testing.T) {
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phasePick].Join.Always = []flowv1alpha1.Phase{flowv1alpha1.PhaseEscalated}
 			},
-			field:   `spec.bindings[観点出し].join.always[0]`,
+			field:   fieldPickAlways,
 			mention: "someone runs",
 		},
 		{
@@ -148,7 +152,7 @@ func TestRefusesAMalformedFork(t *testing.T) {
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings[phasePick].Join.Always = []flowv1alpha1.Phase{flowv1alpha1.PhaseFinally}
 			},
-			field:   `spec.bindings[観点出し].join.always[0]`,
+			field:   fieldPickAlways,
 			mention: "someone runs",
 		},
 		{
@@ -232,7 +236,7 @@ func TestRefusesAPhaseNameThatIsNotAPathElement(t *testing.T) {
 	spec.Bindings[phaseReport].Next["棚/上げ"] = "shelve"
 	spec.Bindings["棚/上げ"] = flowv1alpha1.PhaseBinding{
 		Handler: handlerNobody,
-		Next:    map[flowv1alpha1.Phase]string{phaseDone: "shelved"},
+		Next:    map[flowv1alpha1.Phase]string{phaseDone: dirShelved},
 	}
 	for _, line := range check(spec) {
 		if strings.HasPrefix(line, `spec.bindings[棚/上げ]:`) && strings.Contains(line, "inputs view") {

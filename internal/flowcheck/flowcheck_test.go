@@ -52,6 +52,7 @@ const (
 	handlerCleanup = "cleanup"
 	dirBroken      = "broken"
 	dirNested      = "nested/sent"
+	dirShelved     = "shelved"
 )
 
 // The field 報告's edge to おわり is reported under, and the reason a name
@@ -299,7 +300,7 @@ func TestRefuses(t *testing.T) {
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				s.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
 					Handler: handlerNobody,
-					Next:    map[flowv1alpha1.Phase]string{phaseDone: "shelved"},
+					Next:    map[flowv1alpha1.Phase]string{phaseDone: dirShelved},
 				}
 			},
 			field:   `spec.bindings[棚上げ]`,
@@ -374,7 +375,7 @@ func TestTheReportIsStable(t *testing.T) {
 		spec.Bindings[phaseReport].Next[phaseDone] = dirNested
 		spec.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
 			Handler: handlerNobody,
-			Next:    map[flowv1alpha1.Phase]string{phaseDone: "shelved"},
+			Next:    map[flowv1alpha1.Phase]string{phaseDone: dirShelved},
 		}
 		got := strings.Join(check(spec), "\n")
 		if i == 0 {
