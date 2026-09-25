@@ -107,6 +107,16 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	// A run written by a controller from before currentRuns existed is
+	// carried over before anything reads the run in flight, and written down
+	// at once rather than whenever the next write happens to come: the old
+	// field has to be gone from every stored task before the release that
+	// stops reading it. The write is an update of this task, so the watch
+	// brings it straight back.
+	if taskstate.AdoptLegacyRun(&task.Status) {
+		return ctrl.Result{}, r.Status().Update(ctx, &task)
+	}
+
 	// A stopped task has one thing left to do, and its date is already on
 	// it; nothing below needs consulting, least of all the flow. The Jobs go
 	// with it through their ownerReference (§10).
@@ -180,7 +190,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			"flow %q forks at %q, and this controller does not run parallel phases yet", flow.Name, task.Status.Phase))
 	}
 	// A phase with no binding is terminal (§5 "束縛の無いステータスが終端") — but
-	// which of three things happened is not the same call. CurrentRun tells
+	// which of three things happened is not the same call. The run in flight tells
 	// them apart: begin and Advance never set it to a phase without first
 	// confirming a binding, so a ref naming anything but the cleanup run means
 	// a run was in flight and the flow was edited out from under it. That is a
@@ -189,7 +199,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// cleanup run is the one legitimate way a stopped task still has one
 	// (ADR-0009), and no ref at all means the task was terminal on arrival.
 	if _, bound := flow.Spec.Bindings[task.Status.Phase]; !bound {
-		if task.Status.CurrentRun != nil && !taskstate.InFinally(&task.Status) {
+		if taskstate.Current(&task.Status) != nil && !taskstate.InFinally(&task.Status) {
 			return ctrl.Result{}, r.fail(ctx, &task, &flow.Spec, fmt.Sprintf(
 				"phase %q lost its binding in flow %q while a run was in flight", task.Status.Phase, flow.Name))
 		}
@@ -199,7 +209,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.terminal(ctx, &task, flow)
 	}
 
-	run := task.Status.CurrentRun
+	run := taskstate.Current(&task.Status)
 	recovering := run == nil
 	if recovering {
 		// A non-terminal task with nothing in flight means the status was
@@ -260,7 +270,7 @@ func (r *TaskReconciler) terminal(
 	flow *flowv1alpha1.TaskFlow,
 ) (ctrl.Result, error) {
 	if taskstate.InFinally(&task.Status) {
-		return r.driveRun(ctx, task, flow, task.Status.CurrentRun, false)
+		return r.driveRun(ctx, task, flow, taskstate.Current(&task.Status), false)
 	}
 	return ctrl.Result{}, r.backfillExpiry(ctx, task, &flow.Spec)
 }
@@ -452,7 +462,7 @@ func (r *TaskReconciler) persistRun(
 	if !recovering && equality.Semantic.DeepEqual(run, prior) {
 		return nil
 	}
-	task.Status.CurrentRun = run
+	taskstate.SetCurrent(&task.Status, run)
 	return r.Status().Update(ctx, task)
 }
 
@@ -1129,7 +1139,7 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 // and the task eventually clear, with no special path needed for that case.
 func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, reason string) error {
 	// A dispatched task with nothing in flight has already reached a terminal
-	// phase: Advance clears CurrentRun exactly when it lands one there, whether
+	// phase: Advance clears the run in flight exactly when it lands one there, whether
 	// that phase is Failed, Escalated, or one the flow itself declared
 	// terminal. Leaving it alone here, not just for Failed specifically, is
 	// what keeps a deleted or renamed flow from overwriting a finished task's
@@ -1137,7 +1147,7 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow
 	// surely — the ending is already decided — so it is left alone too, and a
 	// flow deleted while that run was owed cannot turn a task that finished
 	// into one that failed.
-	if task.Status.Phase != "" && (task.Status.CurrentRun == nil || taskstate.InFinally(&task.Status)) {
+	if task.Status.Phase != "" && (taskstate.Current(&task.Status) == nil || taskstate.InFinally(&task.Status)) {
 		return nil
 	}
 	taskstate.Fail(&task.Status, reason, flow, metav1.NewTime(r.now()))
@@ -1198,7 +1208,7 @@ func (r *TaskReconciler) ensureJob(
 ) (*batchv1.Job, error) {
 	name := runner.JobName(task.Name, run.Phase, run.RunID, run.InfraRetries)
 	// Deterministic the moment it's computed, regardless of which branch below
-	// ends up returning: the caller persists this into CurrentRun so a run
+	// ends up returning: the caller persists this into currentRuns so a run
 	// stuck in flight can be found by name without recomputing the hash.
 	run.JobName = name
 

@@ -262,7 +262,7 @@ framework の外になる。独立した 2 本の Task になり親子関係が�
 status:
   phase: Review
   runID: 3                    # 単調増加。パスと子リソース名に使う
-  currentRun: {phase: Review, runID: 3, deadline: ..., workflowName: ...}
+  currentRuns: [{phase: Review, runID: 3, deadline: ..., jobName: ...}]  # 走行中の run。並列の枝ごとに 1 つ（ADR-0013）
   history: [...]              # 上限付きリングバッファ
   conditions: [...]
 ```
@@ -323,7 +323,7 @@ handler が書くのは `runner: {type: State}` と `timeout` だけ。
 
 | | |
 |---|---|
-| 置き場 | コントローラが run 開始時に `Create`。Task が owner、`data` は空。名前は `status.currentRun.verdictBox` |
+| 置き場 | コントローラが run 開始時に `Create`。Task が owner、`data` は空。名前は `status.currentRuns[].verdictBox` |
 | 語彙 | 注釈 `flow.tgy.io/choices`（宣言から生成）。答えは `data.verdict`、理由は `data.reason` |
 | 先回り | **開始時に既に在れば `Failed`**。名前を status に書いてから作るので、`AlreadyExists` は「先に誰かが置いた」だけを意味する。ただし名前が既に status にあり置き場が無い状態からの再作成（クラッシュ直後の再開など）はこの限りでなく、`AlreadyExists` は素のエラーとして次周の `Get` に委ねる — 自分の遅延した `Create` と先回りを区別できないため |
 | 読み方 | キャッシュを通さない `Get`。RBAC は `configmaps` の `get` と `create` だけ（`list` / `watch` は要らない） |
@@ -753,8 +753,8 @@ finally:
 - **finally は run。** runID を 1 つ消費し、`history[]` に予約名 `Finally` の 1 行として残る。
   サイドカーも workspace の run ビューと棚も他の run と同じ（§7）。`Finally` は `bindings` のキーにも
   `next` の行き先にも使えない
-- **「止まった Task は currentRun を持たない」の例外。** 終端に着いた Task が finally の run を持つ
-  間は `currentRun.phase` が予約名 `Finally` を指す。Reconcile はこれで finally 中を見分け（束縛の
+- **「止まった Task は走行中の run を持たない」の例外。** 終端に着いた Task が finally の run を持つ
+  間は `currentRuns` の run の phase が予約名 `Finally` を指す。Reconcile はこれで finally 中を見分け（束縛の
   有無や `status.phase` では見分けない）、handler は `bindings` でなく `spec.finally` から解決する。
   起動と決着は `bindings` 経由の遷移を通らない独立した経路（`transition.Next` も `Advance` も通らない）
 - **失敗は隠さない。** 片付いたと言わなかった run（NoAnswer / インフラ再試行の使い切り /
@@ -1312,7 +1312,7 @@ run 終了を観測（Job の watch / _done / deadline）
 ルールは 1 本：run が終了していて、かつ非空ディレクトリがちょうど 1 つ。それ以外は全部直接 Escalated。
 
 タイムアウトは Workflow の `activeDeadlineSeconds` に頼らず、
-コントローラ側の `status.currentRun.deadline` + requeue-after で一元管理する
+コントローラ側の `status.currentRuns[].deadline` + requeue-after で一元管理する
 （handler の種類によらず経路を 1 本にするため）。
 
 **実装（`internal/controller`、2026-08-25）。** Job の終了は `Complete` / `Failed` 条件で見る。

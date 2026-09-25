@@ -88,7 +88,7 @@ var _ = Describe("a run nothing starts", func() {
 	It("writes down where the answer goes, and when the wait runs out", func() {
 		start()
 
-		run := fx.get().Status.CurrentRun
+		run := taskstate.Current(&fx.get().Status)
 		Expect(run).NotTo(BeNil())
 		Expect(run.VerdictBox).To(Equal(runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)),
 			"whoever answers finds the place from the task, without being told a naming rule")
@@ -121,11 +121,34 @@ var _ = Describe("a run nothing starts", func() {
 		fx.reconcile() // settles the starting phase
 		fx.reconcile() // opens the place the answer goes, and dates it
 
-		deadline := fx.get().Status.CurrentRun.Deadline.Time
+		deadline := taskstate.Current(&fx.get().Status).Deadline.Time
 		fx.reconciler.Now = func() time.Time { return deadline.Add(-3 * time.Second) }
 
 		Expect(fx.reconcile().RequeueAfter).To(Equal(3*time.Second),
 			"this close to a deadline shorter than verdictPoll, the wait is what remains, not the usual interval")
+	})
+
+	// A controller from before currentRuns kept its one run in currentRun.
+	// A task caught mid-run by the upgrade must keep that run: read as
+	// having none, it would be rebuilt without the box's name, and the box
+	// already standing under that name would look like a squatter.
+	It("carries over a run an older controller wrote to currentRun", func() {
+		start()
+		tk := fx.get()
+		legacy := *taskstate.Current(&tk.Status)
+		tk.Status.CurrentRuns = nil
+		tk.Status.CurrentRun = &legacy
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+		created := fx.box().UID
+
+		fx.reconcile() // carries the run over and writes it down
+		Expect(fx.get().Status.CurrentRun).To(BeNil(), "the old field is gone from the stored task")
+		fx.reconcile()
+
+		after := fx.get()
+		Expect(after.Status.Phase).To(Equal(phaseInvestigate), "the run goes on rather than the task failing")
+		Expect(fx.box().UID).To(Equal(created), "the box the run already had is still the one it answers in")
+		Expect(taskstate.Current(&after.Status)).To(HaveField("VerdictBox", legacy.VerdictBox))
 	})
 
 	It("does not open a second box for the same run", func() {
@@ -148,14 +171,14 @@ var _ = Describe("a run nothing starts", func() {
 		fx.reconcile() // settles the starting phase
 
 		tk := fx.get()
-		tk.Status.CurrentRun.VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
+		taskstate.Current(&tk.Status).VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
 		Expect(fx.reconcile().RequeueAfter).To(Equal(verdictPoll))
 
 		Expect(fx.box().Data).To(BeEmpty())
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "the run carries on where it left off")
-		Expect(fx.get().Status.CurrentRun.Deadline).NotTo(BeNil(), "and is dated once the box is really there")
+		Expect(taskstate.Current(&fx.get().Status).Deadline).NotTo(BeNil(), "and is dated once the box is really there")
 	})
 
 	// The handler is read once, to learn how long the wait may be. It being
@@ -167,7 +190,7 @@ var _ = Describe("a run nothing starts", func() {
 		fx.reconcile() // settles the starting phase
 
 		tk := fx.get()
-		tk.Status.CurrentRun.VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
+		taskstate.Current(&tk.Status).VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
 			ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
@@ -366,7 +389,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		tk := fx.get()
 		boxName := runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
-		tk.Status.CurrentRun.VerdictBox = boxName
+		taskstate.Current(&tk.Status).VerdictBox = boxName
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
 		landedLate := runner.BuildVerdictBox(tk, phaseInvestigate, 1, []string{"ok"})
@@ -399,7 +422,7 @@ var _ = Describe("a run nothing starts", func() {
 		// And the next ordinary reconcile does settle it: the Get finds the
 		// box, sees this task owns it, and dates the run from it.
 		Expect(fx.reconcile().RequeueAfter).To(Equal(verdictPoll))
-		Expect(fx.get().Status.CurrentRun.Deadline).NotTo(BeNil())
+		Expect(taskstate.Current(&fx.get().Status).Deadline).NotTo(BeNil())
 	})
 
 	It("fails a run whose place was taken away while it waited", func() {
@@ -560,7 +583,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport))
-		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(2))
 		Expect(tk.Status.History[1].Phase).To(Equal(flowv1alpha1.PhaseFinally))
 		Expect(tk.Status.History[1].Directory).To(Equal("cleaned"))

@@ -111,9 +111,9 @@ func TestRunsBeforeFirstDispatch(t *testing.T) {
 
 func TestAdvanceRecordsAndMoves(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      2,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
+		Phase:       phaseReport,
+		RunID:       2,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 2}},
 	}
 	res := transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeRework}
 	Advance(s, spec(), dirMore, res, at)
@@ -131,8 +131,8 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 	if s.RunID != 3 {
 		t.Fatalf("runID = %d, want 3", s.RunID)
 	}
-	if s.CurrentRun == nil || s.CurrentRun.RunID != 3 || s.CurrentRun.Phase != phaseInvestigate {
-		t.Fatalf("currentRun = %+v, want Planning at run 3", s.CurrentRun)
+	if Current(s) == nil || Current(s).RunID != 3 || Current(s).Phase != phaseInvestigate {
+		t.Fatalf("currentRun = %+v, want Planning at run 3", Current(s))
 	}
 }
 
@@ -142,9 +142,9 @@ func TestAdvanceRecordsAndMoves(t *testing.T) {
 // Reason that walked over it would be refused for good rather than written.
 func TestAdvanceClampsAnOverLongReason(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      2,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
+		Phase:       phaseReport,
+		RunID:       2,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 2}},
 	}
 	long := strings.Repeat("a", flowv1alpha1.HistoryReasonMaxLength+500)
 	res := transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared, Detail: long}
@@ -181,12 +181,12 @@ func TestAReasonExactlyAtTheLimitIsKeptWhole(t *testing.T) {
 
 func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      1,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+		Phase:       phaseReport,
+		RunID:       1,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 	}
 	Advance(s, spec(), dirSent, transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, at)
-	if s.CurrentRun != nil {
+	if Current(s) != nil {
 		t.Fatal("a finished task has nothing in flight; a stale currentRun would make a late verdict look owned")
 	}
 	if s.RunID != 1 {
@@ -199,9 +199,9 @@ func TestAdvanceToTerminalClearsCurrentRun(t *testing.T) {
 // condition misses tasks that stopped this way.
 func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      1,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+		Phase:       phaseReport,
+		RunID:       1,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 	}
 	res := transition.Result{
 		Next:    flowv1alpha1.PhaseFailed,
@@ -237,15 +237,15 @@ func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 		phaseReport: {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
 	}
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      1,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+		Phase:       phaseReport,
+		RunID:       1,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	res := transition.Result{Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeDeclined, Detail: "handler declined"}
 	Advance(s, specOf(bindings, nil, ttl(time.Hour, 168*time.Hour)), dirSent, res, now)
 
-	if s.CurrentRun != nil {
+	if Current(s) != nil {
 		t.Fatal("a task that landed on Escalated has nothing in flight")
 	}
 	if len(s.History) != 1 || s.History[0].Outcome != string(transition.OutcomeDeclined) {
@@ -266,8 +266,8 @@ func TestBeginPutsAFreshTaskOnTheStartPhase(t *testing.T) {
 	if s.RunID != 1 {
 		t.Fatalf("runID = %d, want 1", s.RunID)
 	}
-	if s.CurrentRun == nil || s.CurrentRun.Phase != phaseInvestigate || s.CurrentRun.RunID != 1 {
-		t.Fatalf("currentRun = %+v, want %q at run 1", s.CurrentRun, phaseInvestigate)
+	if Current(s) == nil || Current(s).Phase != phaseInvestigate || Current(s).RunID != 1 {
+		t.Fatalf("currentRun = %+v, want %q at run 1", Current(s), phaseInvestigate)
 	}
 }
 
@@ -282,9 +282,9 @@ func TestAdvanceToADeclaredFailureNeedsAHuman(t *testing.T) {
 	}
 	terminals := map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalFailure}
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      1,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+		Phase:       phaseReport,
+		RunID:       1,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
 	res := transition.Result{Next: phaseGave, Outcome: transition.OutcomeDeclared, Detail: "the policy does not cover 3 namespaces"}
@@ -304,7 +304,7 @@ func TestAdvanceToADeclaredFailureNeedsAHuman(t *testing.T) {
 	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: now.Add(168 * time.Hour)}) {
 		t.Fatalf("expiresAt = %v, want now+168h — a failure swept away in an hour is a failure nobody reads", s.ExpiresAt)
 	}
-	if s.CurrentRun != nil {
+	if Current(s) != nil {
 		t.Fatal("a task at one of its flow's endings has nothing in flight")
 	}
 }
@@ -322,9 +322,9 @@ func TestAdvanceToADeclaredSuccessSaysNothing(t *testing.T) {
 		"never declared":     nil,
 	} {
 		s := &flowv1alpha1.TaskStatus{
-			Phase:      phaseReport,
-			RunID:      1,
-			CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 1},
+			Phase:       phaseReport,
+			RunID:       1,
+			CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 		}
 		res := transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}
 		Advance(s, specOf(bindings, terminals, ttl(time.Hour, 168*time.Hour)), dirSent, res, now)
@@ -340,16 +340,16 @@ func TestAdvanceToADeclaredSuccessSaysNothing(t *testing.T) {
 
 func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      3,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3},
+		Phase:       phaseReport,
+		RunID:       3,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 3}},
 	}
 	Fail(s, "flow \"sample-flow\" does not exist in this namespace", nil, at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
 	}
-	if s.CurrentRun != nil {
+	if Current(s) != nil {
 		t.Fatal("a failed task has nothing in flight")
 	}
 	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
@@ -371,13 +371,13 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 // Runs counts, so the phase's limit is not spent on it.
 func TestInfraRetryCostsNeitherARunNorTheLimit(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      4,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 4},
+		Phase:       phaseReport,
+		RunID:       4,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 4}},
 	}
 	RetryInfra(s)
 
-	if s.RunID != 4 || s.CurrentRun.RunID != 4 {
+	if s.RunID != 4 || Current(s).RunID != 4 {
 		t.Fatalf("runID = %d, want it to stay 4: a runID counts decided runs, not attempts at starting one", s.RunID)
 	}
 	if n := Runs(s, flow())[phaseReport]; n != 1 {
@@ -389,13 +389,13 @@ func TestInfraRetryCostsNeitherARunNorTheLimit(t *testing.T) {
 	if len(s.History) != 0 {
 		t.Fatal("no verdict was reached, so nothing belongs in history")
 	}
-	if s.CurrentRun.InfraRetries != 1 {
-		t.Fatalf("infraRetries = %d, want 1", s.CurrentRun.InfraRetries)
+	if Current(s).InfraRetries != 1 {
+		t.Fatalf("infraRetries = %d, want 1", Current(s).InfraRetries)
 	}
 }
 
 func TestInfraRetriesExhausted(t *testing.T) {
-	s := &flowv1alpha1.TaskStatus{CurrentRun: &flowv1alpha1.RunRef{InfraRetries: 2}}
+	s := &flowv1alpha1.TaskStatus{CurrentRuns: []flowv1alpha1.RunRef{{InfraRetries: 2}}}
 	if !InfraRetriesExhausted(s, 2) {
 		t.Fatal("two retries against a maximum of two is exhausted")
 	}
@@ -484,7 +484,7 @@ func TestExpireStampsReservedPhasesWithFailed(t *testing.T) {
 }
 
 func TestExpireLeavesARunningTaskAlone(t *testing.T) {
-	status := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2}}
+	status := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 2}}}
 
 	Expire(status, specOf(flow(), nil, ttl(time.Hour, time.Hour)), at)
 
@@ -542,11 +542,11 @@ func TestExpireWithoutATTLKeepsTheTask(t *testing.T) {
 func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	agrees := func(t *testing.T, after string, s *flowv1alpha1.TaskStatus) {
 		t.Helper()
-		if s.CurrentRun == nil || InFinally(s) {
+		if Current(s) == nil || InFinally(s) {
 			return
 		}
-		if s.CurrentRun.Phase != s.Phase {
-			t.Fatalf("after %s: currentRun names %q but the task is on %q", after, s.CurrentRun.Phase, s.Phase)
+		if Current(s).Phase != s.Phase {
+			t.Fatalf("after %s: currentRun names %q but the task is on %q", after, Current(s).Phase, s.Phase)
 		}
 	}
 
@@ -576,8 +576,8 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 		Next: phaseDone, Outcome: transition.OutcomeDeclared,
 	}, at)
 	agrees(t, "Advance to a terminal the flow declared", &stopped)
-	if stopped.CurrentRun != nil {
-		t.Fatalf("a task that stopped still has currentRun %+v", stopped.CurrentRun)
+	if Current(&stopped) != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", Current(&stopped))
 	}
 
 	escalated := *s
@@ -585,15 +585,15 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer,
 	}, at)
 	agrees(t, "Advance to Escalated", &escalated)
-	if escalated.CurrentRun != nil {
-		t.Fatalf("a task that stopped still has currentRun %+v", escalated.CurrentRun)
+	if Current(&escalated) != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", Current(&escalated))
 	}
 
 	failed := *s
 	Fail(&failed, "the flow lost the binding it was running", spec(), at)
 	agrees(t, "Fail", &failed)
-	if failed.CurrentRun != nil {
-		t.Fatalf("a task that stopped still has currentRun %+v", failed.CurrentRun)
+	if Current(&failed) != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", Current(&failed))
 	}
 
 	// The exception, stated: with a cleanup run declared, the same stop leaves
@@ -604,7 +604,7 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 		Next: phaseDone, Outcome: transition.OutcomeDeclared,
 	}, at)
 	if !InFinally(&cleaning) {
-		t.Fatalf("currentRun = %+v, want the cleanup run", cleaning.CurrentRun)
+		t.Fatalf("currentRun = %+v, want the cleanup run", Current(&cleaning))
 	}
 	if cleaning.Phase != phaseDone {
 		t.Fatalf("phase = %q, want the ending %q the task actually reached", cleaning.Phase, phaseDone)
@@ -614,8 +614,8 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	// the task is finished with and holds no ref.
 	FinishFinally(&cleaning, specWithCleanup(nil), dirDone, transition.OutcomeDeclared, "", at)
 	agrees(t, "FinishFinally", &cleaning)
-	if cleaning.CurrentRun != nil {
-		t.Fatalf("a task whose cleanup run settled still has currentRun %+v", cleaning.CurrentRun)
+	if Current(&cleaning) != nil {
+		t.Fatalf("a task whose cleanup run settled still has currentRun %+v", Current(&cleaning))
 	}
 }
 
@@ -639,9 +639,9 @@ func specWithCleanup(t *flowv1alpha1.TTLSpec) *flowv1alpha1.TaskFlowSpec {
 // the only date, and the task could go while its cleanup was still running.
 func TestAdvanceToTerminalStartsTheCleanupRun(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      2,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2},
+		Phase:       phaseReport,
+		RunID:       2,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 2}},
 	}
 	Advance(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirSent,
 		transition.Result{Next: phaseDone, Outcome: transition.OutcomeDeclared}, at)
@@ -650,11 +650,11 @@ func TestAdvanceToTerminalStartsTheCleanupRun(t *testing.T) {
 		t.Fatalf("phase = %q, want %q — the cleanup run does not move the task", s.Phase, phaseDone)
 	}
 	if !InFinally(s) {
-		t.Fatalf("currentRun = %+v, want the cleanup run in flight", s.CurrentRun)
+		t.Fatalf("currentRun = %+v, want the cleanup run in flight", Current(s))
 	}
-	if s.RunID != 3 || s.CurrentRun.RunID != 3 {
+	if s.RunID != 3 || Current(s).RunID != 3 {
 		t.Fatalf("runID = %d, currentRun.runID = %d, want 3 — a run really is about to happen",
-			s.RunID, s.CurrentRun.RunID)
+			s.RunID, Current(s).RunID)
 	}
 	if s.ExpiresAt != nil {
 		t.Fatalf("expiresAt = %v, want none until the cleanup run settles", s.ExpiresAt)
@@ -669,17 +669,17 @@ func TestAdvanceToTerminalStartsTheCleanupRun(t *testing.T) {
 // clean up after one.
 func TestFailStartsTheCleanupRunToo(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseInvestigate,
-		RunID:      1,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 1},
+		Phase:       phaseInvestigate,
+		RunID:       1,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseInvestigate, RunID: 1}},
 	}
 	Fail(s, "the flow lost the binding it was running", specWithCleanup(ttl(time.Hour, 168*time.Hour)), at)
 
 	if s.Phase != flowv1alpha1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed", s.Phase)
 	}
-	if !InFinally(s) || s.CurrentRun.RunID != 2 {
-		t.Fatalf("currentRun = %+v, want the cleanup run as run 2", s.CurrentRun)
+	if !InFinally(s) || Current(s).RunID != 2 {
+		t.Fatalf("currentRun = %+v, want the cleanup run as run 2", Current(s))
 	}
 	if s.ExpiresAt != nil {
 		t.Fatalf("expiresAt = %v, want none until the cleanup run settles", s.ExpiresAt)
@@ -692,14 +692,14 @@ func TestFailStartsTheCleanupRunToo(t *testing.T) {
 // task forever.
 func TestFailWithoutAFlowStartsNoCleanupRun(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseInvestigate,
-		RunID:      1,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 1},
+		Phase:       phaseInvestigate,
+		RunID:       1,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseInvestigate, RunID: 1}},
 	}
 	Fail(s, "flow \"sample-flow\" does not exist in this namespace", nil, at)
 
-	if s.CurrentRun != nil {
-		t.Fatalf("currentRun = %+v, want none — there is no flow to read a cleanup run from", s.CurrentRun)
+	if Current(s) != nil {
+		t.Fatalf("currentRun = %+v, want none — there is no flow to read a cleanup run from", Current(s))
 	}
 	if s.RunID != 1 {
 		t.Fatalf("runID = %d, want 1 — no run was started", s.RunID)
@@ -717,8 +717,8 @@ func TestExpireStillDatesATaskOwedNoCleanupRun(t *testing.T) {
 	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(time.Hour)}) {
 		t.Fatalf("expiresAt = %v, want now+1h — no ref means no cleanup is owed", s.ExpiresAt)
 	}
-	if s.CurrentRun != nil {
-		t.Fatalf("currentRun = %+v, want none", s.CurrentRun)
+	if Current(s) != nil {
+		t.Fatalf("currentRun = %+v, want none", Current(s))
 	}
 }
 
@@ -727,10 +727,10 @@ func TestExpireStillDatesATaskOwedNoCleanupRun(t *testing.T) {
 // phase, no condition, the ttl the ending itself earned.
 func TestFinishFinallyRecordsACleanupThatHappened(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseDone,
-		RunID:      3,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
-		History:    []flowv1alpha1.HistoryEntry{{Phase: phaseReport, RunID: 2, Directory: dirSent}},
+		Phase:       phaseDone,
+		RunID:       3,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 3}},
+		History:     []flowv1alpha1.HistoryEntry{{Phase: phaseReport, RunID: 2, Directory: dirSent}},
 	}
 	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirDone,
 		transition.OutcomeDeclared, "removed 2 branches", at)
@@ -738,8 +738,8 @@ func TestFinishFinallyRecordsACleanupThatHappened(t *testing.T) {
 	if s.Phase != phaseDone {
 		t.Fatalf("phase = %q, want %q — a cleanup run never revises where the task ended", s.Phase, phaseDone)
 	}
-	if s.CurrentRun != nil {
-		t.Fatalf("currentRun = %+v, want none — nothing follows the cleanup run", s.CurrentRun)
+	if Current(s) != nil {
+		t.Fatalf("currentRun = %+v, want none — nothing follows the cleanup run", Current(s))
 	}
 	if len(s.History) != 2 {
 		t.Fatalf("history = %+v, want the cleanup run appended", s.History)
@@ -763,9 +763,9 @@ func TestFinishFinallyRecordsACleanupThatHappened(t *testing.T) {
 // and joined lists can reach FinishFinally's cleanup run too.
 func TestFinishFinallyClampsAnOverLongReason(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseDone,
-		RunID:      3,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+		Phase:       phaseDone,
+		RunID:       3,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 3}},
 	}
 	long := strings.Repeat("b", flowv1alpha1.HistoryReasonMaxLength+500)
 	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirDone,
@@ -785,9 +785,9 @@ func TestFinishFinallyClampsAnOverLongReason(t *testing.T) {
 // changes is that somebody is told and the task waits for them.
 func TestFinishFinallyReportsACleanupThatDidNot(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseDone,
-		RunID:      3,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+		Phase:       phaseDone,
+		RunID:       3,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 3}},
 	}
 	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), "",
 		transition.OutcomeNoAnswer, "the run timed out after 5m0s", at)
@@ -818,9 +818,9 @@ func TestFinishFinallyReportsACleanupThatDidNot(t *testing.T) {
 // succeeded must not shorten the wait its ending earned.
 func TestFinishFinallyKeepsTheTTLTheEndingEarned(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      flowv1alpha1.PhaseEscalated,
-		RunID:      2,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2},
+		Phase:       flowv1alpha1.PhaseEscalated,
+		RunID:       2,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 2}},
 		// Advance sets this the moment the task lands on Escalated, before the
 		// cleanup run is ever dispatched. FinishFinally reads it rather than
 		// re-deriving it, so it has to be here for the test to describe what
@@ -844,10 +844,10 @@ func TestFinishFinallyReadsTheRecordedConditionNotTheCurrentTerminals(t *testing
 	editedFlow := specOf(nil, map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseGave: flowv1alpha1.TerminalSuccess}, ttl(time.Hour, 168*time.Hour))
 	editedFlow.Finally = cleanup
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseGave,
-		RunID:      2,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2},
-		Conditions: []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionFalse, Reason: ReasonHandlerFailed}},
+		Phase:       phaseGave,
+		RunID:       2,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 2}},
+		Conditions:  []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionFalse, Reason: ReasonHandlerFailed}},
 	}
 	FinishFinally(s, editedFlow, dirDone, transition.OutcomeDeclared, "", at)
 
@@ -865,9 +865,9 @@ func TestFinishFinallyKeepsSucceededWhenTerminalsChangeAfterTheFact(t *testing.T
 	editedFlow := specOf(nil, map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseDone: flowv1alpha1.TerminalFailure}, ttl(time.Hour, 168*time.Hour))
 	editedFlow.Finally = cleanup
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseDone,
-		RunID:      2,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2},
+		Phase:       phaseDone,
+		RunID:       2,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 2}},
 	}
 	FinishFinally(s, editedFlow, dirDone, transition.OutcomeDeclared, "", at)
 
@@ -882,17 +882,17 @@ func TestFinishFinallyKeepsSucceededWhenTerminalsChangeAfterTheFact(t *testing.T
 // stopped at, a phase with no binding and no handler.
 func TestRetryInfraKeepsTheCleanupRunsName(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseDone,
-		RunID:      3,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3},
+		Phase:       phaseDone,
+		RunID:       3,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 3}},
 	}
 	RetryInfra(s)
 
 	if !InFinally(s) {
-		t.Fatalf("currentRun = %+v, want the cleanup run again", s.CurrentRun)
+		t.Fatalf("currentRun = %+v, want the cleanup run again", Current(s))
 	}
-	if s.CurrentRun.RunID != 3 || s.CurrentRun.InfraRetries != 1 {
-		t.Fatalf("currentRun = %+v, want run 3 attempt 1 — an attempt that never ran spends no run", s.CurrentRun)
+	if Current(s).RunID != 3 || Current(s).InfraRetries != 1 {
+		t.Fatalf("currentRun = %+v, want run 3 attempt 1 — an attempt that never ran spends no run", Current(s))
 	}
 }
 
@@ -909,7 +909,7 @@ func TestHistorySaysHowTheRunWasDriven(t *testing.T) {
 		"a ref from before either was recorded": {&flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2}, flowv1alpha1.RunnerJob},
 	} {
 		t.Run(name, func(t *testing.T) {
-			s := &flowv1alpha1.TaskStatus{Phase: phaseReport, RunID: 2, CurrentRun: tc.run}
+			s := &flowv1alpha1.TaskStatus{Phase: phaseReport, RunID: 2, CurrentRuns: []flowv1alpha1.RunRef{*tc.run}}
 			Advance(s, spec(), "ok", transition.Result{Next: phaseInvestigate, Outcome: transition.OutcomeDeclared}, at)
 
 			if got := s.History[0].Runner; got != tc.want {
@@ -923,14 +923,44 @@ func TestHistorySaysHowTheRunWasDriven(t *testing.T) {
 // the same way (ADR-0009 決定3).
 func TestFinallyHistorySaysHowTheRunWasDriven(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:      phaseReport,
-		RunID:      3,
-		CurrentRun: &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 3, VerdictBox: "b"},
+		Phase:       phaseReport,
+		RunID:       3,
+		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 3, VerdictBox: "b"}},
 	}
 	FinishFinally(s, spec(), "cleaned", transition.OutcomeDeclared, "", at)
 
 	last := s.History[len(s.History)-1]
 	if last.Runner != flowv1alpha1.RunnerState {
 		t.Fatalf("runner = %q, want %q", last.Runner, flowv1alpha1.RunnerState)
+	}
+}
+
+// A run an older controller wrote to currentRun is carried into currentRuns,
+// and the old field is cleared so the next write drops it.
+func TestAdoptLegacyRun(t *testing.T) {
+	legacy := &flowv1alpha1.RunRef{Phase: phaseReport, RunID: 2, InfraRetries: 1}
+
+	s := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: legacy}
+	if !AdoptLegacyRun(s) {
+		t.Fatal("a status with a legacy run reported nothing to adopt")
+	}
+	if got := Current(s); got == nil || *got != *legacy {
+		t.Fatalf("currentRuns = %+v, want the legacy run %+v", s.CurrentRuns, legacy)
+	}
+	if s.CurrentRun != nil {
+		t.Fatal("the legacy field was left set, so the next write would keep it")
+	}
+
+	// currentRuns already set is the newer record: it stays as it is.
+	newer := flowv1alpha1.RunRef{Phase: phaseReport, RunID: 3}
+	both := &flowv1alpha1.TaskStatus{Phase: phaseReport, CurrentRun: legacy, CurrentRuns: []flowv1alpha1.RunRef{newer}}
+	AdoptLegacyRun(both)
+	if got := Current(both); got == nil || *got != newer || both.CurrentRun != nil {
+		t.Fatalf("with both set, got currentRuns %+v and currentRun %+v; want the newer run kept and the old field cleared",
+			both.CurrentRuns, both.CurrentRun)
+	}
+
+	if AdoptLegacyRun(&flowv1alpha1.TaskStatus{}) {
+		t.Fatal("a status with no legacy run reported one")
 	}
 }

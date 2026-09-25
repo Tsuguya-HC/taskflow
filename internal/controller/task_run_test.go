@@ -33,6 +33,7 @@ import (
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
+	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 )
 
 var _ = Describe("starting a task", func() {
@@ -63,7 +64,7 @@ var _ = Describe("starting a task", func() {
 		tk := get()
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate))
 		Expect(tk.Status.RunID).To(BeEquivalentTo(1))
-		Expect(tk.Status.CurrentRun).NotTo(BeNil())
+		Expect(taskstate.Current(&tk.Status)).NotTo(BeNil())
 	})
 
 	It("creates the Job for the phase in flight", func() {
@@ -110,7 +111,7 @@ var _ = Describe("starting a task", func() {
 			Expect(found).To(BeTrue(), "container %q is missing %s", c.Name, runner.EnvDirectories)
 		}
 
-		Expect(get().Status.CurrentRun.JobName).To(Equal(jobName),
+		Expect(taskstate.Current(&get().Status).JobName).To(Equal(jobName),
 			"the run in status must name the Job it belongs to, not just its phase and runID")
 	})
 
@@ -139,7 +140,7 @@ var _ = Describe("starting a task", func() {
 
 		tk := get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 
 		// A second reconcile must not rewrite a task that already failed —
 		// fail's idempotency guard, otherwise untested past the first call.
@@ -216,7 +217,7 @@ var _ = Describe("starting a task", func() {
 
 		tk := get()
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the run in flight is untouched by a fork elsewhere")
-		Expect(tk.Status.CurrentRun).NotTo(BeNil())
+		Expect(taskstate.Current(&tk.Status)).NotTo(BeNil())
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: resourceNamespace}, &job)).To(Succeed(),
 			"the Job in flight must not be abandoned")
 	})
@@ -271,7 +272,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 		tk := get()
 		tk.Status.Phase = phaseReport // unbound in this flow, so terminal
-		tk.Status.CurrentRun = nil
+		tk.Status.CurrentRuns = nil
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
 		reconcileOnce()
@@ -297,7 +298,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 		tk := get()
 		tk.Status.Phase = flowv1alpha1.PhaseEscalated
-		tk.Status.CurrentRun = nil
+		tk.Status.CurrentRuns = nil
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, flow)).To(Succeed())
@@ -320,7 +321,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 		tk := get()
 		tk.Status.Phase = phaseReport // unbound in this flow, so terminal
-		tk.Status.CurrentRun = nil
+		tk.Status.CurrentRuns = nil
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, flow)).To(Succeed())

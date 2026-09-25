@@ -207,7 +207,7 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		// owed, a cleanup — so leaving it out here would test a state stop()
 		// never produces for this flow.
 		tk.Status.Phase = flowv1alpha1.PhaseEscalated
-		tk.Status.CurrentRun = &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 1}
+		tk.Status.CurrentRuns = []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}}
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue(), "the task must actually be owed a cleanup run for this path to mean anything")
 

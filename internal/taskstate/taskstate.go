@@ -21,7 +21,7 @@ limitations under the License.
 // Like transition it is pure, so the bookkeeping that makes cycles terminate
 // can be tested without a cluster.
 //
-// This package keeps one invariant on status.currentRun: whenever it is set,
+// This package keeps one invariant on status.currentRuns: whenever it is set,
 // it names the phase status.phase also names — with one exception, the cleanup
 // run, which is named PhaseFinally while status.phase stays at the ending the
 // task reached (ADR-0009). Every writer here keeps the two together — Begin
@@ -29,18 +29,18 @@ limitations under the License.
 // flight, and a task that has stopped has either no ref at all or the cleanup
 // one — owed the moment stop writes it, before the Job behind it exists.
 // Reconcile's recovery path, in task_controller.go, is the one writer
-// outside this package, and holds the same rule: finding no currentRun, it
+// outside this package, and holds the same rule: finding no run in flight, it
 // rebuilds one from status.phase before persisting it. Nothing reads a flag to
 // know any of this, which is why it is written down here.
 //
 // The controller leans on it twice over. It decides a task is terminal by
-// looking up status.phase and then hands currentRun to settle, so the two
+// looking up status.phase and then hands the run in flight to settle, so the two
 // naming different phases would settle a run against the wrong binding — which
 // is why the cleanup run, the one place they differ on purpose, is dispatched
 // by InFinally rather than through that path at all, and never reaches
 // transition. And it is the reason transition.Next's "phase has no binding"
 // guard cannot be reached in production: Reconcile's check of status.phase is
-// also a check of currentRun.phase for every run that goes through it. Break
+// also a check of the run's phase for every run that goes through it. Break
 // the invariant and that guard is what catches it — with less to say than
 // Reconcile's own message, because Reconcile, looking only at status.phase,
 // never saw the mismatch. Pinned by TestCurrentRunNamesTheCurrentPhase in this
@@ -72,12 +72,52 @@ const ReasonHandlerFailed = "HandlerFailed"
 // something else was left behind.
 const ReasonFinallyFailed = "FinallyFailed"
 
+// Current is the run a task has in flight, or nil when it has none. Until
+// forks run (ADR-0013), a task never has more than one, and Current is how
+// every caller that means "the run" says so rather than indexing the list.
+// The pointer is into status itself, so a caller filling in the run's Job or
+// box writes it where the next status update will carry it.
+func Current(status *flowv1alpha1.TaskStatus) *flowv1alpha1.RunRef {
+	if len(status.CurrentRuns) == 0 {
+		return nil
+	}
+	return &status.CurrentRuns[0]
+}
+
+// SetCurrent makes run the one run in flight, or leaves none when run is nil.
+func SetCurrent(status *flowv1alpha1.TaskStatus, run *flowv1alpha1.RunRef) {
+	if run == nil {
+		status.CurrentRuns = nil
+		return
+	}
+	status.CurrentRuns = []flowv1alpha1.RunRef{*run}
+}
+
+// AdoptLegacyRun carries over the one run a controller before ADR-0013 kept
+// in status.currentRun, and reports whether there was one. A task that was
+// mid-run across the upgrade keeps its run rather than being read as having
+// none — which Reconcile would take for a crash between two writes and start
+// the phase over. The old field is cleared either way, so the next write of
+// status drops it; when currentRuns already has something, that is the newer
+// record and wins.
+func AdoptLegacyRun(status *flowv1alpha1.TaskStatus) bool {
+	if status.CurrentRun == nil {
+		return false
+	}
+	if len(status.CurrentRuns) == 0 {
+		status.CurrentRuns = []flowv1alpha1.RunRef{*status.CurrentRun}
+	}
+	status.CurrentRun = nil
+	return true
+}
+
 // InFinally reports whether the run in flight is the cleanup one — the single
-// case where a task that has stopped still has a currentRun. Callers ask this
+// case where a task that has stopped still has a run in flight. Callers ask this
 // instead of comparing phases themselves, because "a stopped task has no run"
 // is load-bearing in several places and each of them needs the same exception.
 func InFinally(status *flowv1alpha1.TaskStatus) bool {
-	return status.CurrentRun != nil && status.CurrentRun.Phase.IsFinally()
+	run := Current(status)
+	return run != nil && run.Phase.IsFinally()
 }
 
 // needsAHuman reports whether an ending is one somebody has to come and look
@@ -101,7 +141,7 @@ func needsAHuman(e transition.Ending) bool {
 // framework did not start (ADR-0011). RunRef.Runner is the one place that
 // rule lives — the controller's own runnerOf reads the same method — and
 // what lets it be read here at all is the invariant this package keeps —
-// status.currentRun is the run the history line being written is about.
+// the run in status.currentRuns is the one the history line being written is about.
 //
 // No ref at all, or one Runner cannot yet tell apart, reads as Job — this
 // package's own answer for a run about to start, unlike the controller's,
@@ -112,8 +152,8 @@ func needsAHuman(e transition.Ending) bool {
 // line as Job, wrongly, with no way left to tell the two apart
 // (HistoryEntry.Runner's own doc carries the same caveat).
 func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
-	if status.CurrentRun != nil {
-		if kind := status.CurrentRun.Runner(); kind != "" {
+	if run := Current(status); run != nil {
+		if kind := run.Runner(); kind != "" {
 			return kind
 		}
 	}
@@ -217,7 +257,7 @@ func Advance(
 		return
 	}
 	status.RunID++
-	status.CurrentRun = &flowv1alpha1.RunRef{Phase: res.Next, RunID: status.RunID}
+	SetCurrent(status, &flowv1alpha1.RunRef{Phase: res.Next, RunID: status.RunID})
 }
 
 // stop is what becomes of a task that has reached its ending. Either the flow
@@ -241,10 +281,10 @@ func Advance(
 func stop(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
 	if flow != nil && flow.Finally != nil {
 		status.RunID++
-		status.CurrentRun = &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: status.RunID}
+		SetCurrent(status, &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: status.RunID})
 		return
 	}
-	status.CurrentRun = nil
+	SetCurrent(status, nil)
 	Expire(status, flow, now)
 }
 
@@ -286,7 +326,7 @@ func FinishFinally(
 		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})
-	status.CurrentRun = nil
+	SetCurrent(status, nil)
 
 	done := directory != ""
 	if !done {
@@ -364,7 +404,7 @@ func stamp(
 func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase) {
 	status.Phase = start
 	status.RunID = 1
-	status.CurrentRun = &flowv1alpha1.RunRef{Phase: start, RunID: 1}
+	SetCurrent(status, &flowv1alpha1.RunRef{Phase: start, RunID: 1})
 }
 
 // Fail stops a task whose flow is broken. Nothing is retried: the fault is in
@@ -421,15 +461,15 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.Tas
 // task stopped at.
 func RetryInfra(status *flowv1alpha1.TaskStatus) {
 	phase, retries := status.Phase, int32(0)
-	if status.CurrentRun != nil {
-		phase = status.CurrentRun.Phase
-		retries = status.CurrentRun.InfraRetries + 1
+	if run := Current(status); run != nil {
+		phase = run.Phase
+		retries = run.InfraRetries + 1
 	}
-	status.CurrentRun = &flowv1alpha1.RunRef{
+	SetCurrent(status, &flowv1alpha1.RunRef{
 		Phase:        phase,
 		RunID:        status.RunID,
 		InfraRetries: retries,
-	}
+	})
 }
 
 // InfraRetriesExhausted reports whether another infrastructure retry is
@@ -437,8 +477,9 @@ func RetryInfra(status *flowv1alpha1.TaskStatus) {
 // outside the handler kept it from running, and that is for a human to look
 // at.
 func InfraRetriesExhausted(status *flowv1alpha1.TaskStatus, max int32) bool {
-	if status.CurrentRun == nil {
+	run := Current(status)
+	if run == nil {
 		return false
 	}
-	return status.CurrentRun.InfraRetries >= max
+	return run.InfraRetries >= max
 }

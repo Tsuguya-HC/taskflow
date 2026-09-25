@@ -147,7 +147,7 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport))
-		Expect(tk.Status.CurrentRun).To(BeNil(), "報告 has no binding, so the task is done")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "報告 has no binding, so the task is done")
 		Expect(tk.Status.History).To(HaveLen(1))
 		h := tk.Status.History[0]
 		Expect(h.Phase).To(Equal(phaseInvestigate))
@@ -188,7 +188,7 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
-		Expect(tk.Status.CurrentRun).To(BeNil())
+		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(1))
 		h := tk.Status.History[0]
 		Expect(h.Directory).To(Equal("escalate"))
@@ -229,7 +229,7 @@ var _ = Describe("finishing a run", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseBroken))
-		Expect(tk.Status.CurrentRun).To(BeNil(), "失敗 has no binding, so the task is done")
+		Expect(taskstate.Current(&tk.Status)).To(BeNil(), "失敗 has no binding, so the task is done")
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeDeclared)),
 			"the move itself was an ordinary declared edge; what makes it news is the flow calling it a failure")
@@ -392,8 +392,8 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate))
 		Expect(tk.Status.RunID).To(BeEquivalentTo(2))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeRework)))
-		Expect(tk.Status.CurrentRun).NotTo(BeNil())
-		Expect(tk.Status.CurrentRun.RunID).To(BeEquivalentTo(2))
+		Expect(taskstate.Current(&tk.Status)).NotTo(BeNil())
+		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(2))
 
 		fx.reconcile()
 		second := fx.job(2)
@@ -437,7 +437,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the same phase, tried again")
 		Expect(tk.Status.RunID).To(BeEquivalentTo(1), "a runID counts decided runs, and nothing was decided")
 		Expect(tk.Status.History).To(BeEmpty(), "nothing was decided, so nothing is recorded")
-		Expect(tk.Status.CurrentRun.InfraRetries).To(BeEquivalentTo(1))
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1))
 
 		fx.reconcile()
 		second := fx.jobAttempt(1, 1)
@@ -538,7 +538,7 @@ var _ = Describe("finishing a run", func() {
 			res := fx.reconcile()
 			job := fx.job(1)
 
-			run := fx.get().Status.CurrentRun
+			run := taskstate.Current(&fx.get().Status)
 			Expect(run.Deadline).NotTo(BeNil())
 			Expect(run.Deadline.Time).To(BeTemporally("~", job.CreationTimestamp.Add(timeout), time.Second),
 				"the deadline is the Job's own, read off the Job")
@@ -558,7 +558,7 @@ var _ = Describe("finishing a run", func() {
 
 			tk := fx.get()
 			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
-			Expect(tk.Status.CurrentRun).To(BeNil())
+			Expect(taskstate.Current(&tk.Status)).To(BeNil())
 			Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 			Expect(tk.Status.History[0].Reason).To(ContainSubstring("timed out"))
 		})
