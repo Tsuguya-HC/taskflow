@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -237,7 +238,29 @@ const (
 	// template volume is new with every pod. publish refuses it — it is
 	// prepare's alone.
 	FlagSweep = "sweep"
+
+	// FlagMany is the flag publish takes for a fork's run (ADR-0013). That
+	// run may write into more than one of its directories, and every one it
+	// wrote into is its answer, joined with DirectorySeparator — where any
+	// other run's answer is exactly one. prepare refuses it: what a run may
+	// say is publish's and the controller's business, not prepare's.
+	FlagMany = "many"
 )
+
+// DirectorySeparator joins the directories a fork's run answered with — in
+// the first line of its termination message, in its verdict box, and in its
+// line of history. It is the one character CheckDirectoryName refuses in a
+// name, so a joined answer splits back into exactly the names that went in.
+const DirectorySeparator = "/"
+
+// JoinDirectories is the one spelling of a fork's answer: its directories
+// sorted, then joined. Sorting makes the same answer read the same whichever
+// order it was found or typed in.
+func JoinDirectories(dirs []string) string {
+	sorted := slices.Clone(dirs)
+	slices.Sort(sorted)
+	return strings.Join(sorted, DirectorySeparator)
+}
 
 // MarkName is the file prepare writes its own pod's UID into, in the run's
 // directory beside the declared directories, and that publish reads back

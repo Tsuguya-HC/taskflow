@@ -214,9 +214,20 @@ func TestPublishSealsAndReportsOnSIGTERM(t *testing.T) {
 		t.Fatalf("run(prepare): %v", err)
 	}
 
+	publishUntilStopped(t, runArgs(cmdPublish, out, log))
+
+	if got := readFile(t, log); got == "" {
+		t.Fatal("termination log is empty; publish must report an answer once stopped")
+	}
+}
+
+// publishUntilStopped runs publish with args, stops it the way the kubelet
+// does — SIGTERM — and fails the test unless it returns cleanly.
+func publishUntilStopped(t *testing.T, args []string) {
+	t.Helper()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(runArgs(cmdPublish, out, log))
+		done <- run(args)
 	}()
 
 	// run("publish") only starts waiting after NotifyContext is registered;
@@ -235,9 +246,42 @@ func TestPublishSealsAndReportsOnSIGTERM(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run(publish) did not return after SIGTERM")
 	}
+}
 
-	if got := readFile(t, log); got == "" {
-		t.Fatal("termination log is empty; publish must report an answer once stopped")
+// A fork's publish answers with every directory the run wrote into, joined
+// (ADR-0013 決定8).
+func TestPublishForAForkReportsEveryDirectoryWritten(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["security","logic","stuck"]`)
+	pod(t, podA)
+	log := termLog(t)
+	out := filepath.Join(t.TempDir(), "3")
+	t.Cleanup(func() { _ = os.Chmod(out, 0o755) })
+	if err := run(runArgs(cmdPrepare, out, log)); err != nil {
+		t.Fatalf("run(prepare): %v", err)
+	}
+	for _, dir := range []string{"security", "logic"} {
+		if err := os.WriteFile(filepath.Join(out, dir, "focus.md"), []byte("look here"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	publishUntilStopped(t, append(runArgs(cmdPublish, out, log), "-"+contract.FlagMany))
+
+	if first, _, _ := strings.Cut(readFile(t, log), "\n"); first != "logic/security" {
+		t.Fatalf("first line = %q, want every directory written, joined", first)
+	}
+}
+
+// What a run may answer is publish's business; prepare with the fork's flag is
+// a command line the controller never writes.
+func TestPrepareWithTheManyFlagIsRefused(t *testing.T) {
+	t.Setenv(contract.EnvDirectories, `["ok"]`)
+	pod(t, podA)
+	log := termLog(t)
+
+	err := run(append(runArgs(cmdPrepare, filepath.Join(t.TempDir(), "3"), log), "-"+contract.FlagMany))
+	if err == nil || !strings.Contains(readFile(t, log), "prepare failed:") {
+		t.Fatalf("err = %v, log = %q; want prepare refused and the reason reported", err, readFile(t, log))
 	}
 }
 

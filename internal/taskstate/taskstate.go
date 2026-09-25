@@ -22,16 +22,21 @@ limitations under the License.
 // can be tested without a cluster.
 //
 // This package keeps one invariant on status.currentRuns: whenever it is set,
-// it names the phase status.phase also names — with one exception, the cleanup
-// run, which is named PhaseFinally while status.phase stays at the ending the
-// task reached (ADR-0009). Every writer here keeps the two together — Begin
-// and Advance set both at once, RetryInfra rebuilds the ref from the run in
-// flight, and a task that has stopped has either no ref at all or the cleanup
-// one — owed the moment stop writes it, before the Job behind it exists.
-// Reconcile's recovery path, in task_controller.go, is the one writer
-// outside this package, and holds the same rule: finding no run in flight, it
-// rebuilds one from status.phase before persisting it. Nothing reads a flag to
-// know any of this, which is why it is written down here.
+// it names the phase status.phase also names — with two exceptions. The
+// cleanup run is named PhaseFinally while status.phase stays at the ending
+// the task reached (ADR-0009). And a fork's branches (ADR-0013 決定8) are
+// each named for themselves while status.phase stays at the fork they left:
+// status.phase names where the task stands, not what is running, for as long
+// as more than one thing is. Every writer here keeps the single-run half of
+// the rule together — Begin and Advance set both at once, RetryInfra rebuilds
+// the ref from the run in flight, and a task that has stopped has either no
+// ref at all or the cleanup one — owed the moment stop writes it, before the
+// Job behind it exists. Reconcile's recovery path, in task_controller.go, is
+// the one writer outside this package, and holds the same rule: finding no
+// run in flight, it rebuilds one from status.phase before persisting it —
+// which is only safe once currentRuns is confirmed empty, since a fork with
+// its branches in flight also has nothing Current can name. Nothing reads a
+// flag to know any of this, which is why it is written down here.
 //
 // The controller leans on it twice over. It decides a task is terminal by
 // looking up status.phase and then hands the run in flight to settle, so the two
@@ -73,16 +78,36 @@ const ReasonHandlerFailed = "HandlerFailed"
 // something else was left behind.
 const ReasonFinallyFailed = "FinallyFailed"
 
-// Current is the run a task has in flight, or nil when it has none. Until
-// forks run (ADR-0013), a task never has more than one, and Current is how
-// every caller that means "the run" says so rather than indexing the list.
-// The pointer is into status itself, so a caller filling in the run's Job or
-// box writes it where the next status update will carry it.
+// Current is the run a task has in flight, or nil when it has none or more
+// than one — the same rule legacyMirror keeps for status.currentRun, so the
+// two never disagree on when there is a single run to point at. A fork's
+// branches (ADR-0013) are the one time there is more than one: nil here does
+// not mean nothing is running, only that Current cannot say which. Whether a
+// task has no run in flight at all is Idle's question, not this one — a
+// caller that means "no run" checks Idle before calling Current, since nil
+// here reads that way whether currentRuns is empty or holds a fork's
+// branches, and falling back to a recovery path is only correct in the first
+// of those.
+//
+// Until forks run, a task never has more than one, and Current is how every
+// caller that means "the run" says so rather than indexing the list. The
+// pointer is into status itself, so a caller filling in the run's Job or box
+// writes it where the next status update will carry it.
 func Current(status *flowv1alpha1.TaskStatus) *flowv1alpha1.RunRef {
-	if len(status.CurrentRuns) == 0 {
+	if len(status.CurrentRuns) != 1 {
 		return nil
 	}
 	return &status.CurrentRuns[0]
+}
+
+// Idle reports whether a task has no run in flight at all — the question
+// Current cannot answer once forks run (ADR-0013), since its nil also covers
+// a fork's branches in flight. Idle is what a caller checks before treating
+// nil the way this package's history predates forks and treated it: as
+// nothing running, and so safe to rebuild a run for or otherwise recover
+// from.
+func Idle(status *flowv1alpha1.TaskStatus) bool {
+	return len(status.CurrentRuns) == 0
 }
 
 // SetCurrent makes run the one run in flight, or leaves none when run is nil.
@@ -202,8 +227,8 @@ func needsAHuman(e transition.Ending) bool {
 // same default also reads an already-settled State run's now-empty history
 // line as Job, wrongly, with no way left to tell the two apart
 // (HistoryEntry.Runner's own doc carries the same caveat).
-func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
-	if run := Current(status); run != nil {
+func runnerOf(run *flowv1alpha1.RunRef) flowv1alpha1.RunnerType {
+	if run != nil {
 		if kind := run.Runner(); kind != "" {
 			return kind
 		}
@@ -215,13 +240,24 @@ func runnerOf(status *flowv1alpha1.TaskStatus) flowv1alpha1.RunnerType {
 // history rather than stored beside it. Two records of the same fact drift;
 // this one cannot disagree with the history a human reads.
 func Runs(status *flowv1alpha1.TaskStatus, bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding) map[flowv1alpha1.Phase]int32 {
-	runs := make(map[flowv1alpha1.Phase]int32, len(status.History)+1)
+	runs := make(map[flowv1alpha1.Phase]int32, len(status.History)+len(status.CurrentRuns))
 	for _, h := range status.History {
 		runs[h.Phase]++
 	}
-	// The phase in flight has run even though it has not been recorded yet,
-	// which is what makes a self-loop count as a rework.
-	if status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) {
+	// A run in flight has run even though it has not been recorded yet,
+	// which is what makes a self-loop count as a rework. The runs in flight
+	// are counted rather than status.phase, because at a fork the two part:
+	// the task stands at the fork while its branches are what run (ADR-0013).
+	// With nothing in flight — a status written before its run was, the gap
+	// Reconcile's recovery closes — status.phase is the run about to start.
+	inFlight := false
+	for _, r := range status.CurrentRuns {
+		if !r.Phase.IsFinally() {
+			runs[r.Phase]++
+			inFlight = true
+		}
+	}
+	if !inFlight && status.Phase != "" && !transition.IsTerminal(bindings, status.Phase) {
 		runs[status.Phase]++
 	}
 	return runs
@@ -269,16 +305,43 @@ func Advance(
 	res transition.Result,
 	now metav1.Time,
 ) {
+	run := Current(status)
+	if run == nil {
+		// Only Reconcile's recovery ever settles a run it has not written
+		// down yet, and that run is by construction the one status.phase
+		// names; recording it under that name is what Advance always did.
+		run = &flowv1alpha1.RunRef{Phase: status.Phase, RunID: status.RunID}
+	}
+	record(status, run, directory, res.Outcome, res.Detail, now)
+	move(status, flow, res, now)
+}
+
+// record appends run's line to history: what it answered and why the task
+// moved as it did. The run is named rather than read off status because a
+// fork's branches are several runs at once, and each is recorded as it
+// settles (ADR-0013).
+func record(
+	status *flowv1alpha1.TaskStatus,
+	run *flowv1alpha1.RunRef,
+	directory string,
+	outcome transition.Outcome,
+	detail string,
+	now metav1.Time,
+) {
 	status.History = append(status.History, flowv1alpha1.HistoryEntry{
-		Phase:      status.Phase,
-		RunID:      status.RunID,
+		Phase:      run.Phase,
+		RunID:      run.RunID,
 		Directory:  directory,
-		Outcome:    string(res.Outcome),
-		Runner:     runnerOf(status),
-		Reason:     clampReason(res.Detail),
+		Outcome:    string(outcome),
+		Runner:     runnerOf(run),
+		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})
+}
 
+// move takes the task to res.Next: the next phase's run, or the ending and
+// everything an ending says.
+func move(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec, res transition.Result, now metav1.Time) {
 	status.Phase = res.Next
 
 	// Three endings need a human: the framework's own two, and an ending the
@@ -373,7 +436,7 @@ func FinishFinally(
 		RunID:      status.RunID,
 		Directory:  directory,
 		Outcome:    string(outcome),
-		Runner:     runnerOf(status),
+		Runner:     runnerOf(Current(status)),
 		Reason:     clampReason(detail),
 		FinishedAt: &now,
 	})

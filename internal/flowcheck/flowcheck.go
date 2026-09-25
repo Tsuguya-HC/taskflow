@@ -38,6 +38,7 @@ import (
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
+	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
 // Check reports everything wrong with spec, as field errors rooted at path.
@@ -275,26 +276,10 @@ func checkBranchEntry(spec *flowv1alpha1.TaskFlowSpec, bindings *field.Path) fie
 	return errs
 }
 
-// branches is every phase a fork may start: the destinations its run can
-// choose, and the ones it starts regardless. Escalated is where a run goes
-// instead of choosing, and the join is where branches meet rather than one of
-// them, so neither is a branch.
+// branches is every phase a fork may start — the one rule transition uses
+// to start them, so what admission checks and what runs are the same set.
 func branches(spec *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase) []flowv1alpha1.Phase {
-	binding := spec.Bindings[fork]
-	var out []flowv1alpha1.Phase
-	for _, dest := range sortedDestinations(binding.Next) {
-		if !dest.IsReserved() && dest != binding.Join.Phase {
-			out = append(out, dest)
-		}
-	}
-	for _, always := range binding.Join.Always {
-		if always != "" && !always.IsReserved() && !always.IsFinally() &&
-			always != fork && always != binding.Join.Phase && !slices.Contains(out, always) {
-			out = append(out, always)
-		}
-	}
-	sortPhases(out)
-	return out
+	return transition.Branches(spec.Bindings, fork)
 }
 
 // checkFinally judges the cleanup run's declaration. Only the directory needs

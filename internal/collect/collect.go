@@ -27,6 +27,10 @@ limitations under the License.
 // it is exactly one of the directories the flow declared, and does not
 // otherwise. That is the same rule the directories themselves follow, for
 // the same reason: a vocabulary you cannot spell wrong beats one you validate.
+// A fork's run is the one exception in shape, not in rule (ADR-0013): it
+// answers with one or more of its directories joined by
+// contract.DirectorySeparator — a character no directory name can contain —
+// and the answer counts only if every piece is one of them, each once.
 package collect
 
 import (
@@ -52,11 +56,31 @@ type Answer struct {
 }
 
 // FromPod returns the answer a finished pod gave.
-func FromPod(pod *corev1.Pod, declared []string) Answer {
+func FromPod(pod *corev1.Pod, declared []string, many bool) Answer {
 	if pod == nil {
 		return Answer{Reason: "no pod to read"}
 	}
-	return FromPods([]corev1.Pod{*pod}, declared)
+	return FromPods([]corev1.Pod{*pod}, declared, many)
+}
+
+// named is the answer value gives, and whether it counts at all. A run's
+// answer is exactly one of declared. A fork's (many) is one or more of them,
+// each once, joined by contract.DirectorySeparator — and is spelled back the
+// way contract.JoinDirectories spells it, so the same choice reads the same
+// whichever order it was written in.
+func named(value string, declared []string, many bool) (string, bool) {
+	if !many {
+		return value, slices.Contains(declared, value)
+	}
+	parts := strings.Split(value, contract.DirectorySeparator)
+	seen := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		if !slices.Contains(declared, p) || seen[p] {
+			return "", false
+		}
+		seen[p] = true
+	}
+	return contract.JoinDirectories(parts), true
 }
 
 // FromPods returns the answer a finished run gave, read across every pod the
@@ -72,7 +96,7 @@ func FromPod(pod *corev1.Pod, declared []string) Answer {
 // that: exactly one container across all of them names a declared directory,
 // or there is no answer. Two pods that both answered is exactly the case a
 // human should look at.
-func FromPods(pods []corev1.Pod, declared []string) Answer {
+func FromPods(pods []corev1.Pod, declared []string, many bool) Answer {
 	if len(pods) == 0 {
 		return Answer{Reason: "no pod to read"}
 	}
@@ -93,8 +117,8 @@ func FromPods(pods []corev1.Pod, declared []string) Answer {
 			}
 			looked++
 			first, rest, _ := strings.Cut(msg, "\n")
-			first = strings.TrimSpace(first)
-			if !slices.Contains(declared, first) {
+			first, ok := named(strings.TrimSpace(first), declared, many)
+			if !ok {
 				continue
 			}
 			name := cs.Name
@@ -159,7 +183,7 @@ func Ran(pods []corev1.Pod) bool {
 // not count, and ends the same way: no directory, and a reason saying so.
 // Surrounding space is trimmed for the same reason it is there, an answer
 // typed by hand.
-func FromBox(box *corev1.ConfigMap, declared []string) (Answer, bool) {
+func FromBox(box *corev1.ConfigMap, declared []string, many bool) (Answer, bool) {
 	if box == nil {
 		return Answer{Reason: "no verdict box to read"}, false
 	}
@@ -172,12 +196,13 @@ func FromBox(box *corev1.ConfigMap, declared []string) (Answer, bool) {
 		return Answer{}, false
 	}
 	reason := Sanitize(strings.TrimSpace(box.Data[contract.KeyReason]))
-	if !slices.Contains(declared, value) {
+	directory, ok := named(value, declared, many)
+	if !ok {
 		return Answer{Reason: reasonf(
 			"%q is not one of the words this run may be answered with (%s)",
 			Sanitize(value), strings.Join(declared, ", "))}, true
 	}
-	return Answer{Directory: value, Reason: reason}, true
+	return Answer{Directory: directory, Reason: reason}, true
 }
 
 // reasonf builds a Reason from prose wrapped around pieces that are each

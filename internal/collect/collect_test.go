@@ -41,7 +41,7 @@ func terminated(name, msg string) corev1.ContainerStatus {
 }
 
 func TestAnswers(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "ok")), declared)
+	got := FromPod(pod(terminated("publish", "ok")), declared, false)
 	if got.Directory != "ok" {
 		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
 	}
@@ -52,7 +52,7 @@ func TestAnswers(t *testing.T) {
 
 // The rest of the message is for a human. It never reaches the transition.
 func TestCarriesTheReasonWithoutParsingIt(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "more\n3 件のうち 1 件しか確認できていない")), declared)
+	got := FromPod(pod(terminated("publish", "more\n3 件のうち 1 件しか確認できていない")), declared, false)
 	if got.Directory != dirMore {
 		t.Fatalf("directory = %q", got.Directory)
 	}
@@ -65,7 +65,7 @@ func TestCarriesTheReasonWithoutParsingIt(t *testing.T) {
 // An agent is not trusted, so control sequences it writes must not survive
 // into that channel.
 func TestReasonStripsControlSequences(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "more\n\x1b[31mred\x1b[0m\x07 alert")), declared)
+	got := FromPod(pod(terminated("publish", "more\n\x1b[31mred\x1b[0m\x07 alert")), declared, false)
 	if got.Directory != dirMore {
 		t.Fatalf("directory = %q", got.Directory)
 	}
@@ -81,7 +81,7 @@ func TestReasonStripsControlSequences(t *testing.T) {
 // full-width or other Unicode space separator (category Zs) must be kept
 // explicitly or it silently vanishes and runs the surrounding words together.
 func TestReasonKeepsUnicodeSpaceSeparators(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "more\n設定が　正しくない")), declared)
+	got := FromPod(pod(terminated("publish", "more\n設定が　正しくない")), declared, false)
 	if got.Directory != dirMore {
 		t.Fatalf("directory = %q", got.Directory)
 	}
@@ -94,7 +94,7 @@ func TestReasonKeepsUnicodeSpaceSeparators(t *testing.T) {
 // must not vanish silently either — the replacement character marks that
 // something unreadable was there instead of the text just getting shorter.
 func TestReasonHandlesInvalidUTF8(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "ok\nabc\xffdef")), declared)
+	got := FromPod(pod(terminated("publish", "ok\nabc\xffdef")), declared, false)
 	if got.Directory != "ok" {
 		t.Fatalf("directory = %q", got.Directory)
 	}
@@ -107,7 +107,7 @@ func TestReasonHandlesInvalidUTF8(t *testing.T) {
 // reason must not carry an unbounded amount of it into status.
 func TestReasonIsTruncated(t *testing.T) {
 	long := strings.Repeat("a", maxReasonRunes+500)
-	got := FromPod(pod(terminated("publish", "more\n"+long)), declared)
+	got := FromPod(pod(terminated("publish", "more\n"+long)), declared, false)
 	if got.Directory != dirMore {
 		t.Fatalf("directory = %q", got.Directory)
 	}
@@ -122,7 +122,7 @@ func TestReadsInitContainers(t *testing.T) {
 		InitContainerStatuses: []corev1.ContainerStatus{terminated("publish", "ok")},
 		ContainerStatuses:     []corev1.ContainerStatus{terminated("agent", "")},
 	}}
-	if got := FromPod(p, declared); got.Directory != "ok" {
+	if got := FromPod(p, declared, false); got.Directory != "ok" {
 		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
 	}
 }
@@ -130,7 +130,7 @@ func TestReadsInitContainers(t *testing.T) {
 // Nothing wrote anything: the node died, the pod was OOM-killed, the sidecar
 // never got to run. Fail-closed with no effort on anyone's part.
 func TestSilenceIsNotAnAnswer(t *testing.T) {
-	got := FromPod(pod(corev1.ContainerStatus{Name: "agent"}), declared)
+	got := FromPod(pod(corev1.ContainerStatus{Name: "agent"}), declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q, want none", got.Directory)
 	}
@@ -142,7 +142,7 @@ func TestSilenceIsNotAnAnswer(t *testing.T) {
 // This is how a sidecar reports its own failure: it writes something that is
 // not a declared directory. Nothing had to be designed for it.
 func TestAnUndeclaredMessageIsNotAnAnswer(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "publish failed: 503 from the store")), declared)
+	got := FromPod(pod(terminated("publish", "publish failed: 503 from the store")), declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q, want none", got.Directory)
 	}
@@ -152,7 +152,7 @@ func TestAnUndeclaredMessageIsNotAnAnswer(t *testing.T) {
 }
 
 func TestTwoAnswersAreNoAnswer(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "ok"), terminated("agent", dirMore)), declared)
+	got := FromPod(pod(terminated("publish", "ok"), terminated("agent", dirMore)), declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q, want none", got.Directory)
 	}
@@ -164,7 +164,7 @@ func TestTwoAnswersAreNoAnswer(t *testing.T) {
 // Even agreeing containers are two answers. Picking one would mean deciding
 // which container speaks for the run, which is exactly what this avoids.
 func TestTwoAgreeingAnswersAreStillNoAnswer(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "ok"), terminated("agent", "ok")), declared)
+	got := FromPod(pod(terminated("publish", "ok"), terminated("agent", "ok")), declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q, want none", got.Directory)
 	}
@@ -173,14 +173,14 @@ func TestTwoAgreeingAnswersAreStillNoAnswer(t *testing.T) {
 // The vocabulary comes from the flow, so a name that was not declared for this
 // phase is not an answer here even if some other phase declares it.
 func TestOnlyThisPhasesVocabularyCounts(t *testing.T) {
-	got := FromPod(pod(terminated("publish", "sent")), declared)
+	got := FromPod(pod(terminated("publish", "sent")), declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q; sent belongs to another phase", got.Directory)
 	}
 }
 
 func TestIgnoresSurroundingWhitespace(t *testing.T) {
-	if got := FromPod(pod(terminated("publish", "  ok  \nfine")), declared); got.Directory != "ok" {
+	if got := FromPod(pod(terminated("publish", "  ok  \nfine")), declared, false); got.Directory != "ok" {
 		t.Fatalf("directory = %q", got.Directory)
 	}
 }
@@ -190,14 +190,14 @@ func TestIgnoresSurroundingWhitespace(t *testing.T) {
 // mentioning ok would decide the task.
 func TestSubstringsDoNotCount(t *testing.T) {
 	for _, msg := range []string{"looks ok to me", "okay", "not ok"} {
-		if got := FromPod(pod(terminated("publish", msg)), declared); got.Directory != "" {
+		if got := FromPod(pod(terminated("publish", msg)), declared, false); got.Directory != "" {
 			t.Fatalf("%q was read as %q", msg, got.Directory)
 		}
 	}
 }
 
 func TestNoPod(t *testing.T) {
-	if got := FromPod(nil, declared); got.Directory != "" || got.Reason == "" {
+	if got := FromPod(nil, declared, false); got.Directory != "" || got.Reason == "" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -207,7 +207,7 @@ func TestRunningContainersAreNotRead(t *testing.T) {
 		Name:  "publish",
 		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 	})
-	if got := FromPod(p, declared); got.Directory != "" {
+	if got := FromPod(p, declared, false); got.Directory != "" {
 		t.Fatalf("directory = %q from a container that has not finished", got.Directory)
 	}
 }
@@ -220,7 +220,7 @@ func TestReadsAcrossThePodsOfAJob(t *testing.T) {
 	b := pod(terminated("publish", ""))
 	b.Name = "run-b"
 
-	got := FromPods([]corev1.Pod{*a, *b}, declared)
+	got := FromPods([]corev1.Pod{*a, *b}, declared, false)
 	if got.Directory != "ok" {
 		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
 	}
@@ -235,7 +235,7 @@ func TestTwoPodsBothAnsweringIsNoAnswer(t *testing.T) {
 	b := pod(terminated("publish", "ok"))
 	b.Name = "run-b"
 
-	got := FromPods([]corev1.Pod{*a, *b}, declared)
+	got := FromPods([]corev1.Pod{*a, *b}, declared, false)
 	if got.Directory != "" {
 		t.Fatalf("directory = %q; two pods agreeing is still two answers", got.Directory)
 	}
@@ -245,7 +245,7 @@ func TestTwoPodsBothAnsweringIsNoAnswer(t *testing.T) {
 }
 
 func TestNoPodsIsNoAnswer(t *testing.T) {
-	got := FromPods(nil, declared)
+	got := FromPods(nil, declared, false)
 	if got.Directory != "" || got.Reason == "" {
 		t.Fatalf("got %+v", got)
 	}
@@ -289,7 +289,7 @@ func TestBoxNotAnsweredYet(t *testing.T) {
 		"reason alone":    {contract.KeyReason: "まだ見ている"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, answered := FromBox(box(data), declared)
+			got, answered := FromBox(box(data), declared, false)
 			if answered {
 				t.Fatalf("answered = true (%+v); nothing that counts as a word was written", got)
 			}
@@ -301,7 +301,7 @@ func TestBoxNotAnsweredYet(t *testing.T) {
 }
 
 func TestBoxAnswers(t *testing.T) {
-	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: " ok\n", contract.KeyReason: " 見ました "}), declared)
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: " ok\n", contract.KeyReason: " 見ました "}), declared, false)
 	if !answered || got.Directory != "ok" {
 		t.Fatalf("answer = %+v, answered = %v; surrounding space is trimmed, the word is not", got, answered)
 	}
@@ -313,7 +313,7 @@ func TestBoxAnswers(t *testing.T) {
 // A word outside the vocabulary is not an error to report: it is an answer
 // that does not count, and ends where every other non-answer does.
 func TestBoxOutsideTheVocabulary(t *testing.T) {
-	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: "approved"}), declared)
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: "approved"}), declared, false)
 	if !answered {
 		t.Fatal("answered = false; something was written, and the run is over either way")
 	}
@@ -328,11 +328,11 @@ func TestBoxOutsideTheVocabulary(t *testing.T) {
 // The value and the reason are both free text somebody else wrote, and both
 // end up in a status a person reads with kubectl.
 func TestBoxSanitizesWhatItReadsBack(t *testing.T) {
-	got, _ := FromBox(box(map[string]string{contract.KeyVerdict: "\x1b[31mapproved"}), declared)
+	got, _ := FromBox(box(map[string]string{contract.KeyVerdict: "\x1b[31mapproved"}), declared, false)
 	if strings.Contains(got.Reason, "\x1b") {
 		t.Fatalf("reason = %q; an escape sequence reached a terminal through status", got.Reason)
 	}
-	got, _ = FromBox(box(map[string]string{contract.KeyVerdict: "ok", contract.KeyReason: "done\x1b]0;pwned\a"}), declared)
+	got, _ = FromBox(box(map[string]string{contract.KeyVerdict: "ok", contract.KeyReason: "done\x1b]0;pwned\a"}), declared, false)
 	if strings.Contains(got.Reason, "\x1b") {
 		t.Fatalf("reason = %q; an escape sequence reached a terminal through status", got.Reason)
 	}
@@ -345,7 +345,7 @@ func TestBoxSanitizesWhatItReadsBack(t *testing.T) {
 // vocabulary's prose must not walk over that and get the write refused.
 func TestBoxOutsideTheVocabularyReasonStaysBounded(t *testing.T) {
 	long := strings.Repeat("no", maxReasonRunes)
-	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: long}), declared)
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: long}), declared, false)
 	if !answered {
 		t.Fatal("answered = false; something was written")
 	}
@@ -366,15 +366,58 @@ func TestReasonStaysBoundedByALongDeclaredList(t *testing.T) {
 	for i := range many {
 		many[i] = strings.Repeat("x", 20)
 	}
-	got := FromPods([]corev1.Pod{*pod(terminated("publish", "unrelated"))}, many)
+	got := FromPods([]corev1.Pod{*pod(terminated("publish", "unrelated"))}, many, false)
 	if n := len([]rune(got.Reason)); n > maxReasonRunes {
 		t.Fatalf("reason has %d runes, want at most %d (the CRD allows 2048)", n, maxReasonRunes)
 	}
 }
 
 func TestBoxMissing(t *testing.T) {
-	got, answered := FromBox(nil, declared)
+	got, answered := FromBox(nil, declared, false)
 	if answered || got.Reason == "" {
 		t.Fatalf("answer = %+v, answered = %v; a box that is not there says so", got, answered)
+	}
+}
+
+// joinedAnswer is a fork's answer naming both directories, in its one spelling.
+const joinedAnswer = "more/ok"
+
+// A fork's run answers with every branch it chose, joined; the answer counts
+// only if each piece is one of its directories, each once, and reads back in
+// one spelling whatever order it was written in (ADR-0013).
+func TestAForkAnswersWithEveryDirectoryItChose(t *testing.T) {
+	cases := map[string]struct {
+		message, want string
+	}{
+		"one branch":               {message: "ok", want: "ok"},
+		"two branches":             {message: joinedAnswer, want: joinedAnswer},
+		"two, in the other order":  {message: "ok/more", want: joinedAnswer},
+		"a branch named twice":     {message: "ok/ok", want: ""},
+		"a word outside the words": {message: "ok/maybe", want: ""},
+		"an empty piece":           {message: "ok/", want: ""},
+		"nothing at all":           {message: "/", want: ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := FromPod(pod(terminated("publish", c.message)), declared, true); got.Directory != c.want {
+				t.Fatalf("directory = %q, want %q (%s)", got.Directory, c.want, got.Reason)
+			}
+		})
+	}
+}
+
+// Joined answers are a fork's alone: any other run naming two directories has
+// named none.
+func TestOnlyAForkMayAnswerWithMore(t *testing.T) {
+	if got := FromPod(pod(terminated("publish", joinedAnswer)), declared, false); got.Directory != "" {
+		t.Fatalf("directory = %q; a run that is not a fork answers with exactly one", got.Directory)
+	}
+}
+
+// The verdict box holds a fork's answer the same way.
+func TestABoxAnswersForAFork(t *testing.T) {
+	got, answered := FromBox(box(map[string]string{contract.KeyVerdict: "ok/more"}), declared, true)
+	if !answered || got.Directory != joinedAnswer {
+		t.Fatalf("got %+v answered=%v, want more/ok", got, answered)
 	}
 }

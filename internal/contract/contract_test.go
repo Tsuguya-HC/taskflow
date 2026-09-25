@@ -88,3 +88,26 @@ func TestRefusesTheNameThePodsMarkOccupies(t *testing.T) {
 		t.Fatalf("CheckDirectoryName(MarkName=%q) = %v, want ErrBadDirectoryName", MarkName, err)
 	}
 }
+
+// A fork's answer has one spelling: the same directories read the same
+// whichever order they came in, and the input is left as it was.
+func TestJoinDirectories(t *testing.T) {
+	in := []string{"security", "logic"}
+	if got := JoinDirectories(in); got != "logic"+DirectorySeparator+"security" {
+		t.Fatalf("JoinDirectories = %q", got)
+	}
+	if in[0] != "security" {
+		t.Fatal("JoinDirectories sorted its caller's slice in place")
+	}
+	if got := JoinDirectories([]string{"ok"}); got != "ok" {
+		t.Fatalf("one directory joins to itself, got %q", got)
+	}
+}
+
+// The separator is the one character a directory name can never contain, so
+// a joined answer splits back into exactly the names that went in.
+func TestTheSeparatorIsNeverInAName(t *testing.T) {
+	if err := CheckDirectoryName("a" + DirectorySeparator + "b"); err == nil {
+		t.Fatal("a name containing the separator was accepted")
+	}
+}
