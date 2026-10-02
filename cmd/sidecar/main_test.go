@@ -29,6 +29,18 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/sidecar"
 )
 
+// The sidecar reads its contract from FLOW_* variables. Tests that check
+// a variable's absence must not see one inherited from the environment the
+// suite runs in, or they wait for a SIGTERM that never comes.
+func TestMain(m *testing.M) {
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "FLOW_") {
+			_ = os.Unsetenv(name)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 // termLog returns the path to a termination-log file that already exists,
 // the way the kubelet's bind mount would leave it, and its current contents.
 func termLog(t *testing.T) string {
