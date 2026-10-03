@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,21 +26,24 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 
 	"github.com/Tsuguya-HC/taskflow/internal/collect"
 	"github.com/Tsuguya-HC/taskflow/internal/metrics"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
+	"github.com/Tsuguya-HC/taskflow/internal/snapshot"
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -86,6 +90,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;create
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -1145,8 +1150,129 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
 		return r.fail(ctx, task, &flow.Spec, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
+	// Written before the first run, so a definition edited mid-task cannot
+	// change what the task started from.
+	if err := r.ensureSnapshot(ctx, task, flow); err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return r.fail(ctx, task, &flow.Spec, broken.reason)
+		}
+		return err
+	}
 	taskstate.Begin(&task.Status, flow.Spec.Start)
 	return r.Status().Update(ctx, task)
+}
+
+// snapshotSizeLimit is the largest copy begin writes. The apiserver refuses
+// anything past etcd's own ceiling; staying below it keeps a task whose copy
+// would not fit from starting without one.
+const snapshotSizeLimit = 1500 * 1024
+
+// ensureSnapshot writes the one revision a task's start carries: the flow
+// spec and the spec of every handler its bindings name, plus the finally
+// handler when one exists to be copied. A finally handler with nothing
+// behind it is recorded rather than refused — a task missing only its
+// cleanup still starts, and the owed cleanup run reports the absence when it
+// is reached. Anything else missing stops the task before its first run.
+//
+// The name is derived from the task, so no status field points at it, and
+// the UID is in the name: a task deleted and recreated under the same name
+// is a different task and must not adopt the old one's copy. The copy is
+// never updated — an existing revision owned by this task is left alone.
+func (r *TaskReconciler) ensureSnapshot(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
+	name := snapshot.RevisionName(task.Name, task.UID)
+	var existing appsv1.ControllerRevision
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &existing); err == nil {
+		if !metav1.IsControlledBy(&existing, task) {
+			return notOwnedError("revision", name, task, existing.OwnerReferences)
+		}
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	// phasesOf maps each bound handler back to a phase that names it, for
+	// the error when that handler is missing. A handler filling several
+	// phases reports one of them; every name here comes from a binding, so
+	// the map covers them all.
+	phasesOf := map[string]flowv1alpha1.Phase{}
+	for phase, binding := range flow.Spec.Bindings {
+		if _, seen := phasesOf[binding.Handler]; !seen {
+			phasesOf[binding.Handler] = phase
+		}
+	}
+	finallyName := ""
+	if flow.Spec.Finally != nil {
+		finallyName = flow.Spec.Finally.Handler
+	}
+
+	handlers := map[string]flowv1alpha1.TaskHandlerSpec{}
+	for handlerName, phase := range phasesOf {
+		handler, err := r.handlerFor(ctx, task, handlerName, phase)
+		if err != nil {
+			return err
+		}
+		handlers[handlerName] = handler.Spec
+	}
+	finallyAbsent := false
+	if finallyName != "" {
+		if _, dup := phasesOf[finallyName]; !dup {
+			handler, err := r.handlerFor(ctx, task, finallyName, flowv1alpha1.PhaseFinally)
+			if err != nil {
+				var broken brokenFlow
+				if errors.As(err, &broken) {
+					finallyAbsent = true
+				} else {
+					return err
+				}
+			} else {
+				handlers[finallyName] = handler.Spec
+			}
+		}
+	}
+
+	raw, err := json.Marshal(snapshot.Payload{Flow: flow.Spec, Handlers: handlers, FinallyAbsent: finallyAbsent})
+	if err != nil {
+		return err
+	}
+	if len(raw) > snapshotSizeLimit {
+		return brokenFlow{fmt.Sprintf("the start-time copy of flow %q does not fit in one object (%d bytes)", flow.Name, len(raw))}
+	}
+	rev := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: task.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         flowv1alpha1.SchemeGroupVersion.String(),
+				Kind:               "Task",
+				Name:               task.Name,
+				UID:                task.UID,
+				Controller:         ptr.To(true),
+				BlockOwnerDeletion: ptr.To(true),
+			}},
+		},
+		Data: runtime.RawExtension{Raw: raw},
+	}
+	if err := r.Create(ctx, rev); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			var got appsv1.ControllerRevision
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &got); err != nil {
+				return err
+			}
+			if !metav1.IsControlledBy(&got, task) {
+				return notOwnedError("revision", name, task, got.OwnerReferences)
+			}
+			return nil
+		}
+		// The precheck above refuses an oversize copy before this Create, so
+		// reaching here with one means the ceiling moved between the two —
+		// close enough to not fit that the task must not start without it.
+		if apierrors.IsRequestEntityTooLargeError(err) || apierrors.IsInvalid(err) {
+			return brokenFlow{fmt.Sprintf("the start-time copy of flow %q does not fit in one object: %v", flow.Name, err)}
+		}
+		return err
+	}
+	return nil
 }
 
 // fail stops a task whose flow is broken. Nothing is retried: the fault is in
