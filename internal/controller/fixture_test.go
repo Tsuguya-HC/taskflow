@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,6 +87,26 @@ func newFixture() *fixture {
 	// Buffered well past what any one spec produces: a FakeRecorder drops
 	// events once its channel is full, which would turn "nothing was
 	// announced" into a passing assertion for the wrong reason.
+	//
+	// Task is fx.name, so its ControllerRevisions answer the same listing:
+	// envtest runs no garbage collector, so the spec that created them
+	// removes them here instead of leaving them for a later spec's
+	// listing to trip over.
+	DeferCleanup(func() {
+		var revs appsv1.ControllerRevisionList
+		if err := k8sClient.List(fx.ctx, &revs, client.InNamespace(resourceNamespace)); err != nil {
+			return
+		}
+		for i := range revs.Items {
+			rev := &revs.Items[i]
+			for _, ref := range rev.OwnerReferences {
+				if ref.Controller != nil && *ref.Controller && string(ref.UID) != "" && ref.Name == fx.name {
+					_ = k8sClient.Delete(fx.ctx, rev)
+					break
+				}
+			}
+		}
+	})
 	fx.events = events.NewFakeRecorder(16)
 	fx.reconciler = &TaskReconciler{
 		Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: fx.events, SidecarImage: sidecarImage,

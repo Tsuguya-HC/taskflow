@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,11 +28,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 
@@ -39,7 +44,6 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -81,6 +85,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=flow.tgy.io,resources=taskflows;taskhandlers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -1141,12 +1146,125 @@ func (r *TaskReconciler) now() time.Time {
 // begin puts a fresh task on the flow's starting phase. The decision of what
 // that does to status lives in taskstate; this is just the fetch-mutate-write
 // around it.
+//
+// Before status is written, the flow spec and every bound handler's spec are
+// copied into one ControllerRevision: a later edit must not change what a
+// task already started on, and a second reconcile must find that copy rather
+// than make another (the name carries the task's UID, so a recreated task
+// under the same name cannot take an earlier generation's copy for its own).
 func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
 		return r.fail(ctx, task, &flow.Spec, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
+	if err := r.ensureSnapshot(ctx, task, flow); err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return r.fail(ctx, task, &flow.Spec, broken.reason)
+		}
+		return err
+	}
 	taskstate.Begin(&task.Status, flow.Spec.Start)
 	return r.Status().Update(ctx, task)
+}
+
+// snapshotSizeLimit is how large the copy in one ControllerRevision may be.
+// etcd refuses objects past its own limit (2026-09-05 measured: a write past
+// the limit fails at the apiserver), so a copy that would not fit fails the
+// task before its first run instead of being written in pieces.
+const snapshotSizeLimit = 1500 * 1024
+
+// snapshotPayload is the copy itself: the flow spec whole, the spec of every
+// handler the bindings name, and the finally handler's spec only when one
+// exists and resolves. Later steps run on Status and live objects, not this;
+// it is only ever written here.
+type snapshotPayload struct {
+	Flow     flowv1alpha1.TaskFlowSpec               `json:"flow"`
+	Handlers map[string]flowv1alpha1.TaskHandlerSpec `json:"handlers"`
+	Finally  *flowv1alpha1.TaskHandlerSpec           `json:"finally,omitempty"`
+}
+
+// snapshotRevisionName derives the revision's name from the task. The task
+// name stays readable in front; the UID digest keeps a deleted task's leftover
+// revision — envtest runs no garbage collector, production relies on one —
+// from colliding with the recreated task's own copy.
+func snapshotRevisionName(task *flowv1alpha1.Task) string {
+	sum := sha256.Sum256([]byte(string(task.UID)))
+	const nameLimit = 63
+	suffix := "-snapshot-" + hex.EncodeToString(sum[:])[:8]
+	prefix := task.Name
+	if len(prefix)+len(suffix) > nameLimit {
+		budget := max(0, nameLimit-len(suffix))
+		prefix = task.Name[:min(budget, len(task.Name))]
+	}
+	return prefix + suffix
+}
+
+// ensureSnapshot writes the task's copy once and only reads it afterwards. A
+// missing handler the bindings name is a broken flow, failed before the first
+// run; a missing finally handler is not — the start goes ahead without it,
+// the way the cleanup run already records that absence on its own.
+func (r *TaskReconciler) ensureSnapshot(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
+	name := snapshotRevisionName(task)
+	var existing appsv1.ControllerRevision
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &existing); err == nil {
+		if !metav1.IsControlledBy(&existing, task) {
+			return notOwnedError("controllerrevision", name, task, existing.OwnerReferences)
+		}
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	payload := snapshotPayload{
+		Flow:     flow.Spec,
+		Handlers: map[string]flowv1alpha1.TaskHandlerSpec{},
+	}
+	for phase, binding := range flow.Spec.Bindings {
+		handler, err := r.handlerFor(ctx, task, binding.Handler, phase)
+		if err != nil {
+			return err
+		}
+		payload.Handlers[binding.Handler] = handler.Spec
+	}
+	if flow.Spec.Finally != nil {
+		if handler, err := r.handlerFor(ctx, task, flow.Spec.Finally.Handler, flowv1alpha1.PhaseFinally); err != nil {
+			var broken brokenFlow
+			if !errors.As(err, &broken) {
+				return err
+			}
+		} else {
+			finally := handler.Spec
+			payload.Finally = &finally
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if len(raw) > snapshotSizeLimit {
+		return brokenFlow{fmt.Sprintf("the copy of flow %q and its handlers does not fit in one object (%d bytes)", flow.Name, len(raw))}
+	}
+	rev := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: task.Namespace},
+		Data:       runtime.RawExtension{Raw: raw},
+		Revision:   1,
+	}
+	if err := ctrl.SetControllerReference(task, rev, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, rev); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			var got appsv1.ControllerRevision
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &got); err != nil {
+				return err
+			}
+			if !metav1.IsControlledBy(&got, task) {
+				return notOwnedError("controllerrevision", name, task, got.OwnerReferences)
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // fail stops a task whose flow is broken. Nothing is retried: the fault is in
