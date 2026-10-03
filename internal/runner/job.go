@@ -91,14 +91,23 @@ const (
 	// follows none of them.
 	kindTask = "Task"
 
+	// MaxNameLength is the limit Kubernetes puts on an object name. Exported
+	// so every object-name budget in the framework reads one value instead of
+	// restating the literal.
+	MaxNameLength = 63
 	// maxNameLength is the limit Kubernetes puts on an object name.
-	maxNameLength = 63
+	maxNameLength = MaxNameLength
 	// phaseHashLength is how much of the phase digest goes into the name.
 	phaseHashLength = 8
+	// TaskHashLength is how much of a digest survives name truncation, so the
+	// part that gets cut is not the only thing telling two names apart.
+	// Exported for the same reason: one width every name reads, not a
+	// literal restated per caller.
+	TaskHashLength = 8
 	// taskHashLength is how much of the task name's digest survives a
 	// truncation, so the part that gets cut is not the only thing telling
 	// two task names apart.
-	taskHashLength = 8
+	taskHashLength = TaskHashLength
 
 	// PrepareContainer and PublishContainer name the two containers the
 	// controller puts into every Job. The prefix keeps them out of the way

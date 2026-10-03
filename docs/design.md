@@ -256,7 +256,7 @@ framework の外になる。独立した 2 本の Task になり親子関係が�
 決まらない。手元に先例があるので繰り返さない。
 
 以下の旧 `spec` フィールドは TaskFlow 側へ移動: `profile` / `bindings` / `reworkBudget`（後に `maxRunsPerPhase` へ置き換え、[ADR-0012](adr/0012-run-limit-per-phase.md)）。
-参照は毎 reconcile で解決し直す（走行中の flow をスナップショットしない — [ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。
+参照は毎 reconcile で解決し直す。実行の判断は生きた handler と flow を読む（[ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。Task 開始時に flow と bindings が名指す handler の写しを別オブジェクトへ 1 回だけ書き、以後は更新しない — まだ何もそこからは読まない。
 
 ```yaml
 status:

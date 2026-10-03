@@ -1189,11 +1189,10 @@ type snapshotPayload struct {
 // from colliding with the recreated task's own copy.
 func snapshotRevisionName(task *flowv1alpha1.Task) string {
 	sum := sha256.Sum256([]byte(string(task.UID)))
-	const nameLimit = 63
-	suffix := "-snapshot-" + hex.EncodeToString(sum[:])[:8]
+	suffix := "-snapshot-" + hex.EncodeToString(sum[:])[:runner.TaskHashLength]
 	prefix := task.Name
-	if len(prefix)+len(suffix) > nameLimit {
-		budget := max(0, nameLimit-len(suffix))
+	if len(prefix)+len(suffix) > runner.MaxNameLength {
+		budget := max(0, runner.MaxNameLength-len(suffix))
 		prefix = task.Name[:min(budget, len(task.Name))]
 	}
 	return prefix + suffix
@@ -1244,9 +1243,16 @@ func (r *TaskReconciler) ensureSnapshot(ctx context.Context, task *flowv1alpha1.
 		return brokenFlow{fmt.Sprintf("the copy of flow %q and its handlers does not fit in one object (%d bytes)", flow.Name, len(raw))}
 	}
 	rev := &appsv1.ControllerRevision{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: task.Namespace},
-		Data:       runtime.RawExtension{Raw: raw},
-		Revision:   1,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: task.Namespace,
+			Labels: map[string]string{
+				runner.LabelManagedBy: runner.ManagedBy,
+				runner.LabelTaskUID:   string(task.UID),
+			},
+		},
+		Data:     runtime.RawExtension{Raw: raw},
+		Revision: 1,
 	}
 	if err := ctrl.SetControllerReference(task, rev, r.Scheme); err != nil {
 		return err
