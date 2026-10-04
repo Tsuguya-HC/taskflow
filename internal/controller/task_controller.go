@@ -70,8 +70,8 @@ type TaskReconciler struct {
 	// APIReader reads without the manager's cache. It is for objects the
 	// controller holds get on and neither list nor watch: the ConfigMap a State
 	// run is answered in (ADR-0011 決定4) and the ControllerRevision a task's
-	// definitions are copied into, which every reconcile of a begun task reads
-	// its flow from. A cached read needs list and watch — an
+	// definitions are copied into, which a begun task that has a copy reads its
+	// flow from. A cached read needs list and watch — an
 	// informer would be refused, and even if it were not, it would hold every
 	// ConfigMap in the cluster in memory to deliver one key. Reading through
 	// here is also what makes the answer's latency the requeue interval rather

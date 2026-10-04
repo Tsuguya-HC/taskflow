@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -136,6 +138,60 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		Expect(got.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
 		Expect(got.Status.ExpiresAt).NotTo(BeNil(), "nothing but the copy is left to read a ttl from")
 		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
+	})
+
+	// swapCopy replaces the copy begin wrote with one holding spec: a revision's
+	// data cannot be updated, so the task's own is deleted and made again.
+	swapCopy := func(spec flowv1alpha1.TaskFlowSpec) {
+		tk := fx.get()
+		old := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+			Name: runner.SnapshotRevisionName(tk.Name, tk.UID), Namespace: tk.Namespace,
+		}}
+		Expect(k8sClient.Delete(fx.ctx, old)).To(Succeed())
+		data, err := json.Marshal(snapshot{Flow: spec, Handlers: map[string]flowv1alpha1.TaskHandlerSpec{}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Create(fx.ctx, runner.BuildSnapshotRevision(tk, data))).To(Succeed())
+	}
+
+	// 変異: 写しから作る flow の Name を task.Spec.Flow 以外（revision 名や空）にする。
+	It("names the flow in its messages for the flow the task asked for", func() {
+		awaitingAnswer()
+		swapCopy(flowv1alpha1.TaskFlowSpec{Start: phaseInvestigate})
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed), "the copy has no binding for the phase in flight")
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message",
+			ContainSubstring(fmt.Sprintf("lost its binding in flow %q while", tk.Spec.Flow)))))
+	})
+
+	// 変異: start と bindings の「どちらかが空」で読めない写しとして扱う。
+	It("reads a copy that has bindings but no start", func() {
+		flow := awaitingAnswer()
+		swapCopy(flowv1alpha1.TaskFlowSpec{
+			Profile:         flow.Spec.Profile,
+			Bindings:        flow.Spec.Bindings,
+			MaxRunsPerPhase: flow.Spec.MaxRunsPerPhase,
+		})
+
+		fx.answer("ok", "")
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(phaseReport), "a copy with bindings is a flow whatever its start says")
+	})
+
+	// 変異: start と bindings の「どちらかが空」で読めない写しとして扱う。
+	It("reads a copy that has a start but no bindings", func() {
+		awaitingAnswer()
+		swapCopy(flowv1alpha1.TaskFlowSpec{Start: phaseInvestigate})
+
+		_, err := fx.reconciler.Reconcile(fx.ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: fx.name, Namespace: resourceNamespace},
+		})
+
+		Expect(err).NotTo(HaveOccurred(), "a copy with a start is a flow, not an unreadable one")
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 	})
 
 	// A task is driven through the copy only when the copy can be read, and

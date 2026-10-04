@@ -25,6 +25,11 @@ type snapshot struct {
 	Handlers map[string]flowv1alpha1.TaskHandlerSpec `json:"handlers"`
 }
 
+// errNoSnapshotReader is returned wherever a copy would be read back with no
+// uncached reader to read it through: a cached read would need list and watch
+// on ControllerRevisions, which the controller does not hold.
+var errNoSnapshotReader = errors.New("controller: no uncached reader to read a snapshot revision with")
+
 // ensureSnapshot copies the flow's spec and the spec of every handler the
 // flow's bindings name into one ControllerRevision owned by the task, before
 // the task's first run.
@@ -43,9 +48,7 @@ func (r *TaskReconciler) ensureSnapshot(
 	flow *flowv1alpha1.TaskFlow,
 ) error {
 	if r.APIReader == nil {
-		// Reading back an existing copy through the cache would need list and
-		// watch on ControllerRevisions, which the controller does not hold.
-		return errors.New("controller: no uncached reader to read a snapshot revision with")
+		return errNoSnapshotReader
 	}
 	handlers, err := r.snapshotHandlers(ctx, task, flow)
 	if err != nil {
@@ -89,7 +92,7 @@ func (r *TaskReconciler) ensureSnapshot(
 // definition it did not start with.
 func (r *TaskReconciler) flowFromCopy(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
 	if r.APIReader == nil {
-		return nil, errors.New("controller: no uncached reader to read a snapshot revision with")
+		return nil, errNoSnapshotReader
 	}
 	name := runner.SnapshotRevisionName(task.Name, task.UID)
 	var rev appsv1.ControllerRevision
