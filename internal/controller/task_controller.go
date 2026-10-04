@@ -85,6 +85,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create
+// +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=create;get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -1141,9 +1142,20 @@ func (r *TaskReconciler) now() time.Time {
 // begin puts a fresh task on the flow's starting phase. The decision of what
 // that does to status lives in taskstate; this is just the fetch-mutate-write
 // around it.
+//
+// The snapshot is written first, and a task whose definitions cannot be held
+// still never begins: starting it would let its runs read definitions the
+// copy was supposed to pin down.
 func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlow) error {
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
 		return r.fail(ctx, task, &flow.Spec, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
+	}
+	if _, err := r.ensureSnapshot(ctx, task, flow); err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return r.fail(ctx, task, &flow.Spec, broken.reason)
+		}
+		return err
 	}
 	taskstate.Begin(&task.Status, flow.Spec.Start)
 	return r.Status().Update(ctx, task)
