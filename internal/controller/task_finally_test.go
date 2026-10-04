@@ -116,17 +116,17 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// says, leaving the task stopped — and, when its flow declares one, owed a
 	// cleanup run.
 	//
-	// keepCopy false makes the task one with no copy of its definitions, which
-	// reads the live flow at every step: that is where the specs about a flow
-	// edited under a stopped or running task keep their old property (#181).
+	// keepCopy false drops the copy once the phase has settled: the stopped
+	// task then reads the live definitions for its cleanup run, the way a
+	// stopped task with no copy does (#181).
 	runPhaseFrom := func(message string, keepCopy bool) {
 		fx.reconcile() // begin
-		if !keepCopy {
-			fx.dropCopy()
-		}
 		fx.reconcile() // create the Job
 		finish(fx.job(1), message)
 		fx.reconcile() // settle
+		if !keepCopy {
+			fx.dropCopy()
+		}
 	}
 	runPhase := func(message string) { runPhaseFrom(message, true) }
 
@@ -402,11 +402,11 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			fx.makeHandler()
 			fx.makeTask()  // no cleanup handler exists
 			fx.reconcile() // begin
-			fx.dropCopy()
 			makeCleanupHandler()
 			fx.reconcile() // create the Job
 			finish(fx.job(1), "ok\nnothing to report")
 			fx.reconcile() // settle
+			fx.dropCopy()
 
 			fx.reconcile()
 
@@ -531,12 +531,11 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			Name: runner.JobName(fx.name, phaseReport, 2, 0), Namespace: resourceNamespace,
 		}, &reportJob)).To(Succeed())
 
-		// The handler goes while run 2 is in flight, and the Job fails without
-		// its container ever running: the reconcile that would retry it finds
-		// nobody to retry for, so run 2 never settles — history stays at one
-		// line, run 1's. Only a task with no copy can lose a handler this way.
-		fx.dropCopy()
-		fx.deleteHandler(reportHandler)
+		// The handler goes from the copy while run 2 is in flight, and the Job
+		// fails without its container ever running: the reconcile that would
+		// retry it finds nobody to retry for, so run 2 never settles — history
+		// stays at one line, run 1's.
+		fx.rewriteCopy(func(snap *snapshot) { delete(snap.Handlers, reportHandler) })
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      reportJob.Name,
@@ -561,6 +560,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 
 		tk = fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("which does not exist"))))
 		Expect(tk.Status.History).To(HaveLen(1), "run 2 never settled, so it left nothing behind")
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue())
 		Expect(taskstate.Current(&tk.Status).RunID).To(BeEquivalentTo(3))

@@ -288,8 +288,7 @@ var _ = Describe("starting a task", func() {
 	// definition moved out from under a run, which §5 "実行時の矛盾は修復せず
 	// Failed" says is a structural fault, not a quiet finish.
 	//
-	// That is what a task with no copy of its definitions still reads. One
-	// with a copy is not under the live flow at all (#181).
+	// A task with a copy is not under the live flow at all (#181).
 	losesBinding := func(flow *flowv1alpha1.TaskFlow) {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(flow), flow)).To(Succeed())
 		flow.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
@@ -297,21 +296,6 @@ var _ = Describe("starting a task", func() {
 		}
 		Expect(k8sClient.Update(ctx, flow)).To(Succeed())
 	}
-
-	It("fails a task with no copy when the current phase's binding disappears while a run is in flight", func() {
-		flow := makeFlow()
-		makeHandler()
-		makeTask()
-
-		reconcileOnce() // begins the task on phaseInvestigate, setting CurrentRun
-		fx.dropCopy()
-		losesBinding(flow)
-
-		reconcileOnce()
-
-		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
-			"the phase in flight lost its binding out from under it")
-	})
 
 	// 変異: コピーがあっても live の flow を読む。
 	It("keeps running a task with a copy when the current phase's binding disappears from the live flow", func() {
