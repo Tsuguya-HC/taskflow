@@ -122,15 +122,9 @@ var _ = Describe("a fork", func() {
 
 	// forked brings a task to its branches' Jobs: the fork's run answered with
 	// the branches it chose, and the next reconcile started them.
-	//
-	// keepCopy false makes it a task with no copy of its definitions, which
-	// reads the live flow at every step (#181).
-	forkedFrom := func(chose string, keepCopy bool) {
+	forked := func(chose string) {
 		fx.makeTask()
 		fx.reconcile() // settles the starting phase
-		if !keepCopy {
-			fx.dropCopy()
-		}
 		fx.reconcile() // creates the fork's Job
 		fork := jobOf(phaseInvestigate, 1)
 		Expect(fork.Spec.Template.Spec.InitContainers[1].Args).To(ContainElement("--"+contract.FlagMany),
@@ -139,7 +133,6 @@ var _ = Describe("a fork", func() {
 		fx.reconcile() // settles the fork's run
 		fx.reconcile() // starts the branches
 	}
-	forked := func(chose string) { forkedFrom(chose, true) }
 
 	phasesInFlight := func() []flowv1alpha1.Phase {
 		runs := fx.get().Status.CurrentRuns
@@ -302,15 +295,17 @@ var _ = Describe("a fork", func() {
 		}, &again)).To(Succeed(), "the next attempt's Job is built from the copy's handler too")
 	})
 
-	It("fails a fork with no copy when a branch never started and its handler is gone", func() {
+	It("fails a fork when a branch never started and its handler is gone from the copy", func() {
 		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
-		forkedFrom(string(security), false)
-		fx.deleteHandler(handlerFor(security))
+		forked(string(security))
+		fx.rewriteCopy(func(snap *snapshot) { delete(snap.Handlers, handlerFor(security)) })
 
 		fail(jobOf(security, 2), batchv1.JobReasonBackoffLimitExceeded)
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("which does not exist"))))
 	})
 
 	It("stops the Job a retried branch only just started, even though this reconcile is the first to know its name", func() {
@@ -380,20 +375,26 @@ var _ = Describe("a fork", func() {
 		Expect(tk.Status.History[len(tk.Status.History)-1].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 	})
 
+	// withoutJoin makes the fork phase's binding an ordinary one.
+	withoutJoin := func(spec *flowv1alpha1.TaskFlowSpec) {
+		b := spec.Bindings[phaseInvestigate]
+		b.Join = nil
+		spec.Bindings[phaseInvestigate] = b
+	}
+
+	// stopsForking does it to the live flow.
 	stopsForking := func() {
 		var flow flowv1alpha1.TaskFlow
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
-		b := flow.Spec.Bindings[phaseInvestigate]
-		b.Join = nil
-		flow.Spec.Bindings[phaseInvestigate] = b
+		withoutJoin(&flow.Spec)
 		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
 	}
 
-	It("fails a task with no copy whose flow stops forking while its branches run", func() {
+	It("fails a task whose copy stops forking while its branches run", func() {
 		setUp()
-		forkedFrom(string(security), false)
+		forked(string(security))
 
-		stopsForking()
+		fx.rewriteCopy(func(snap *snapshot) { withoutJoin(&snap.Flow) })
 
 		fx.reconcile()
 		tk := fx.get()
@@ -434,20 +435,25 @@ var _ = Describe("a fork", func() {
 		return apierrors.IsNotFound(err) || job.DeletionTimestamp != nil
 	}
 
-	// dropBinding edits phase's binding out of the live flow.
+	// withoutBinding takes phase's binding out of spec.
+	withoutBinding := func(spec *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) {
+		delete(spec.Bindings, phase)
+	}
+
+	// dropBinding does it to the live flow.
 	dropBinding := func(phase flowv1alpha1.Phase) {
 		var flow flowv1alpha1.TaskFlow
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
-		delete(flow.Spec.Bindings, phase)
+		withoutBinding(&flow.Spec, phase)
 		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
 	}
 
-	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying who fills one that never started", func() {
+	It("cancels every branch still in flight, and stops their Jobs, when the copy stops saying who fills one that never started", func() {
 		setUp()
-		forkedFrom(string(logic)+"/"+string(security), false)
+		forked(string(logic) + "/" + string(security))
 
 		fail(jobOf(security, 3), batchv1.JobReasonBackoffLimitExceeded)
-		dropBinding(security)
+		fx.rewriteCopy(func(snap *snapshot) { withoutBinding(&snap.Flow, security) })
 
 		fx.reconcile()
 
@@ -482,12 +488,12 @@ var _ = Describe("a fork", func() {
 		Expect(tk.Status.History[len(tk.Status.History)-1].Phase).To(Equal(security))
 	})
 
-	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying what a finished branch may answer with", func() {
+	It("cancels every branch still in flight, and stops their Jobs, when the copy stops saying what a finished branch may answer with", func() {
 		setUp()
-		forkedFrom(string(logic)+"/"+string(security), false)
+		forked(string(logic) + "/" + string(security))
 
 		answer(jobOf(security, 3), dirDone)
-		dropBinding(security)
+		fx.rewriteCopy(func(snap *snapshot) { withoutBinding(&snap.Flow, security) })
 
 		fx.reconcile()
 
@@ -521,16 +527,16 @@ var _ = Describe("a fork", func() {
 		Expect(phasesInFlight()).To(ConsistOf(logic, tests), "security's answer was read against the copy and met at the join")
 	})
 
-	It("cancels a fork's branches, for a task with no copy, when the fork phase itself loses its binding while they run", func() {
+	It("cancels a fork's branches when the fork phase itself loses its binding in the copy while they run", func() {
 		setUp()
-		forkedFrom(string(logic)+"/"+string(security), false)
+		forked(string(logic) + "/" + string(security))
 
 		// Unlike removing Join (which forks still sees, just no longer as a
 		// fork), deleting the binding outright is caught by Reconcile itself,
 		// ahead of driveBranches: status.phase names the fork while its
 		// branches run (ADR-0013 決定8), so this is the "phase lost its
 		// binding" path, not driveBranches's own "no longer forks" one.
-		dropBinding(phaseInvestigate)
+		fx.rewriteCopy(func(snap *snapshot) { withoutBinding(&snap.Flow, phaseInvestigate) })
 
 		fx.reconcile()
 

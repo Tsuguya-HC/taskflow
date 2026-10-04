@@ -489,14 +489,13 @@ var _ = Describe("finishing a run", func() {
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "an allowance cut on the live handler does not reach a task that has begun")
 	})
 
-	It("fails a task with no copy when the handler disappears before an infrastructure retry can be judged", func() {
+	It("fails a task when the handler disappears from its copy before an infrastructure retry can be judged", func() {
 		fx.makeFlow()
 		fx.makeHandler()
 		fx.makeTask()
 		job := start()
-		fx.dropCopy()
 
-		fx.deleteHandler()
+		fx.rewriteCopy(func(snap *snapshot) { delete(snap.Handlers, fx.name) })
 
 		podOf(job, "") // exists, but no container ever terminated: never pulled
 		finish(job, batchv1.JobReasonBackoffLimitExceeded)
@@ -507,6 +506,7 @@ var _ = Describe("finishing a run", func() {
 		cond := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Message).To(ContainSubstring("which does not exist"))
 
 		// This Failed came from r.fail(), not from settle() reading the flow's
 		// own table — the one path that used to leave the metric silent about a
@@ -528,26 +528,21 @@ var _ = Describe("finishing a run", func() {
 		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
 	})
 
-	// Two statuses now share the directory the run is about to name. A task
-	// with no copy of its definitions reads that edit; one with a copy keeps
-	// the table it began with (#181).
-	explainsTwice := func(flow *flowv1alpha1.TaskFlow) {
-		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(flow), flow)).To(Succeed())
-		flow.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
+	// Two statuses now share the directory the run is about to name.
+	explainsTwice := func(spec *flowv1alpha1.TaskFlowSpec) {
+		spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
 			Handler: fx.name,
 			Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", "別の報告": "ok"},
 		}
-		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
 	}
 
-	It("fails a task with no copy when the answer arrives after the flow stopped explaining it", func() {
-		flow := fx.makeFlow()
+	It("fails a task when the answer arrives after its copy stopped explaining it", func() {
+		fx.makeFlow()
 		fx.makeHandler()
 		fx.makeTask()
 		job := start()
-		fx.dropCopy()
 
-		explainsTwice(flow)
+		fx.rewriteCopy(func(snap *snapshot) { explainsTwice(&snap.Flow) })
 
 		podOf(job, "", terminated(agentName, "ok"))
 		finish(job, "")
@@ -560,6 +555,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(string(transition.OutcomeStructural)))
+		Expect(cond.Message).To(ContainSubstring("selects more than one status"))
 	})
 
 	// 変異: コピーがあっても live の flow の遷移表で答えを判定する。
@@ -569,7 +565,9 @@ var _ = Describe("finishing a run", func() {
 		fx.makeTask()
 		job := start()
 
-		explainsTwice(flow)
+		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(flow), flow)).To(Succeed())
+		explainsTwice(&flow.Spec)
+		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
 
 		podOf(job, "", terminated(agentName, "ok"))
 		finish(job, "")

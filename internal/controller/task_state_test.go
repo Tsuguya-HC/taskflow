@@ -201,103 +201,10 @@ var _ = Describe("a run nothing starts", func() {
 		})
 	})
 
-	// dateRun's guard against a State handler with no timeout is unreachable
-	// through a live apiserver: the CRD's own CEL rule already refuses one at
-	// admission, on both create and update. An interceptor stands in for a
-	// handler admission never saw, the same technique task_run_test.go's
-	// create-race test uses to reach a branch envtest would not otherwise
-	// take — without reaching for a fake client that would leave the rest of
-	// this suite's guarantees about a real apiserver behind.
-	It("fails a run of a task with no copy whose handler declares no timeout when dateRun reads it", func() {
-		fx.makeFlow()
-		fx.makeHandler(stateRunner(timeout))
-		fx.makeTask()
-		fx.reconcile() // settles the starting phase
-		fx.dropCopy()
-
-		watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
-		Expect(err).NotTo(HaveOccurred())
-		intercepted := interceptor.NewClient(watchClient, interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				h, ok := obj.(*flowv1alpha1.TaskHandler)
-				if !ok || key.Name != fx.name {
-					return c.Get(ctx, key, obj, opts...)
-				}
-				if err := c.Get(ctx, key, obj, opts...); err != nil {
-					return err
-				}
-				h.Spec.Timeout = nil
-				return nil
-			},
-		})
-		racer := &TaskReconciler{
-			Client: intercepted, Scheme: k8sClient.Scheme(), SidecarImage: sidecarImage, APIReader: k8sClient,
-		}
-
-		_, err = racer.Reconcile(fx.ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: fx.name, Namespace: resourceNamespace},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
-			To(ContainSubstring("declares no timeout"))
-	})
-
-	// The CRD's enum constrains what a handler may say, but the runtime does
-	// not assume that check has run (ADR-0006 決定5) — a third runner type
-	// this binary predates, or a rolling update briefly disagreeing with the
-	// CRD, must fail rather than being read as whichever branch an if/else
-	// happens to fall through to. Same interceptor technique as the timeout
-	// spec above, standing in for a handler this process reads before it
-	// agrees with the schema.
-	It("fails a run of a task with no copy whose handler names a runner type this controller does not know", func() {
-		fx.makeFlow()
-		fx.makeHandler(stateRunner(timeout))
-		fx.makeTask()
-		fx.reconcile() // settles the starting phase
-		fx.dropCopy()
-
-		watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
-		Expect(err).NotTo(HaveOccurred())
-		intercepted := interceptor.NewClient(watchClient, interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				h, ok := obj.(*flowv1alpha1.TaskHandler)
-				if !ok || key.Name != fx.name {
-					return c.Get(ctx, key, obj, opts...)
-				}
-				if err := c.Get(ctx, key, obj, opts...); err != nil {
-					return err
-				}
-				h.Spec.Runner.Type = "Bogus"
-				return nil
-			},
-		})
-		racer := &TaskReconciler{
-			Client: intercepted, Scheme: k8sClient.Scheme(), SidecarImage: sidecarImage, APIReader: k8sClient,
-		}
-
-		_, err = racer.Reconcile(fx.ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: fx.name, Namespace: resourceNamespace},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
-			To(ContainSubstring("Bogus"))
-
-		var boxes corev1.ConfigMapList
-		Expect(k8sClient.List(fx.ctx, &boxes, client.InNamespace(resourceNamespace),
-			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})).To(Succeed())
-		Expect(boxes.Items).To(BeEmpty(),
-			"an unrecognized runner type must not fall through to opening anything for this run")
-	})
-
-	// The same two guards for a task with a copy, reached through a copy the
-	// spec writes: no live object can be a handler with no timeout, and the
-	// copy is what such a task reads.
+	// Two guards no live handler can reach, because the CRD refuses at admission
+	// a State handler with no timeout and a runner type outside its enum, and
+	// the runtime does not assume that check has run (ADR-0006 決定5). A copy
+	// the spec writes can hold either, and the copy is what such a task reads.
 	It("fails a run of a task with a copy whose handler declares no timeout when dateRun reads it", func() {
 		fx.makeFlow()
 		fx.makeHandler(stateRunner(timeout))
@@ -563,9 +470,9 @@ var _ = Describe("a run nothing starts", func() {
 	// A run whose vocabulary is edited away has nothing left to judge an
 	// answer against. For the cleanup run that is not a Failed — the ending
 	// is already decided and does not move (ADR-0009 決定2) — it is a cleanup
-	// that did not happen. That is what a task with no copy of its
-	// definitions still reads; one with a copy keeps the declaration it began
-	// with (#181).
+	// that did not happen. A task with a copy keeps the declaration it began
+	// with; keepCopy false drops the copy once the ending is reached, so the
+	// stopped task reads the live one (#181).
 	waitingOnCleanup := func(keepCopy bool) *flowv1alpha1.TaskFlow {
 		cleanup := fx.name + "-cleanup"
 		flow := fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
@@ -580,12 +487,12 @@ var _ = Describe("a run nothing starts", func() {
 		fx.makeTask()
 
 		fx.reconcile()
-		if !keepCopy {
-			fx.dropCopy()
-		}
 		fx.reconcile()
 		fx.answer("ok", "")
 		fx.reconcile() // the task reaches its ending, owing a cleanup
+		if !keepCopy {
+			fx.dropCopy()
+		}
 		fx.reconcile() // opens the place the cleanup run is answered in
 
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, flow)).To(Succeed())
