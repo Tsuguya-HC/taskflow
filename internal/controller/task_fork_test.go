@@ -122,9 +122,15 @@ var _ = Describe("a fork", func() {
 
 	// forked brings a task to its branches' Jobs: the fork's run answered with
 	// the branches it chose, and the next reconcile started them.
-	forked := func(chose string) {
+	//
+	// keepCopy false makes it a task with no copy of its definitions, which
+	// reads the live flow at every step (#181).
+	forkedFrom := func(chose string, keepCopy bool) {
 		fx.makeTask()
 		fx.reconcile() // settles the starting phase
+		if !keepCopy {
+			fx.dropCopy()
+		}
 		fx.reconcile() // creates the fork's Job
 		fork := jobOf(phaseInvestigate, 1)
 		Expect(fork.Spec.Template.Spec.InitContainers[1].Args).To(ContainElement("--"+contract.FlagMany),
@@ -133,6 +139,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile() // settles the fork's run
 		fx.reconcile() // starts the branches
 	}
+	forked := func(chose string) { forkedFrom(chose, true) }
 
 	phasesInFlight := func() []flowv1alpha1.Phase {
 		runs := fx.get().Status.CurrentRuns
@@ -343,21 +350,38 @@ var _ = Describe("a fork", func() {
 		Expect(tk.Status.History[len(tk.Status.History)-1].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 	})
 
-	It("fails a task whose flow stops forking while its branches run", func() {
-		setUp()
-		forked(string(security))
-
+	stopsForking := func() {
 		var flow flowv1alpha1.TaskFlow
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
 		b := flow.Spec.Bindings[phaseInvestigate]
 		b.Join = nil
 		flow.Spec.Bindings[phaseInvestigate] = b
 		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+	}
+
+	It("fails a task with no copy whose flow stops forking while its branches run", func() {
+		setUp()
+		forkedFrom(string(security), false)
+
+		stopsForking()
 
 		fx.reconcile()
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer forks"))))
+	})
+
+	// 変異: コピーがあっても live の flow の Join を読む。
+	It("keeps a task with a copy forking when the live flow stops forking while its branches run", func() {
+		setUp()
+		forked(string(security))
+
+		stopsForking()
+
+		fx.reconcile()
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the copy still forks at this phase")
+		Expect(phasesInFlight()).To(ConsistOf(security, tests))
 	})
 
 	// cancelledLines is every phase in tk's history recorded Cancelled.
@@ -380,16 +404,20 @@ var _ = Describe("a fork", func() {
 		return apierrors.IsNotFound(err) || job.DeletionTimestamp != nil
 	}
 
-	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying who fills one that never started", func() {
-		setUp()
-		forked(string(logic) + "/" + string(security))
-
-		fail(jobOf(security, 3), batchv1.JobReasonBackoffLimitExceeded)
-
+	// dropBinding edits phase's binding out of the live flow.
+	dropBinding := func(phase flowv1alpha1.Phase) {
 		var flow flowv1alpha1.TaskFlow
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
-		delete(flow.Spec.Bindings, security)
+		delete(flow.Spec.Bindings, phase)
 		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+	}
+
+	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying who fills one that never started", func() {
+		setUp()
+		forkedFrom(string(logic)+"/"+string(security), false)
+
+		fail(jobOf(security, 3), batchv1.JobReasonBackoffLimitExceeded)
+		dropBinding(security)
 
 		fx.reconcile()
 
@@ -406,16 +434,30 @@ var _ = Describe("a fork", func() {
 			"security's Job had already finished (it never started); cancelled or not, a finished Job's pod stays as autopsy material")
 	})
 
-	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying what a finished branch may answer with", func() {
+	// 変異: コピーがあっても live の flow の束縛を読む。
+	It("judges a branch that never started, for a task with a copy, though the live flow stops saying who fills it", func() {
 		setUp()
 		forked(string(logic) + "/" + string(security))
 
-		answer(jobOf(security, 3), dirDone)
+		fail(jobOf(security, 3), batchv1.JobReasonBackoffLimitExceeded)
+		dropBinding(security)
 
-		var flow flowv1alpha1.TaskFlow
-		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
-		delete(flow.Spec.Bindings, security)
-		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Conditions).NotTo(ContainElement(HaveField("Message", ContainSubstring("no longer says"))),
+			"the copy still says who fills it")
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated),
+			"the branch that never started is judged like any other, not reported as a broken flow")
+		Expect(tk.Status.History[len(tk.Status.History)-1].Phase).To(Equal(security))
+	})
+
+	It("cancels every branch still in flight, and stops their Jobs, when the flow stops saying what a finished branch may answer with", func() {
+		setUp()
+		forkedFrom(string(logic)+"/"+string(security), false)
+
+		answer(jobOf(security, 3), dirDone)
+		dropBinding(security)
 
 		fx.reconcile()
 
@@ -432,19 +474,33 @@ var _ = Describe("a fork", func() {
 			"security's Job had already finished (it answered); cancelled or not, a finished Job's pod stays as autopsy material")
 	})
 
-	It("cancels a fork's branches when the fork phase itself loses its binding while they run", func() {
+	// 変異: コピーがあっても live の flow の束縛で答えを判定する。
+	It("judges a finished branch of a task with a copy by what the copy says it may answer with", func() {
 		setUp()
 		forked(string(logic) + "/" + string(security))
+
+		answer(jobOf(security, 3), dirDone)
+		dropBinding(security)
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the fork is still waiting on its other branches")
+		Expect(tk.Status.Conditions).NotTo(ContainElement(HaveField("Message", ContainSubstring("no longer says"))))
+		Expect(cancelledLines(tk)).To(BeEmpty())
+		Expect(phasesInFlight()).To(ConsistOf(logic, tests), "security's answer was read against the copy and met at the join")
+	})
+
+	It("cancels a fork's branches, for a task with no copy, when the fork phase itself loses its binding while they run", func() {
+		setUp()
+		forkedFrom(string(logic)+"/"+string(security), false)
 
 		// Unlike removing Join (which forks still sees, just no longer as a
 		// fork), deleting the binding outright is caught by Reconcile itself,
 		// ahead of driveBranches: status.phase names the fork while its
 		// branches run (ADR-0013 決定8), so this is the "phase lost its
 		// binding" path, not driveBranches's own "no longer forks" one.
-		var flow flowv1alpha1.TaskFlow
-		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
-		delete(flow.Spec.Bindings, phaseInvestigate)
-		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
+		dropBinding(phaseInvestigate)
 
 		fx.reconcile()
 
@@ -456,6 +512,24 @@ var _ = Describe("a fork", func() {
 			"the branches were still running, unasked, when the fork's own binding disappeared")
 		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
 			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+	})
+
+	// 変異: コピーがあっても live の flow の束縛の有無で止める。
+	It("keeps the branches of a task with a copy running when the live flow loses the fork phase's binding", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+
+		dropBinding(phaseInvestigate)
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the copy still binds the fork")
+		Expect(tk.Status.CurrentRuns).NotTo(BeEmpty())
+		Expect(cancelledLines(tk)).To(BeEmpty())
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeFalse(), "%s's Job runs on", phase)
 		}
 	})
 

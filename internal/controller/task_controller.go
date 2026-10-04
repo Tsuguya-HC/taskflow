@@ -70,7 +70,8 @@ type TaskReconciler struct {
 	// APIReader reads without the manager's cache. It is for objects the
 	// controller holds get on and neither list nor watch: the ConfigMap a State
 	// run is answered in (ADR-0011 決定4) and the ControllerRevision a task's
-	// definitions are copied into. A cached read needs list and watch — an
+	// definitions are copied into, which a begun task that has a copy reads its
+	// flow from. A cached read needs list and watch — an
 	// informer would be refused, and even if it were not, it would hold every
 	// ConfigMap in the cluster in memory to deliver one key. Reading through
 	// here is also what makes the answer's latency the requeue interval rather
@@ -131,17 +132,19 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// The framework's own terminal phases are terminal on their own say-so —
 	// unlike a phase the flow declared terminal, they need no binding table to
 	// tell. Checking that before the flow is resolved means a Task already at
-	// Escalated is never at the mercy of a flow that GitOps has since deleted
-	// or renamed out from under it.
+	// Escalated never depends on the flow's binding table to be recognised.
+	// What a task with no copy still owes the flow is fetched below, and a
+	// flow that GitOps has since deleted or renamed leaves it nothing to read.
 	if task.Status.Phase.IsReserved() {
 		// A Task that reached Escalated or Failed before expiresAt existed
 		// has none, and never will on its own: nothing above sees it again,
-		// so without this it would sit forever. Backfilling means fetching
-		// the flow this once, ahead of where it is normally resolved; a
-		// flow already gone leaves nothing to read a ttl from, the same as
-		// the nil ttl fail() gets when there is no flow at all — and nothing
-		// to read a cleanup run's declaration from either, which is why a
-		// task owed one never gets it once its flow is gone.
+		// so without this it would sit forever. Backfilling means resolving
+		// the flow this once, ahead of where it is normally resolved. A task
+		// with a copy reads it from there, so a deleted flow changes nothing;
+		// one without a copy whose flow is already gone has nothing to read a
+		// ttl from, the same as the nil ttl fail() gets when there is no flow
+		// at all — and nothing to read a cleanup run's declaration from
+		// either, which is why such a task owed one never gets it.
 		flow, err := r.resolveFlow(ctx, &task)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -220,24 +223,39 @@ func forks(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) bool {
 	return bound && binding.Join != nil
 }
 
-// resolveFlow is the one route to a task's TaskFlow, and the two must not
-// come apart: a caller that fetched one by any other means would get a flow
+// resolveFlow is the one route to the flow a task runs on, and the two must
+// not come apart: a caller that got one by any other means would get a flow
 // whose endings were never primed, which is exactly the gap ADR-0010 closed.
-// Folding the Get and the prime into one call is what makes a third call site
-// safe by construction rather than by a comment repeated at each one.
+// Folding the lookup and the prime into one call is what makes a third call
+// site safe by construction rather than by a comment repeated at each one.
+//
+// A task that has begun runs on its copy, so editing or deleting the live
+// TaskFlow changes nothing for it. A task with no copy, and one that has not
+// begun, reads the live TaskFlow.
 //
 // A NotFound error is returned as-is rather than interpreted here, because
 // what it means differs by caller: the reserved-phase branch has nothing to
 // repair, the main path fails the task. That decision stays where the two
-// branches already were.
+// branches already were. Only the live read produces it; a copy that is not
+// there is a task without one, and a copy that cannot be read is an error of
+// its own.
 func (r *TaskReconciler) resolveFlow(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
-	var flow flowv1alpha1.TaskFlow
-	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, &flow); err != nil {
-		return nil, err
+	var flow *flowv1alpha1.TaskFlow
+	if task.Status.Phase != "" {
+		var err error
+		if flow, err = r.flowFromCopy(ctx, task); err != nil {
+			return nil, err
+		}
+	}
+	if flow == nil {
+		flow = &flowv1alpha1.TaskFlow{}
+		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, flow); err != nil {
+			return nil, err
+		}
 	}
 	// Say what this flow's endings are before any of them happens (ADR-0010).
-	primeFlowMetrics(&flow)
-	return &flow, nil
+	primeFlowMetrics(flow)
+	return flow, nil
 }
 
 // terminal is a task that has stopped. At most one thing is left to do: the
@@ -1167,11 +1185,12 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 // it.
 //
 // ttl is the flow's, or nil when the fault is that there is no flow to read
-// one from; such a task stays for as long as the flow stays gone. That is
-// deliberate, not a gap: the reserved-phase branch above backfills expiresAt
-// from whatever flow the task names on every later reconcile, so a flow
-// created under the same name afterward is enough to make the date appear
-// and the task eventually clear, with no special path needed for that case.
+// one from, which only a task without a copy can meet; such a task stays for
+// as long as the flow stays gone. That is deliberate, not a gap: the
+// reserved-phase branch above backfills expiresAt from whatever flow the task
+// names on every later reconcile, so a flow created under the same name
+// afterward is enough to make the date appear and the task eventually clear,
+// with no special path needed for that case.
 func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, reason string) error {
 	// A dispatched task with nothing in flight has already reached a terminal
 	// phase: Advance clears the run in flight exactly when it lands one there, whether
@@ -1268,8 +1287,9 @@ func (r *TaskReconciler) ensureJob(
 	// bound — an unbound current phase is either a quiet finish or, with a
 	// run in flight, a Failed of its own, and neither reaches here — or with
 	// the cleanup run, which terminal reaches only for a task whose status
-	// says one is owed. Either declaration can still have been edited away
-	// between that check and this lookup, which is what !ok is.
+	// says one is owed. For a task without a copy, either declaration can
+	// still have been edited away between that check and this lookup, which is
+	// what !ok is; a task with a copy cannot see it.
 	handlerName, directories, ok := runSpec(&flow.Spec, run.Phase)
 	if !ok {
 		return nil, brokenFlow{fmt.Sprintf(
@@ -1492,9 +1512,10 @@ func ownerSummary(refs []metav1.OwnerReference) string {
 // endingFor is what the cleanup run is told about the ending it follows, and
 // nil for every other run — a phase's run has no ending yet to be told about.
 //
-// Meaning is read from flow as it stands at dispatch time, the same as the
-// Job's template or image: it is not pinned to whatever flow looked like when
-// the task reached its ending. What is pinned from that earlier moment —
+// Meaning is read from flow as it stands at dispatch time: a task's copy for
+// one that has it, so it cannot have moved since the ending was reached, and
+// the live flow for one that has none. Either way it is not pinned to the
+// moment the task reached its ending, the way the Job's image is not. What is pinned from that earlier moment —
 // status.phase, the Ready condition's reason, the Event, the metric sample —
 // was already written then and is not rewritten here or by anything that
 // reads this. Which ttl the cleanup run earns follows the same rule in the

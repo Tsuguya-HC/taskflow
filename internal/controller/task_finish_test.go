@@ -495,19 +495,26 @@ var _ = Describe("finishing a run", func() {
 		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
 	})
 
-	It("fails when the answer arrives after the flow stopped explaining it", func() {
-		flow := fx.makeFlow()
-		fx.makeHandler()
-		fx.makeTask()
-		job := start()
-
-		// Two statuses now share the directory the run is about to name.
+	// Two statuses now share the directory the run is about to name. A task
+	// with no copy of its definitions reads that edit; one with a copy keeps
+	// the table it began with (#181).
+	explainsTwice := func(flow *flowv1alpha1.TaskFlow) {
 		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(flow), flow)).To(Succeed())
 		flow.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
 			Handler: fx.name,
 			Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", "別の報告": "ok"},
 		}
 		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
+	}
+
+	It("fails a task with no copy when the answer arrives after the flow stopped explaining it", func() {
+		flow := fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+		job := start()
+		fx.dropCopy()
+
+		explainsTwice(flow)
 
 		podOf(job, "", terminated(agentName, "ok"))
 		finish(job, "")
@@ -520,6 +527,24 @@ var _ = Describe("finishing a run", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(string(transition.OutcomeStructural)))
+	})
+
+	// 変異: コピーがあっても live の flow の遷移表で答えを判定する。
+	It("settles a task with a copy by the table it began with after the live flow stopped explaining the answer", func() {
+		flow := fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+		job := start()
+
+		explainsTwice(flow)
+
+		podOf(job, "", terminated(agentName, "ok"))
+		finish(job, "")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseReport))
+		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeDeclared)))
 	})
 
 	Context("with a timeout declared", func() {

@@ -115,12 +115,20 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// runPhase drives the task's first and only phase to the ending message
 	// says, leaving the task stopped — and, when its flow declares one, owed a
 	// cleanup run.
-	runPhase := func(message string) {
+	//
+	// keepCopy false makes the task one with no copy of its definitions, which
+	// reads the live flow at every step: that is where the specs about a flow
+	// edited under a stopped or running task keep their old property (#181).
+	runPhaseFrom := func(message string, keepCopy bool) {
 		fx.reconcile() // begin
+		if !keepCopy {
+			fx.dropCopy()
+		}
 		fx.reconcile() // create the Job
 		finish(fx.job(1), message)
 		fx.reconcile() // settle
 	}
+	runPhase := func(message string) { runPhaseFrom(message, true) }
 
 	// cleanupJob is the Job of the cleanup run. It is run 2 here: the phase
 	// spent run 1, and the cleanup is a run like any other (ADR-0009 決定3),
@@ -432,9 +440,12 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// decidingLine looks the ending's run up rather than reading history's
 	// last line, because a run that never settles leaves the two disagreeing:
 	// the tail is then some earlier run's verdict, not this ending's (決定 6, P8).
+	//
+	// Run 2 is left unsettled by losing its handler before an infrastructure
+	// retry can be judged, which fails the task without a history line.
 	It("tells the cleanup run nothing when the run before it never settled, rather than history's last line", func() {
 		reportHandler := fx.name + "-report"
-		flow := fx.makeFlow(withCleanup, func(f *flowv1alpha1.TaskFlow) {
+		fx.makeFlow(withCleanup, func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Bindings[phaseReport] = flowv1alpha1.PhaseBinding{
 				Handler: reportHandler,
 				Next:    map[flowv1alpha1.Phase]string{"完了": "ok"},
@@ -460,13 +471,33 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			Name: runner.JobName(fx.name, phaseReport, 2, 0), Namespace: resourceNamespace,
 		}, &reportJob)).To(Succeed())
 
-		// 報告 loses its binding while run 2 is in flight: the reconcile that
-		// reads its answer finds nothing left to read it against, so run 2
-		// never settles — history stays at one line, run 1's.
-		delete(flow.Spec.Bindings, phaseReport)
-		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
+		// The handler goes while run 2 is in flight, and the Job fails without
+		// its container ever running: the reconcile that would retry it finds
+		// nobody to retry for, so run 2 never settles — history stays at one
+		// line, run 1's.
+		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
+			ObjectMeta: metav1.ObjectMeta{Name: reportHandler, Namespace: resourceNamespace},
+		})).To(Succeed())
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      reportJob.Name,
+				Namespace: resourceNamespace,
+				Labels:    map[string]string{batchv1.ControllerUidLabel: string(reportJob.UID)},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+			},
+		}
+		Expect(k8sClient.Create(fx.ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, pod) })
+		now := metav1.Now()
+		reportJob.Status.StartTime = &now
+		reportJob.Status.Conditions = append(reportJob.Status.Conditions,
+			batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded},
+			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded})
+		Expect(k8sClient.Status().Update(fx.ctx, &reportJob)).To(Succeed())
 
-		finish(&reportJob, "ok\nnothing to report")
 		fx.reconcile()
 
 		tk = fx.get()
@@ -490,13 +521,15 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// runSpec's finally branch has its own way to say no run may be read: a
 	// flow that no longer declares one at all. A cleanup run already in
 	// flight when that happens must fail the way any other broken definition
-	// found mid-run does, not crash on a nil spec.finally.
-	It("fails the cleanup run safely when spec.finally is edited away while it is in flight", func() {
+	// found mid-run does, not crash on a nil spec.finally. That is what a task
+	// with no copy of its definitions reads; one with a copy keeps the
+	// declaration it began with (#181).
+	It("fails the cleanup run safely, for a task with no copy, when spec.finally is edited away while it is in flight", func() {
 		flow := fx.makeFlow(withCleanup)
 		fx.makeHandler()
 		makeCleanupHandler()
 		fx.makeTask()
-		runPhase("ok\nnothing to report")
+		runPhaseFrom("ok\nnothing to report", false)
 		fx.reconcile() // creates the cleanup Job
 		job := cleanupJob()
 
@@ -514,6 +547,31 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Reason).To(Equal(taskstate.ReasonFinallyFailed))
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
+	})
+
+	// 変異: コピーがあっても live の flow の finally を読む。
+	It("settles the cleanup run from the copy when spec.finally is edited away from the live flow", func() {
+		flow := fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		runPhase("ok\nnothing to report")
+		fx.reconcile() // creates the cleanup Job
+		job := cleanupJob()
+
+		flow.Spec.Finally = nil
+		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
+
+		finish(job, dirDone+"\nremoved 2 branches")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseReport), "a decided ending does not move")
+		Expect(tk.Status.History).To(HaveLen(2))
+		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeDeclared)))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(BeNil(),
+			"a cleanup that reported done leaves nothing to say")
+		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(succeededTTL)))
 	})
 
 	// The cleanup run is a run like any other (ADR-0009 決定3), including the
@@ -608,16 +666,17 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// The declared directory a cleanup run may answer with travels two
 	// separate routes: FLOW_DIRECTORIES, baked into the Job once at creation,
 	// and the directories driveRun reads through runSpec again when the Job
-	// finishes, to judge the answer against. This spec pins the two to the
-	// same declaration (spec.finally.done) by changing it after the Job
-	// exists — if settling still read the value baked in at creation, the
-	// pod's answer, written under the new name, would come back NoAnswer.
-	It("collects the cleanup run's answer against the declaration read at settling time, not the one baked into the Job", func() {
+	// finishes, to judge the answer against. For a task with no copy of its
+	// definitions this spec pins the two to the same declaration
+	// (spec.finally.done) by changing it after the Job exists — if settling
+	// still read the value baked in at creation, the pod's answer, written
+	// under the new name, would come back NoAnswer.
+	It("collects the cleanup run's answer, for a task with no copy, against the declaration read at settling time, not the one baked into the Job", func() {
 		flow := fx.makeFlow(withCleanup)
 		fx.makeHandler()
 		makeCleanupHandler()
 		fx.makeTask()
-		runPhase("ok\nnothing to report")
+		runPhaseFrom("ok\nnothing to report", false)
 		fx.reconcile() // creates the cleanup Job, FLOW_DIRECTORIES baked to dirDone
 		job := cleanupJob()
 		Expect(directoriesOf(job)).To(ConsistOf(dirDone))
@@ -640,16 +699,39 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			"a cleanup that reported done leaves nothing to say")
 	})
 
-	// A task waiting on its cleanup run has a currentRun, which is otherwise
-	// the mark of a run in flight — and a flow deleted out from under a run in
-	// flight fails the task. It must not do that here: the task already
-	// finished, and a deleted flow is no reason to rewrite how.
-	It("keeps the ending when the flow is deleted while a cleanup run is owed", func() {
+	// 変異: コピーがあっても live の flow の宣言で答えを判定する。
+	It("collects the cleanup run's answer against the copy's declaration when the live flow renamed it", func() {
 		flow := fx.makeFlow(withCleanup)
 		fx.makeHandler()
 		makeCleanupHandler()
 		fx.makeTask()
 		runPhase("ok\nnothing to report")
+		fx.reconcile() // creates the cleanup Job, FLOW_DIRECTORIES baked to dirDone
+		job := cleanupJob()
+
+		flow.Spec.Finally.Done = "cleaned-v2"
+		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
+
+		finish(job, dirDone+"\nremoved 2 branches")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.History).To(HaveLen(2))
+		Expect(tk.Status.History[1].Directory).To(Equal(dirDone))
+		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeDeclared)),
+			"the declaration this task began with is the one its answer is judged against")
+	})
+
+	// A task waiting on its cleanup run has a currentRun, which is otherwise
+	// the mark of a run in flight — and a flow deleted out from under a run in
+	// flight fails the task. It must not do that here: the task already
+	// finished, and a deleted flow is no reason to rewrite how.
+	It("keeps the ending, for a task with no copy, when the flow is deleted while a cleanup run is owed", func() {
+		flow := fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		runPhaseFrom("ok\nnothing to report", false)
 		Expect(k8sClient.Delete(fx.ctx, flow)).To(Succeed())
 
 		fx.reconcile()
@@ -659,5 +741,28 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.ExpiresAt).To(BeNil(),
 			"there is no flow left to read a ttl or a cleanup run from, so the task waits for one to come back")
+	})
+
+	// 変異: コピーがあっても live の flow を探し、無ければ清掃を諦める。
+	It("runs the owed cleanup from the copy when the flow is deleted", func() {
+		flow := fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		runPhase("ok\nnothing to report")
+		Expect(k8sClient.Delete(fx.ctx, flow)).To(Succeed())
+
+		fx.reconcile() // creates the cleanup Job
+		job := cleanupJob()
+		Expect(directoriesOf(job)).To(ConsistOf(dirDone))
+		finish(job, dirDone+"\nremoved 2 branches")
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseReport), "the ending stands")
+		Expect(tk.Status.History).To(HaveLen(2))
+		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeDeclared)))
+		Expect(tk.Status.ExpiresAt).NotTo(BeNil(), "the date comes from the copy's ttl")
+		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(succeededTTL)))
 	})
 })

@@ -287,23 +287,48 @@ var _ = Describe("starting a task", func() {
 	// first confirming a binding, so losing it here can only mean the
 	// definition moved out from under a run, which §5 "実行時の矛盾は修復せず
 	// Failed" says is a structural fault, not a quiet finish.
-	It("fails when the current phase's binding disappears while a run is in flight", func() {
-		flow := makeFlow()
-		makeHandler()
-		makeTask()
-
-		reconcileOnce() // begins the task on phaseInvestigate, setting CurrentRun
-
+	//
+	// That is what a task with no copy of its definitions still reads. One
+	// with a copy is not under the live flow at all (#181).
+	losesBinding := func(flow *flowv1alpha1.TaskFlow) {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(flow), flow)).To(Succeed())
 		flow.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 			phaseReport: {Handler: name, Next: map[flowv1alpha1.Phase]string{phaseDone: "ok"}},
 		}
 		Expect(k8sClient.Update(ctx, flow)).To(Succeed())
+	}
+
+	It("fails a task with no copy when the current phase's binding disappears while a run is in flight", func() {
+		flow := makeFlow()
+		makeHandler()
+		makeTask()
+
+		reconcileOnce() // begins the task on phaseInvestigate, setting CurrentRun
+		fx.dropCopy()
+		losesBinding(flow)
 
 		reconcileOnce()
 
 		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
 			"the phase in flight lost its binding out from under it")
+	})
+
+	// 変異: コピーがあっても live の flow を読む。
+	It("keeps running a task with a copy when the current phase's binding disappears from the live flow", func() {
+		flow := makeFlow()
+		makeHandler()
+		makeTask()
+
+		reconcileOnce() // begins the task on phaseInvestigate, setting CurrentRun
+		losesBinding(flow)
+
+		reconcileOnce()
+
+		Expect(get().Status.Phase).To(Equal(phaseInvestigate), "the copy still binds the phase in flight")
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: runner.JobName(name, phaseInvestigate, 1, 0), Namespace: resourceNamespace,
+		}, &job)).To(Succeed(), "the run goes ahead from the copy")
 	})
 
 	// The Job name is deterministic, not exclusive — anything with create
@@ -414,7 +439,7 @@ var _ = Describe("starting a task", func() {
 			},
 		})
 
-		racer := &TaskReconciler{Client: intercepted, Scheme: k8sClient.Scheme(), SidecarImage: sidecarImage}
+		racer := &TaskReconciler{Client: intercepted, Scheme: k8sClient.Scheme(), SidecarImage: sidecarImage, APIReader: k8sClient}
 		_, err = racer.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: resourceNamespace}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(forcedNotFound).To(BeTrue(), "the race this test drives at was never exercised")

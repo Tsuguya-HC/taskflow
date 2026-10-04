@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -215,6 +216,16 @@ func (fx *fixture) makeTask() *flowv1alpha1.Task {
 	fx.taskUID = tk.UID
 	DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, tk) })
 	return tk
+}
+
+// dropCopy makes the task one that has no copy of its definitions: begin wrote
+// one, and a task whose revision is absent is read from the live objects, the
+// way every task began before the copy existed.
+func (fx *fixture) dropCopy() {
+	rev := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+		Name: runner.SnapshotRevisionName(fx.name, fx.taskUID), Namespace: resourceNamespace,
+	}}
+	Expect(k8sClient.Delete(fx.ctx, rev)).To(Succeed(), "begin should have written the copy that is being dropped")
 }
 
 func (fx *fixture) reconcile() reconcile.Result {
