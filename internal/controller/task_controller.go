@@ -133,8 +133,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// unlike a phase the flow declared terminal, they need no binding table to
 	// tell. Checking that before the flow is resolved means a Task already at
 	// Escalated never depends on the flow's binding table to be recognised.
-	// What a task with no copy still owes the flow is fetched below, and a
-	// flow that GitOps has since deleted or renamed leaves it nothing to read.
+	// A stopped task is never migrated and never failed for a missing copy:
+	// what it still owes the flow is read from its copy if it has one, and from
+	// the live flow if it has none, which a flow that GitOps has since deleted
+	// or renamed leaves nothing to read.
 	if task.Status.Phase.IsReserved() {
 		// A Task that reached Escalated or Failed before expiresAt existed
 		// has none, and never will on its own: nothing above sees it again,
@@ -144,7 +146,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// one without a copy whose flow is already gone has nothing to read a
 		// ttl from, the same as the nil ttl fail() gets when there is no flow
 		// at all — and nothing to read a cleanup run's declaration from
-		// either, which is why such a task owed one never gets it.
+		// either, which is why such a task owed one never gets it. A copy
+		// deleted after the task stopped is exactly this case, and is not a
+		// failure.
 		flow, handlers, err := r.resolveFlow(ctx, &task)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -158,7 +162,17 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// A flow is always resolved in the task's own namespace. There is no field
 	// naming another one, which is what reduces "may I start this flow" to
 	// "may I create a Task here" — a question plain RBAC can answer.
-	flow, handlers, err := r.resolveFlow(ctx, &task)
+	var flow *flowv1alpha1.TaskFlow
+	var handlers copiedHandlers
+	var err error
+	if task.Status.Phase == "" {
+		flow, handlers, err = r.resolveFlow(ctx, &task)
+	} else {
+		var res ctrl.Result
+		if flow, handlers, res, err = r.resolveStarted(ctx, &task); flow == nil && !errors.Is(err, errLiveFlowGone) {
+			return res, err
+		}
+	}
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// The flow was deleted or never existed. Nothing to repair.
@@ -232,8 +246,10 @@ func forks(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) bool {
 // A task that has begun runs on its copy, so editing or deleting the live
 // TaskFlow or a live TaskHandler changes nothing for it; the handlers come
 // back with the flow so that one reconcile reads both from the same place. A
-// task with no copy, and one that has not begun, reads the live TaskFlow and
-// gets nil handlers, which handlerFor reads live.
+// task that has not begun, and a stopped one with no copy, reads the live
+// TaskFlow and gets nil handlers, which handlerFor reads live. A task that has
+// begun and not stopped is never read live: resolveStarted gives it a copy or
+// fails it.
 //
 // A NotFound error is returned as-is rather than interpreted here, because
 // what it means differs by caller: the reserved-phase branch has nothing to
@@ -262,6 +278,141 @@ func (r *TaskReconciler) resolveFlow(
 	// Say what this flow's endings are before any of them happens (ADR-0010).
 	primeFlowMetrics(flow)
 	return flow, handlers, nil
+}
+
+// errLiveFlowGone is what resolveStarted returns, wrapping the NotFound, for a
+// task with no copy whose live flow it needed and found missing: there is
+// nothing to migrate from or to tell a stopped task by, so Reconcile does what
+// it does for any missing flow.
+var errLiveFlowGone = errors.New("controller: the live flow is gone")
+
+// stoppedOn reports whether a started task that has no expiresAt and is not at
+// a reserved phase has stopped, on the flow it reads: its cleanup run is in
+// flight, or nothing is in flight and the flow does not bind its phase.
+func stoppedOn(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec) bool {
+	if taskstate.InFinally(status) {
+		return true
+	}
+	_, bound := flow.Bindings[status.Phase]
+	return taskstate.Idle(status) && !bound
+}
+
+// resolveStarted is resolveFlow for a task that has begun and has not reached
+// a reserved phase. A task that has not stopped always comes back on its copy:
+// one with a copy is marked as having it if it is not yet; one with neither
+// copy nor marker began before copies existed and gets one made from the live
+// definitions now; one with the marker and no copy had it deleted and is
+// failed. A task that has stopped keeps reading whatever it can: it owes only
+// its cleanup run and its date, which deleting the copy must not turn into a
+// failure.
+//
+// A nil flow means the reconcile is over, with the result and error given —
+// except for errLiveFlowGone, which is the caller's to turn into the same
+// failure a missing flow always is.
+func (r *TaskReconciler) resolveStarted(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+) (*flowv1alpha1.TaskFlow, copiedHandlers, ctrl.Result, error) {
+	flow, handlers, err := r.flowFromCopy(ctx, task)
+	if err != nil {
+		return nil, nil, ctrl.Result{}, err
+	}
+	if flow != nil {
+		primeFlowMetrics(flow)
+		if !taskstate.Pinned(&task.Status) && !stoppedOn(&task.Status, &flow.Spec) {
+			taskstate.Pin(&task.Status)
+			if err := r.Status().Update(ctx, task); err != nil {
+				return nil, nil, ctrl.Result{}, err
+			}
+		}
+		return flow, handlers, ctrl.Result{}, nil
+	}
+
+	// A task with a run in flight is told from a stopped one without the live
+	// flow, so one whose flow and copy are both gone is failed for the copy.
+	if !taskstate.Idle(&task.Status) && !taskstate.InFinally(&task.Status) {
+		if taskstate.Pinned(&task.Status) {
+			return nil, nil, ctrl.Result{}, r.failLost(ctx, task)
+		}
+		live, err := r.liveFlow(ctx, task)
+		if apierrors.IsNotFound(err) {
+			return nil, nil, ctrl.Result{}, fmt.Errorf("%w: %w", errLiveFlowGone, err)
+		}
+		if err != nil {
+			return nil, nil, ctrl.Result{}, err
+		}
+		return r.migrate(ctx, task, live)
+	}
+
+	live, err := r.liveFlow(ctx, task)
+	if apierrors.IsNotFound(err) {
+		// With nothing live to read, a task with nothing in flight cannot be
+		// told from one that stopped at an unbound phase, and a stopped task
+		// is not failed for it: fail() leaves both alone.
+		return nil, nil, ctrl.Result{}, fmt.Errorf("%w: %w", errLiveFlowGone, err)
+	}
+	if err != nil {
+		return nil, nil, ctrl.Result{}, err
+	}
+	if stoppedOn(&task.Status, &live.Spec) {
+		res, err := r.terminal(ctx, task, live, nil)
+		return nil, nil, res, err
+	}
+	if taskstate.Pinned(&task.Status) {
+		return nil, nil, ctrl.Result{}, r.failLost(ctx, task)
+	}
+	return r.migrate(ctx, task, live)
+}
+
+// liveFlow is the TaskFlow the task names as it is now, with its endings
+// primed.
+func (r *TaskReconciler) liveFlow(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
+	flow := &flowv1alpha1.TaskFlow{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, flow); err != nil {
+		return nil, err
+	}
+	primeFlowMetrics(flow)
+	return flow, nil
+}
+
+// migrate gives a started task that has no copy and no marker its copy, made
+// from the live definitions as begin makes it, and carries the task on from
+// that copy. A definition that cannot be held fails the task as it fails at
+// begin, with the ttl and cleanup run of the live flow.
+func (r *TaskReconciler) migrate(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	live *flowv1alpha1.TaskFlow,
+) (*flowv1alpha1.TaskFlow, copiedHandlers, ctrl.Result, error) {
+	if err := r.ensureSnapshot(ctx, task, live); err != nil {
+		var broken brokenFlow
+		if errors.As(err, &broken) {
+			return nil, nil, ctrl.Result{}, r.failThrough(ctx, task, &live.Spec, broken.reason,
+				func(now metav1.Time) { taskstate.Fail(&task.Status, broken.reason, &live.Spec, now) })
+		}
+		return nil, nil, ctrl.Result{}, err
+	}
+	taskstate.Pin(&task.Status)
+	if err := r.Status().Update(ctx, task); err != nil {
+		return nil, nil, ctrl.Result{}, err
+	}
+	flow, handlers, err := r.flowFromCopy(ctx, task)
+	if err == nil && flow == nil {
+		err = fmt.Errorf("controller: the copy of task %q is not there right after it was made", task.Name)
+	}
+	if err != nil {
+		return nil, nil, ctrl.Result{}, err
+	}
+	primeFlowMetrics(flow)
+	return flow, handlers, ctrl.Result{}, nil
+}
+
+// failLost fails a task whose copy was deleted. No cleanup run is owed and no
+// ttl is written: the definitions it ran on are gone, and the live ones are
+// not what it pinned.
+func (r *TaskReconciler) failLost(ctx context.Context, task *flowv1alpha1.Task) error {
+	return r.failThrough(ctx, task, nil, taskstate.MessageDefinitionsLost,
+		func(now metav1.Time) { taskstate.FailLost(&task.Status, now) })
 }
 
 // terminal is a task that has stopped. At most one thing is left to do: the
@@ -1205,6 +1356,7 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 		return err
 	}
 	taskstate.Begin(&task.Status, flow.Spec.Start)
+	taskstate.Pin(&task.Status)
 	return r.Status().Update(ctx, task)
 }
 
@@ -1213,7 +1365,7 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 // it.
 //
 // ttl is the flow's, or nil when the fault is that there is no flow to read
-// one from, which only a task without a copy can meet; such a task stays for
+// one from, which only a task that has not begun can meet; such a task stays for
 // as long as the flow stays gone. That is deliberate, not a gap: the
 // reserved-phase branch above backfills expiresAt from whatever flow the task
 // names on every later reconcile, so a flow created under the same name

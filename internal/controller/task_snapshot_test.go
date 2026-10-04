@@ -79,6 +79,22 @@ var _ = Describe("the revision a task starts from", func() {
 		Expect(got.Handlers).To(Equal(map[string]flowv1alpha1.TaskHandlerSpec{fx.name: stored(fx.name)}))
 	})
 
+	// 変異: begin が marker を書かない・True 以外で書く・reason を変える。
+	It("marks the task as having its copy in the write that begins it", func() {
+		fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseInvestigate))
+		Expect(pinnedOf(tk)).NotTo(BeNil(), "the copy was made, and the task says so")
+		Expect(pinnedOf(tk).Status).To(Equal(metav1.ConditionTrue))
+		Expect(pinnedOf(tk).Reason).To(Equal(reasonCopied))
+		Expect(fx.revisions()).To(HaveLen(1), "the marker is written after the copy, never for one that was not made")
+	})
+
 	It("begins only the starting phase and nothing else", func() {
 		fx.makeFlow()
 		fx.makeHandler()
@@ -125,6 +141,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(pinnedOf(tk)).To(BeNil(), "no copy was made, so there is nothing to say was")
 		Expect(revisionsOf(tk.UID)).To(BeEmpty(), "a task that never began has nothing to hold still")
 	})
 
@@ -132,7 +149,7 @@ var _ = Describe("the revision a task starts from", func() {
 	// without touching the ending」が守る性質。
 	It("begins without the finally handler when it is missing", func() {
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup-gone", Done: "swept"}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup-gone", Done: doneSwept}
 		})
 		fx.makeHandler()
 		tk := fx.makeTask()
@@ -148,7 +165,7 @@ var _ = Describe("the revision a task starts from", func() {
 	It("carries the finally handler when it exists", func() {
 		cleanup := fx.name + "-cleanup"
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: "swept"}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: doneSwept}
 		})
 		fx.makeHandler()
 		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Name = cleanup })
@@ -196,6 +213,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
 				"a copy that fits in no single object must fail the task before its first run")
+			Expect(pinnedOf(fx.get())).To(BeNil(), "no copy was made, so there is nothing to say was")
 			Expect(revisionsOf(tk.UID)).To(BeEmpty())
 		},
 		Entry("refused by the storage under the apiserver", 2),
@@ -223,6 +241,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 		Expect(err).To(HaveOccurred(), "a name someone else holds is retried, not taken over")
 		Expect(fx.get().Status.Phase).To(BeEmpty(), "the task does not begin on a copy that is not its own")
+		Expect(pinnedOf(fx.get())).To(BeNil(), "and does not say it has one")
 		var now appsv1.ControllerRevision
 		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(squatter), &now)).To(Succeed())
 		Expect(now.ResourceVersion).To(Equal(stamp))
@@ -243,7 +262,11 @@ var _ = Describe("the revision a task starts from", func() {
 
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate))
+		got := fx.get()
+		Expect(got.Status.Phase).To(Equal(phaseInvestigate))
+		Expect(pinnedOf(got)).NotTo(BeNil(), "taking over its own copy is a begin like any other")
+		Expect(pinnedOf(got).Status).To(Equal(metav1.ConditionTrue))
+		Expect(pinnedOf(got).Reason).To(Equal(reasonCopied))
 		var now appsv1.ControllerRevision
 		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(own), &now)).To(Succeed())
 		Expect(now.ResourceVersion).To(Equal(stamp))

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -28,8 +29,8 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
 )
 
-// 開始した Task は、handler も写しから読む (#196)。写しを持たない Task は今まで通り
-// live の TaskHandler を読む。
+// 開始した Task は、handler も写しから読む (#196)。写しも marker も持たない Task は、
+// 移行の時点の live の TaskHandler を写して、そこから読む (#183)。
 var _ = Describe("a task running from its copy of the handlers", func() {
 	var fx *fixture
 
@@ -112,37 +113,67 @@ var _ = Describe("a task running from its copy of the handlers", func() {
 		Expect(jobsOf(fx)).To(BeEmpty())
 	})
 
-	// 写しを持たない Task が live を読む性質は、上の 3 つの裏返し。
-	Context("with no copy", func() {
+	// 写しも marker も持たない Task の移行 (#183)。
+	Context("with no copy and no marker", func() {
 		// 変異: 写しの有無にかかわらず handler を最初に読んだ値で固定する。
-		It("builds the Job from the live handler's current image", func() {
+		// 変異: 移行で写しを作らず live の handler を読み続ける。
+		It("makes the copy from the live handler as it is at migration", func() {
 			fx.makeFlow()
 			fx.makeHandler()
-			fx.makeTask()
-			fx.reconcile() // begin
-			fx.dropCopy()
+			fx.bareTask()
 			fx.editHandler(func(h *flowv1alpha1.TaskHandler) {
 				h.Spec.JobTemplate.Template.Spec.Containers[0].Image = editedImage
 			})
 
-			fx.reconcile() // creates the Job
+			fx.reconcile() // migrates
+			fx.reconcile() // creates the Job, if the migration did not
 
 			Expect(imageOf(fx)).To(Equal(editedImage))
+			revs := fx.revisions()
+			Expect(revs).To(HaveLen(1), "the copy was made")
+			var snap snapshot
+			Expect(json.Unmarshal(revs[0].Data.Raw, &snap)).To(Succeed())
+			Expect(snap.Handlers[fx.name].JobTemplate.Template.Spec.Containers[0].Image).To(Equal(editedImage),
+				"the copy holds the handler as it was when the task was migrated")
 		})
 
-		// 変異: handler が無くても Job を作る。
-		It("fails when the live handler is deleted", func() {
+		// 移行の後は live の handler を読まない。
+		// 変異: 移行した Task が handler を live から読む。
+		It("no longer reads the live handler once it has migrated", func() {
 			fx.makeFlow()
-			fx.makeHandler()
-			fx.makeTask()
-			fx.reconcile() // begin
-			fx.dropCopy()
+			fx.makeHandler(stateRunner(timeout))
+			fx.bareTask()
+			fx.reconcile() // migrates
+			fx.reconcile()
+			Expect(pinnedOf(fx.get())).NotTo(BeNil(), "the task migrated")
 			fx.deleteHandler()
+
+			fx.answer("ok", "")
+			fx.reconcile()
+
+			Expect(fx.get().Status.Phase).To(Equal(phaseReport), "a deleted handler is no reason to fail a task that has its copy")
+		})
+
+		// 変異: 移行が in flight の phase の handler しか見ない。
+		It("fails when a handler any binding names is missing, though the one in flight exists", func() {
+			fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+				f.Spec.Bindings[phaseReport] = flowv1alpha1.PhaseBinding{
+					Handler: fx.name + "-gone",
+					Next:    map[flowv1alpha1.Phase]string{phaseDone: "ok"},
+				}
+			})
+			fx.makeHandler()
+			fx.bareTask()
 
 			fx.reconcile()
 
-			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			tk := fx.get()
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			Expect(readyOf(tk).Message).To(And(ContainSubstring(fx.name+"-gone"), ContainSubstring("does not exist")),
+				"the reason is the one begin gives for the same fault")
 			Expect(jobsOf(fx)).To(BeEmpty())
+			Expect(fx.revisions()).To(BeEmpty(), "no copy of definitions that cannot be held")
+			Expect(pinnedOf(tk)).To(BeNil())
 		})
 	})
 })

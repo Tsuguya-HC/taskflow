@@ -297,3 +297,33 @@ func (r *TaskReconciler) failBranches(
 	// requeue that follows — never costs the task its metric or its Event.
 	return r.reapCancelledJobs(ctx, task)
 }
+
+// failThrough fails a task that has not stopped, though nothing may be in
+// flight and a fork's branches may be: the fault is in the copy of its
+// definitions, not in any run. r.fail would leave a task with nothing in
+// flight where it is, so this writes the failure itself, recording every
+// branch Cancelled first when the task is at a fork. write puts the failure on
+// the status; flow is the one its date and cleanup run are read from, nil for
+// none.
+func (r *TaskReconciler) failThrough(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlowSpec,
+	reason string,
+	write func(now metav1.Time),
+) error {
+	now := metav1.NewTime(r.now())
+	branching := taskstate.Branching(&task.Status)
+	if branching {
+		taskstate.CancelBranches(&task.Status, reason, now)
+	}
+	write(now)
+	if err := r.Status().Update(ctx, task); err != nil {
+		return err
+	}
+	r.announce(task, flow, flowv1alpha1.PhaseFailed, reason)
+	if !branching {
+		return nil
+	}
+	return r.reapCancelledJobs(ctx, task)
+}

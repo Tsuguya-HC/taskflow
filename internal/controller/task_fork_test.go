@@ -551,6 +551,47 @@ var _ = Describe("a fork", func() {
 		}
 	})
 
+	// 変異: 写しが無いとき、枝を畳まずに Failed にする。
+	// 変異: 写しが無ければ live の flow で枝を走らせ続ける。
+	It("cancels every branch, and stops their Jobs, when the copy of a task at a fork was deleted", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.dropCopy()
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(readyOf(tk).Reason).To(Equal(reasonLost))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
+			"the branches were still running, unasked, when the copy went")
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+	})
+
+	// 変異: 移行の失敗で枝を畳まずに fail() に回す。
+	It("cancels every branch, and stops their Jobs, when migrating a task at a fork fails", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.dropCopy()
+		fx.dropMarker()
+		fx.deleteHandler(handlerFor(phaseReport))
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(readyOf(tk).Message).To(ContainSubstring(handlerFor(phaseReport)))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+		Expect(fx.revisions()).To(BeEmpty())
+	})
+
 	// 変異: コピーがあっても live の flow の束縛の有無で止める。
 	It("keeps the branches of a task with a copy running when the live flow loses the fork phase's binding", func() {
 		setUp()

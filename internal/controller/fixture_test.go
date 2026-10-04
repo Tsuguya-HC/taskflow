@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -37,6 +38,7 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
+	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 )
 
 const (
@@ -45,6 +47,20 @@ const (
 	// phaseBroken is an ending a flow can declare to be a failure — an
 	// ordinary name its author chose, like every other phase here.
 	phaseBroken flowv1alpha1.Phase = "失敗"
+	// phaseElsewhere is a phase no binding of the fixture's flow names.
+	phaseElsewhere flowv1alpha1.Phase = "別の報告"
+)
+
+// doneSwept is the outcome a cleanup run reports in specs that declare finally.
+const doneSwept = "swept"
+
+// The marker's and the lost-copy reason's spellings are the contract with
+// whoever reads a Task's status, so they are written out here rather than
+// imported: renaming one must fail the specs.
+const (
+	conditionPinned = "DefinitionsPinned"
+	reasonCopied    = "Copied"
+	reasonLost      = "DefinitionsLost"
 )
 
 const (
@@ -110,6 +126,10 @@ func newFixture() *fixture {
 		// The verdict boxes go the same way and for the same reason: they
 		// are owned by the Task, and nothing here collects owned objects.
 		_ = k8sClient.DeleteAllOf(fx.ctx, &corev1.ConfigMap{},
+			client.InNamespace(resourceNamespace),
+			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})
+		// So are the copies, for the same reason.
+		_ = k8sClient.DeleteAllOf(fx.ctx, &appsv1.ControllerRevision{},
 			client.InNamespace(resourceNamespace),
 			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})
 	})
@@ -218,14 +238,66 @@ func (fx *fixture) makeTask() *flowv1alpha1.Task {
 	return tk
 }
 
-// dropCopy makes the task one that has no copy of its definitions: begin wrote
-// one, and a task whose revision is absent is read from the live objects, the
-// way every task began before the copy existed.
+// dropCopy deletes the task's copy of its definitions, which begin wrote. What
+// is left is a task that had a copy and lost it; a task that never had one is
+// bareTask.
 func (fx *fixture) dropCopy() {
 	rev := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
 		Name: runner.SnapshotRevisionName(fx.name, fx.taskUID), Namespace: resourceNamespace,
 	}}
 	Expect(k8sClient.Delete(fx.ctx, rev)).To(Succeed(), "begin should have written the copy that is being dropped")
+}
+
+// bareTask is a task past begin whose status was written without it: no copy
+// of its own, and no marker that there ever was one.
+func (fx *fixture) bareTask() *flowv1alpha1.Task {
+	tk := fx.makeTask()
+	taskstate.Begin(&tk.Status, phaseInvestigate)
+	meta.RemoveStatusCondition(&tk.Status.Conditions, conditionPinned)
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+	return tk
+}
+
+// revisions is the copies the task's label finds, whoever controls them.
+func (fx *fixture) revisions() []appsv1.ControllerRevision {
+	var list appsv1.ControllerRevisionList
+	Expect(k8sClient.List(fx.ctx, &list, client.InNamespace(resourceNamespace),
+		client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})).To(Succeed())
+	return list.Items
+}
+
+// pinnedOf is the marker on tk, nil when it has none.
+func pinnedOf(tk *flowv1alpha1.Task) *metav1.Condition {
+	return meta.FindStatusCondition(tk.Status.Conditions, conditionPinned)
+}
+
+// readyOf is the Ready condition on tk, nil when it has none.
+func readyOf(tk *flowv1alpha1.Task) *metav1.Condition {
+	return meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
+}
+
+// setPinned writes the marker with the status and reason given.
+func (fx *fixture) setPinned(status metav1.ConditionStatus, reason string) {
+	tk := fx.get()
+	meta.SetStatusCondition(&tk.Status.Conditions, metav1.Condition{
+		Type: conditionPinned, Status: status, Reason: reason, Message: "set by the spec",
+	})
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+}
+
+// dropMarker takes the marker off, leaving the copy: a task that began after
+// the copy was written and before the marker was.
+func (fx *fixture) dropMarker() {
+	tk := fx.get()
+	meta.RemoveStatusCondition(&tk.Status.Conditions, conditionPinned)
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+}
+
+// idle leaves the task with nothing in flight at the phase it stands at.
+func (fx *fixture) idle() {
+	tk := fx.get()
+	tk.Status.CurrentRuns = nil
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 }
 
 // rewriteCopy changes what the task's copy holds: a revision's data cannot be

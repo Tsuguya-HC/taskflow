@@ -60,9 +60,22 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
-// ConditionReady is the single condition a task carries: whether the
-// framework can go on with it.
+// ConditionReady is whether the framework can go on with a task.
 const ConditionReady = "Ready"
+
+// ConditionDefinitionsPinned is the marker that a task's copy of its
+// definitions was made. It records only that, never which copy: the copy is
+// found from the task's name and UID. Only True counts, and once written it is
+// never removed.
+const ConditionDefinitionsPinned = "DefinitionsPinned"
+
+// ReasonCopied is the reason the marker is written with.
+const ReasonCopied = "Copied"
+
+// ReasonDefinitionsLost is why Ready goes false for a task whose copy of its
+// definitions is gone: what it ran on cannot be told, and the live definitions
+// are not what it pinned.
+const ReasonDefinitionsLost = "DefinitionsLost"
 
 // ReasonHandlerFailed is why Ready goes false for a task that ran to one of
 // its flow's Failure endings. The outcome of that move is Declared — the
@@ -451,6 +464,34 @@ func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase) {
 	SetCurrent(status, &flowv1alpha1.RunRef{Phase: start, RunID: 1})
 }
 
+// MessageDefinitionsLost is what Ready says when the copy is gone.
+const MessageDefinitionsLost = "the task's copy of its definitions is missing"
+
+// Pin records that the task's copy of its definitions exists. It is written
+// after the copy, never before.
+func Pin(status *flowv1alpha1.TaskStatus) {
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:    ConditionDefinitionsPinned,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonCopied,
+		Message: "the task's definitions were copied when it began",
+	})
+}
+
+// Pinned reports whether the task carries the marker. Reason and message are
+// not read.
+func Pinned(status *flowv1alpha1.TaskStatus) bool {
+	return meta.IsStatusConditionTrue(status.Conditions, ConditionDefinitionsPinned)
+}
+
+// FailLost stops a task whose copy of its definitions was deleted. There is no
+// flow to read a cleanup run or a ttl from, so none is owed and none is
+// written; the ttl is filled in later from whatever flow carries the task's
+// flow name.
+func FailLost(status *flowv1alpha1.TaskStatus, now metav1.Time) {
+	failWith(status, ReasonDefinitionsLost, MessageDefinitionsLost, nil, now)
+}
+
 // Fail stops a task whose flow is broken. Nothing is retried: the fault is in
 // the definition rather than in the work, and guessing at a repair would hide
 // it.
@@ -460,12 +501,16 @@ func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase) {
 // wait, not a dead end: the controller keeps looking for a flow of that name
 // on every later reconcile and backfills the date once one appears.
 func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
+	failWith(status, "FlowBroken", reason, flow, now)
+}
+
+func failWith(status *flowv1alpha1.TaskStatus, readyReason, message string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
 	status.Phase = flowv1alpha1.PhaseFailed
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    ConditionReady,
 		Status:  metav1.ConditionFalse,
-		Reason:  "FlowBroken",
-		Message: reason,
+		Reason:  readyReason,
+		Message: message,
 	})
 	// Failed is reserved, so it is terminal and needs a human on its own
 	// say-so; Expire reaches that without consulting the flow's bindings or

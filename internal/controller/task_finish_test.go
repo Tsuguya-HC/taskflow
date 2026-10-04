@@ -532,7 +532,7 @@ var _ = Describe("finishing a run", func() {
 	explainsTwice := func(spec *flowv1alpha1.TaskFlowSpec) {
 		spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
 			Handler: fx.name,
-			Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", "別の報告": "ok"},
+			Next:    map[flowv1alpha1.Phase]string{phaseReport: "ok", phaseElsewhere: "ok"},
 		}
 	}
 

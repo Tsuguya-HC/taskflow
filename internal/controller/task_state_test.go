@@ -188,17 +188,6 @@ var _ = Describe("a run nothing starts", func() {
 			Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "a deleted handler is no reason to fail a task that has its copy")
 			Expect(taskstate.Current(&tk.Status).Deadline).NotTo(BeNil(), "the wait is as long as the copy's handler says")
 		})
-
-		It("fails a run of a task with no copy", func() {
-			placed()
-			fx.dropCopy()
-			nameBox()
-			fx.deleteHandler()
-
-			fx.reconcile()
-
-			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-		})
 	})
 
 	// Two guards no live handler can reach, because the CRD refuses at admission
