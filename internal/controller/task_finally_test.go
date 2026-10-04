@@ -421,9 +421,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		makeCleanupHandler()
 		fx.makeTask()
 		fx.reconcile() // begin
-		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: cleanupName(), Namespace: resourceNamespace},
-		})).To(Succeed())
+		fx.deleteHandler(cleanupName())
 		fx.reconcile() // create the Job
 		finish(fx.job(1), "ok\nnothing to report")
 		fx.reconcile() // settle

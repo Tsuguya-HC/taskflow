@@ -253,10 +253,15 @@ func (fx *fixture) editHandler(mut func(*flowv1alpha1.TaskHandler)) {
 	Expect(k8sClient.Update(fx.ctx, &h)).To(Succeed())
 }
 
-// deleteHandler removes the live handler the fixture made.
-func (fx *fixture) deleteHandler() {
+// deleteHandler removes a live handler. Without a name it is the one the
+// fixture made.
+func (fx *fixture) deleteHandler(name ...string) {
+	target := fx.name
+	if len(name) > 0 {
+		target = name[0]
+	}
 	Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-		ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: target, Namespace: resourceNamespace},
 	})).To(Succeed())
 }
 

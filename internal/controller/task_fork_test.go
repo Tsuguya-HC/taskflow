@@ -287,9 +287,7 @@ var _ = Describe("a fork", func() {
 	It("retries a branch by the copy's handler when the live handler is gone", func() {
 		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
 		forked(string(security))
-		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: handlerFor(security), Namespace: resourceNamespace},
-		})).To(Succeed())
+		fx.deleteHandler(handlerFor(security))
 
 		fail(jobOf(security, 2), batchv1.JobReasonBackoffLimitExceeded)
 		fx.reconcile()
@@ -307,9 +305,7 @@ var _ = Describe("a fork", func() {
 	It("fails a fork with no copy when a branch never started and its handler is gone", func() {
 		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
 		forkedFrom(string(security), false)
-		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: handlerFor(security), Namespace: resourceNamespace},
-		})).To(Succeed())
+		fx.deleteHandler(handlerFor(security))
 
 		fail(jobOf(security, 2), batchv1.JobReasonBackoffLimitExceeded)
 		fx.reconcile()

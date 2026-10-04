@@ -94,6 +94,24 @@ var _ = Describe("a task running from its copy of the handlers", func() {
 		Expect(boxesOf(fx)).To(BeEmpty(), "and nothing is opened for an answer the live handler's runner would wait on")
 	})
 
+	// 変異: handlers を持たない写しを「写し無し」と同じ nil のまま返し、live の handler を読む。
+	// handlers のキーが無い、または null の写しは、持っていない写しであって、写しの無い Task ではない。
+	It("does not read the live handler when the copy holds no handlers", func() {
+		fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+		fx.reconcile() // begin
+		fx.rewriteCopy(func(snap *snapshot) { snap.Handlers = nil })
+		fx.editHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Spec.JobTemplate.Template.Spec.Containers[0].Image = editedImage
+		})
+
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed), "the copy has no handler, and the live one is not a stand-in for it")
+		Expect(jobsOf(fx)).To(BeEmpty())
+	})
+
 	// 写しを持たない Task が live を読む性質は、上の 3 つの裏返し。
 	Context("with no copy", func() {
 		// 変異: 写しの有無にかかわらず handler を最初に読んだ値で固定する。

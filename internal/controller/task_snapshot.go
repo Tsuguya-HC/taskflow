@@ -139,13 +139,13 @@ func (r *TaskReconciler) snapshotHandlers(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
-) (map[string]flowv1alpha1.TaskHandlerSpec, error) {
+) (copiedHandlers, error) {
 	phases := make([]flowv1alpha1.Phase, 0, len(flow.Spec.Bindings))
 	for phase := range flow.Spec.Bindings {
 		phases = append(phases, phase)
 	}
 	slices.Sort(phases)
-	handlers := make(map[string]flowv1alpha1.TaskHandlerSpec, len(phases)+1)
+	handlers := make(copiedHandlers, len(phases)+1)
 	for _, phase := range phases {
 		name := flow.Spec.Bindings[phase].Handler
 		if _, done := handlers[name]; done {
