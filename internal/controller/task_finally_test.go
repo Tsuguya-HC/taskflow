@@ -372,6 +372,68 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
 	})
 
+	// What the copy holds of the cleanup handler is what it was when the task
+	// began: one that did not exist then is not picked up by a task with a copy
+	// when it appears (#196), and is by one without.
+	Context("a cleanup handler that appears after the task began", func() {
+		// 変異: 掃除の run を送るとき live の handler を読む。
+		It("is not used by a task with a copy", func() {
+			fx.makeFlow(withCleanup)
+			fx.makeHandler()
+			fx.makeTask()  // no cleanup handler exists
+			fx.reconcile() // begin
+			makeCleanupHandler()
+			fx.reconcile() // create the Job
+			finish(fx.job(1), "ok\nnothing to report")
+			fx.reconcile() // settle
+
+			fx.reconcile()
+
+			tk := fx.get()
+			Expect(tk.Status.Phase).To(Equal(phaseReport), "a missing cleanup handler does not fail the task")
+			Expect(tk.Status.History).To(HaveLen(2))
+			Expect(tk.Status.History[1].Phase).To(Equal(flowv1alpha1.PhaseFinally))
+			Expect(tk.Status.History[1].Reason).To(ContainSubstring("does not exist"))
+			Expect(jobsOf(fx)).To(HaveLen(1), "the handler made after the task began does not start a cleanup Job")
+		})
+
+		It("is used by a task with no copy", func() {
+			fx.makeFlow(withCleanup)
+			fx.makeHandler()
+			fx.makeTask()  // no cleanup handler exists
+			fx.reconcile() // begin
+			fx.dropCopy()
+			makeCleanupHandler()
+			fx.reconcile() // create the Job
+			finish(fx.job(1), "ok\nnothing to report")
+			fx.reconcile() // settle
+
+			fx.reconcile()
+
+			Expect(cleanupJob()).NotTo(BeNil())
+		})
+	})
+
+	// 変異: 掃除の run を送るとき live の handler を読む。
+	It("runs a cleanup handler that was deleted after the task began", func() {
+		fx.makeFlow(withCleanup)
+		fx.makeHandler()
+		makeCleanupHandler()
+		fx.makeTask()
+		fx.reconcile() // begin
+		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
+			ObjectMeta: metav1.ObjectMeta{Name: cleanupName(), Namespace: resourceNamespace},
+		})).To(Succeed())
+		fx.reconcile() // create the Job
+		finish(fx.job(1), "ok\nnothing to report")
+		fx.reconcile() // settle
+
+		fx.reconcile()
+
+		Expect(cleanupJob().Spec.Template.Spec.Containers[0].Image).To(Equal(agentImage),
+			"the copy still holds the handler the cleanup run was declared with")
+	})
+
 	// A flow broken before anything could run has an ending with no run behind
 	// it. History's last line is then some earlier run's verdict — or there is
 	// no line at all — and either way it is not this ending's, so the cleanup
@@ -474,7 +536,8 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		// The handler goes while run 2 is in flight, and the Job fails without
 		// its container ever running: the reconcile that would retry it finds
 		// nobody to retry for, so run 2 never settles — history stays at one
-		// line, run 1's.
+		// line, run 1's. Only a task with no copy can lose a handler this way.
+		fx.dropCopy()
 		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
 			ObjectMeta: metav1.ObjectMeta{Name: reportHandler, Namespace: resourceNamespace},
 		})).To(Succeed())

@@ -52,6 +52,7 @@ func (r *TaskReconciler) driveBranches(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 ) (ctrl.Result, error) {
 	fork := task.Status.Phase
 	if !forks(&flow.Spec, fork) {
@@ -70,7 +71,7 @@ func (r *TaskReconciler) driveBranches(
 	var settled []taskstate.SettledBranch
 	var wait time.Duration
 	for _, run := range slices.Clone(task.Status.CurrentRuns) {
-		branch, after, err := r.observeBranch(ctx, task, flow, &run, runs)
+		branch, after, err := r.observeBranch(ctx, task, flow, handlers, &run, runs)
 		if err != nil {
 			var broken brokenFlow
 			if errors.As(err, &broken) {
@@ -123,10 +124,11 @@ func (r *TaskReconciler) observeBranch(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 	runs map[flowv1alpha1.Phase]int32,
 ) (*taskstate.SettledBranch, time.Duration, error) {
-	kind, err := r.runnerOf(ctx, task, flow, run)
+	kind, err := r.runnerOf(ctx, task, flow, handlers, run)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -139,7 +141,7 @@ func (r *TaskReconciler) observeBranch(
 			"branch %q is filled by a %s runner; a fork's branches run as Jobs", run.Phase, kind)}
 	}
 
-	job, err := r.ensureJob(ctx, task, flow, run)
+	job, err := r.ensureJob(ctx, task, flow, handlers, run)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -171,7 +173,7 @@ func (r *TaskReconciler) observeBranch(
 			return nil, 0, brokenFlow{fmt.Sprintf(
 				"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase)}
 		}
-		handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+		handler, err := r.handlerFor(ctx, task, handlers, handlerName, run.Phase)
 		if err != nil {
 			return nil, 0, err
 		}

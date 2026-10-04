@@ -145,20 +145,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// ttl from, the same as the nil ttl fail() gets when there is no flow
 		// at all — and nothing to read a cleanup run's declaration from
 		// either, which is why such a task owed one never gets it.
-		flow, err := r.resolveFlow(ctx, &task)
+		flow, handlers, err := r.resolveFlow(ctx, &task)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, err
 		}
-		return r.terminal(ctx, &task, flow)
+		return r.terminal(ctx, &task, flow, handlers)
 	}
 
 	// A flow is always resolved in the task's own namespace. There is no field
 	// naming another one, which is what reduces "may I start this flow" to
 	// "may I create a Task here" — a question plain RBAC can answer.
-	flow, err := r.resolveFlow(ctx, &task)
+	flow, handlers, err := r.resolveFlow(ctx, &task)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// The flow was deleted or never existed. Nothing to repair.
@@ -197,13 +197,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// Same handling as the reserved-phase branch above, for a task that
 		// stopped at a phase the flow itself leaves unbound. The flow is
 		// already in hand here, so nothing extra needs fetching.
-		return r.terminal(ctx, &task, flow)
+		return r.terminal(ctx, &task, flow, handlers)
 	}
 
 	// A fork's branches are several runs at once, each driven on its own
 	// and settled together (ADR-0013); everything else is one run at a time.
 	if taskstate.Branching(&task.Status) {
-		return r.driveBranches(ctx, &task, flow)
+		return r.driveBranches(ctx, &task, flow, handlers)
 	}
 
 	run := taskstate.Current(&task.Status)
@@ -214,7 +214,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// writes. Pick it up rather than stalling.
 		run = &flowv1alpha1.RunRef{Phase: task.Status.Phase, RunID: task.Status.RunID}
 	}
-	return r.driveRun(ctx, &task, flow, run, recovering)
+	return r.driveRun(ctx, &task, flow, handlers, run, recovering)
 }
 
 // forks reports whether phase is a fork in flow: its binding declares a join.
@@ -230,8 +230,10 @@ func forks(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) bool {
 // site safe by construction rather than by a comment repeated at each one.
 //
 // A task that has begun runs on its copy, so editing or deleting the live
-// TaskFlow changes nothing for it. A task with no copy, and one that has not
-// begun, reads the live TaskFlow.
+// TaskFlow or a live TaskHandler changes nothing for it; the handlers come
+// back with the flow so that one reconcile reads both from the same place. A
+// task with no copy, and one that has not begun, reads the live TaskFlow and
+// gets nil handlers, which handlerFor reads live.
 //
 // A NotFound error is returned as-is rather than interpreted here, because
 // what it means differs by caller: the reserved-phase branch has nothing to
@@ -239,23 +241,27 @@ func forks(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) bool {
 // branches already were. Only the live read produces it; a copy that is not
 // there is a task without one, and a copy that cannot be read is an error of
 // its own.
-func (r *TaskReconciler) resolveFlow(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
+func (r *TaskReconciler) resolveFlow(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+) (*flowv1alpha1.TaskFlow, copiedHandlers, error) {
 	var flow *flowv1alpha1.TaskFlow
+	var handlers copiedHandlers
 	if task.Status.Phase != "" {
 		var err error
-		if flow, err = r.flowFromCopy(ctx, task); err != nil {
-			return nil, err
+		if flow, handlers, err = r.flowFromCopy(ctx, task); err != nil {
+			return nil, nil, err
 		}
 	}
 	if flow == nil {
 		flow = &flowv1alpha1.TaskFlow{}
 		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, flow); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// Say what this flow's endings are before any of them happens (ADR-0010).
 	primeFlowMetrics(flow)
-	return flow, nil
+	return flow, handlers, nil
 }
 
 // terminal is a task that has stopped. At most one thing is left to do: the
@@ -272,6 +278,7 @@ func (r *TaskReconciler) terminal(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 ) (ctrl.Result, error) {
 	// Ahead of the cleanup run, not after it: a Cancelled branch's Job that a
 	// status write outlived — the delete after it never ran, or did and
@@ -282,7 +289,7 @@ func (r *TaskReconciler) terminal(
 		return ctrl.Result{}, err
 	}
 	if run := taskstate.Current(&task.Status); run != nil && taskstate.InFinally(&task.Status) {
-		return r.driveRun(ctx, task, flow, run, false)
+		return r.driveRun(ctx, task, flow, handlers, run, false)
 	}
 	return ctrl.Result{}, r.backfillExpiry(ctx, task, &flow.Spec)
 }
@@ -299,10 +306,11 @@ func (r *TaskReconciler) driveRun(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 	recovering bool,
 ) (ctrl.Result, error) {
-	kind, err := r.runnerOf(ctx, task, flow, run)
+	kind, err := r.runnerOf(ctx, task, flow, handlers, run)
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
@@ -319,9 +327,9 @@ func (r *TaskReconciler) driveRun(
 	// silently into running something the flow never asked to be started.
 	switch kind {
 	case flowv1alpha1.RunnerJob:
-		return r.driveJobRun(ctx, task, flow, run, recovering)
+		return r.driveJobRun(ctx, task, flow, handlers, run, recovering)
 	case flowv1alpha1.RunnerState:
-		return r.driveStateRun(ctx, task, flow, run, recovering)
+		return r.driveStateRun(ctx, task, flow, handlers, run, recovering)
 	default:
 		return ctrl.Result{}, r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
 			"phase %q names a runner type %q this controller does not know how to drive", run.Phase, kind))
@@ -342,9 +350,10 @@ func (r *TaskReconciler) driveRun(
 // An attempt just past an infrastructure retry is "about to start" by this
 // same test: taskstate.RetryInfra clears both fields, so the handler is read
 // again here — at the same moment ensureJob would read it again anyway to
-// build that attempt's Job. Reading the definition afresh there is not a gap
-// in the rule; it is the rule, applied to a run whose current attempt has not
-// picked a kind yet.
+// build that attempt's Job. For a task with a copy that is the copy's handler
+// again, so a retry never switches kinds; for one without, the live handler
+// is read afresh, which is the rule applied to a run whose current attempt
+// has not picked a kind yet.
 //
 // That reset is a Job-side thing only. RetryInfra is reached from
 // driveJobRun's own reading of a Job's pods; a run with a verdict box instead
@@ -355,6 +364,7 @@ func (r *TaskReconciler) runnerOf(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 ) (flowv1alpha1.RunnerType, error) {
 	if kind := run.Runner(); kind != "" {
@@ -365,7 +375,7 @@ func (r *TaskReconciler) runnerOf(
 		return "", brokenFlow{fmt.Sprintf(
 			"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase)}
 	}
-	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+	handler, err := r.handlerFor(ctx, task, handlers, handlerName, run.Phase)
 	if err != nil {
 		return "", err
 	}
@@ -385,13 +395,14 @@ func (r *TaskReconciler) driveJobRun(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 	recovering bool,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	prior := run.DeepCopy()
 
-	job, err := r.ensureJob(ctx, task, flow, run)
+	job, err := r.ensureJob(ctx, task, flow, handlers, run)
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
@@ -444,7 +455,7 @@ func (r *TaskReconciler) driveJobRun(
 		// That is the one kind of failure the controller retries on its own,
 		// under the same runID: nothing was decided, so no run was spent
 		// (ADR-0004). Whatever the attempt left behind is prepare's to clear.
-		return ctrl.Result{}, r.retryInfra(ctx, task, flow, run, failure)
+		return ctrl.Result{}, r.retryInfra(ctx, task, flow, handlers, run, failure)
 	}
 
 	_, directories, ok := runSpec(&flow.Spec, run.Phase)
@@ -502,6 +513,7 @@ func (r *TaskReconciler) driveStateRun(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 	recovering bool,
 ) (ctrl.Result, error) {
@@ -519,7 +531,7 @@ func (r *TaskReconciler) driveStateRun(
 	prior := run.DeepCopy()
 	box, err := r.ensureVerdictBox(ctx, task, run, directories)
 	if err == nil && run.Deadline == nil {
-		err = r.dateRun(ctx, task, run, handlerName, box)
+		err = r.dateRun(ctx, task, handlers, run, handlerName, box)
 	}
 	if err != nil {
 		var broken brokenFlow
@@ -738,11 +750,12 @@ func (r *TaskReconciler) ensureVerdictBox(
 func (r *TaskReconciler) dateRun(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 	handlerName string,
 	box *corev1.ConfigMap,
 ) error {
-	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+	handler, err := r.handlerFor(ctx, task, handlers, handlerName, run.Phase)
 	if err != nil {
 		return err
 	}
@@ -1095,13 +1108,15 @@ func (r *TaskReconciler) announceCleanup(task *flowv1alpha1.Task, outcome transi
 }
 
 // retryInfra re-runs a phase the handler never got to run, or escalates when
-// the handler's retry allowance is spent. The handler is fetched here rather
-// than carried from ensureJob because only this path needs it, and its
-// disappearing in between is the same broken-flow fault it would be anywhere.
+// the handler's retry allowance is spent. The handler is looked up here rather
+// than carried from ensureJob because only this path needs it; for a task
+// without a copy its disappearing in between is the same broken-flow fault it
+// would be anywhere.
 func (r *TaskReconciler) retryInfra(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 	failure string,
 ) error {
@@ -1110,7 +1125,7 @@ func (r *TaskReconciler) retryInfra(
 		return r.brokeDuringRun(ctx, task, flow, run, fmt.Sprintf(
 			"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase))
 	}
-	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+	handler, err := r.handlerFor(ctx, task, handlers, handlerName, run.Phase)
 	if err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
@@ -1131,16 +1146,29 @@ func (r *TaskReconciler) retryInfra(
 	return r.Status().Update(ctx, task)
 }
 
-// handlerFor fetches the handler the flow named for this run. Its
-// disappearing is a broken flow rather than a transient fault, reported
-// through brokenFlow so every caller turns it into the same thing instead of
-// each remembering the NotFound check itself.
+// handlerFor is the handler the flow named for this run: from the copy when
+// the task has one, live otherwise. A name the copy does not hold is a handler
+// that does not exist, which for a copy is only the cleanup handler that was
+// absent when the task began. Its disappearing is a broken flow rather than a
+// transient fault, reported through brokenFlow so every caller turns it into
+// the same thing instead of each remembering the NotFound check itself.
 func (r *TaskReconciler) handlerFor(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
+	handlers copiedHandlers,
 	name string,
 	phase flowv1alpha1.Phase,
 ) (*flowv1alpha1.TaskHandler, error) {
+	if handlers != nil {
+		spec, ok := handlers[name]
+		if !ok {
+			return nil, brokenFlow{fmt.Sprintf("phase %q names handler %q, which does not exist", phase, name)}
+		}
+		return &flowv1alpha1.TaskHandler{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: task.Namespace},
+			Spec:       spec,
+		}, nil
+	}
 	var handler flowv1alpha1.TaskHandler
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &handler); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1258,6 +1286,7 @@ func (r *TaskReconciler) ensureJob(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
+	handlers copiedHandlers,
 	run *flowv1alpha1.RunRef,
 ) (*batchv1.Job, error) {
 	name := runner.JobName(task.Name, run.Phase, run.RunID, run.InfraRetries)
@@ -1296,7 +1325,7 @@ func (r *TaskReconciler) ensureJob(
 			"flow %q no longer says who fills run %d of %q", flow.Name, run.RunID, run.Phase)}
 	}
 
-	handler, err := r.handlerFor(ctx, task, handlerName, run.Phase)
+	handler, err := r.handlerFor(ctx, task, handlers, handlerName, run.Phase)
 	if err != nil {
 		return nil, err
 	}
@@ -1515,7 +1544,7 @@ func ownerSummary(refs []metav1.OwnerReference) string {
 // Meaning is read from flow as it stands at dispatch time: a task's copy for
 // one that has it, so it cannot have moved since the ending was reached, and
 // the live flow for one that has none. Either way it is not pinned to the
-// moment the task reached its ending, the way the Job's image is not. What is pinned from that earlier moment —
+// moment the task reached its ending. What is pinned from that earlier moment —
 // status.phase, the Ready condition's reason, the Event, the metric sample —
 // was already written then and is not rewritten here or by anything that
 // reads this. Which ttl the cleanup run earns follows the same rule in the

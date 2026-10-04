@@ -367,7 +367,7 @@ var _ = Describe("starting a task", func() {
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, stray) })
 
 		run := &flowv1alpha1.RunRef{Phase: phaseInvestigate, RunID: 1}
-		_, err := reconciler.ensureJob(ctx, tk, flow, run)
+		_, err := reconciler.ensureJob(ctx, tk, flow, nil, run)
 
 		Expect(err).To(HaveOccurred())
 		var broken brokenFlow

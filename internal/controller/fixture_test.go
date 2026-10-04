@@ -228,6 +228,38 @@ func (fx *fixture) dropCopy() {
 	Expect(k8sClient.Delete(fx.ctx, rev)).To(Succeed(), "begin should have written the copy that is being dropped")
 }
 
+// rewriteCopy changes what the task's copy holds: a revision's data cannot be
+// updated, so the task's own is deleted and made again. It is how a spec gives
+// a task a handler no live object can be.
+func (fx *fixture) rewriteCopy(mut func(*snapshot)) {
+	key := types.NamespacedName{Name: runner.SnapshotRevisionName(fx.name, fx.taskUID), Namespace: resourceNamespace}
+	var rev appsv1.ControllerRevision
+	Expect(k8sClient.Get(fx.ctx, key, &rev)).To(Succeed(), "begin should have written the copy that is being rewritten")
+	var snap snapshot
+	Expect(json.Unmarshal(rev.Data.Raw, &snap)).To(Succeed())
+	mut(&snap)
+	data, err := json.Marshal(snap)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(k8sClient.Delete(fx.ctx, &rev)).To(Succeed())
+	Expect(k8sClient.Create(fx.ctx, runner.BuildSnapshotRevision(fx.get(), data))).To(Succeed())
+}
+
+// editHandler changes the live handler the fixture made, the way someone
+// editing a TaskHandler under a running task would.
+func (fx *fixture) editHandler(mut func(*flowv1alpha1.TaskHandler)) {
+	var h flowv1alpha1.TaskHandler
+	Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &h)).To(Succeed())
+	mut(&h)
+	Expect(k8sClient.Update(fx.ctx, &h)).To(Succeed())
+}
+
+// deleteHandler removes the live handler the fixture made.
+func (fx *fixture) deleteHandler() {
+	Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
+		ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
+	})).To(Succeed())
+}
+
 func (fx *fixture) reconcile() reconcile.Result {
 	res, err := fx.reconciler.Reconcile(fx.ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: fx.name, Namespace: resourceNamespace},

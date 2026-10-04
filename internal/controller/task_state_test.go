@@ -158,24 +158,47 @@ var _ = Describe("a run nothing starts", func() {
 		Expect(taskstate.Current(&fx.get().Status).Deadline).NotTo(BeNil(), "and is dated once the box is really there")
 	})
 
-	// The handler is read once, to learn how long the wait may be. It being
-	// gone at that moment is the same broken definition it is anywhere else.
-	It("fails a run whose handler went away before it could be dated", func() {
-		fx.makeFlow()
-		fx.makeHandler(stateRunner(timeout))
-		fx.makeTask()
-		fx.reconcile() // settles the starting phase
+	// The handler is read once, to learn how long the wait may be. A task with
+	// no copy finds it gone at that moment as the same broken definition it is
+	// anywhere else; one with a copy does not read the live handler at all.
+	Context("when the handler went away before the run could be dated", func() {
+		// placed brings a task to the reconcile that dates its run: the box
+		// the run waits in is named in status but not yet opened.
+		placed := func() {
+			fx.makeFlow()
+			fx.makeHandler(stateRunner(timeout))
+			fx.makeTask()
+			fx.reconcile() // settles the starting phase
+		}
+		nameBox := func() {
+			tk := fx.get()
+			taskstate.Current(&tk.Status).VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
+			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+		}
 
-		tk := fx.get()
-		taskstate.Current(&tk.Status).VerdictBox = runner.VerdictBoxName(fx.name, fx.taskUID, phaseInvestigate, 1)
-		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
-		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
-		})).To(Succeed())
+		// 変異: 写しを持つ Task でも live の handler が無ければ Failed にする。
+		It("dates a run of a task with a copy by the copy's handler", func() {
+			placed()
+			nameBox()
+			fx.deleteHandler()
 
-		fx.reconcile()
+			fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			tk := fx.get()
+			Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "a deleted handler is no reason to fail a task that has its copy")
+			Expect(taskstate.Current(&tk.Status).Deadline).NotTo(BeNil(), "the wait is as long as the copy's handler says")
+		})
+
+		It("fails a run of a task with no copy", func() {
+			placed()
+			fx.dropCopy()
+			nameBox()
+			fx.deleteHandler()
+
+			fx.reconcile()
+
+			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		})
 	})
 
 	// dateRun's guard against a State handler with no timeout is unreachable
@@ -185,11 +208,12 @@ var _ = Describe("a run nothing starts", func() {
 	// create-race test uses to reach a branch envtest would not otherwise
 	// take — without reaching for a fake client that would leave the rest of
 	// this suite's guarantees about a real apiserver behind.
-	It("fails a run whose handler declares no timeout when dateRun reads it", func() {
+	It("fails a run of a task with no copy whose handler declares no timeout when dateRun reads it", func() {
 		fx.makeFlow()
 		fx.makeHandler(stateRunner(timeout))
 		fx.makeTask()
 		fx.reconcile() // settles the starting phase
+		fx.dropCopy()
 
 		watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
 		Expect(err).NotTo(HaveOccurred())
@@ -228,11 +252,12 @@ var _ = Describe("a run nothing starts", func() {
 	// happens to fall through to. Same interceptor technique as the timeout
 	// spec above, standing in for a handler this process reads before it
 	// agrees with the schema.
-	It("fails a run whose handler names a runner type this controller does not know", func() {
+	It("fails a run of a task with no copy whose handler names a runner type this controller does not know", func() {
 		fx.makeFlow()
 		fx.makeHandler(stateRunner(timeout))
 		fx.makeTask()
 		fx.reconcile() // settles the starting phase
+		fx.dropCopy()
 
 		watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
 		Expect(err).NotTo(HaveOccurred())
@@ -268,6 +293,48 @@ var _ = Describe("a run nothing starts", func() {
 			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})).To(Succeed())
 		Expect(boxes.Items).To(BeEmpty(),
 			"an unrecognized runner type must not fall through to opening anything for this run")
+	})
+
+	// The same two guards for a task with a copy, reached through a copy the
+	// spec writes: no live object can be a handler with no timeout, and the
+	// copy is what such a task reads.
+	It("fails a run of a task with a copy whose handler declares no timeout when dateRun reads it", func() {
+		fx.makeFlow()
+		fx.makeHandler(stateRunner(timeout))
+		fx.makeTask()
+		fx.reconcile() // settles the starting phase
+		fx.rewriteCopy(func(snap *snapshot) {
+			h := snap.Handlers[fx.name]
+			h.Timeout = nil
+			snap.Handlers[fx.name] = h
+		})
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
+			To(ContainSubstring("declares no timeout"))
+	})
+
+	It("fails a run of a task with a copy whose handler names a runner type this controller does not know", func() {
+		fx.makeFlow()
+		fx.makeHandler(stateRunner(timeout))
+		fx.makeTask()
+		fx.reconcile() // settles the starting phase
+		fx.rewriteCopy(func(snap *snapshot) {
+			h := snap.Handlers[fx.name]
+			h.Runner.Type = "Bogus"
+			snap.Handlers[fx.name] = h
+		})
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
+			To(ContainSubstring("Bogus"))
+		Expect(jobsOf(fx)).To(BeEmpty())
 	})
 
 	It("moves on the word that was written", func() {
