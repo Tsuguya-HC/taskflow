@@ -82,40 +82,53 @@ func (r *TaskReconciler) ensureSnapshot(
 	return nil
 }
 
-// flowFromCopy is the flow as the task's copy has it, named for the flow the
-// task asked for: the copy holds the spec only. It returns nil, with no error,
-// for a task that has no copy — none under its name, or one under its name
-// that another task controls, which is never read.
+// copiedHandlers is the handlers a task's copy holds, by name. Nil is a task
+// with no copy, which reads its handlers live; a copy that holds none is an
+// empty map, so the two never read alike.
+type copiedHandlers map[string]flowv1alpha1.TaskHandlerSpec
+
+// flowFromCopy is the flow and the handlers as the task's copy has them, the
+// flow named for the flow the task asked for: the copy holds the spec only.
+// It returns a nil flow, with no error, for a task that has no copy — none
+// under its name, or one under its name that another task controls, which is
+// never read.
 //
 // A copy that is there and cannot be read is an error rather than a task
-// without one: falling back to the live flow would run the task on a
-// definition it did not start with.
-func (r *TaskReconciler) flowFromCopy(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
+// without one: falling back to the live definitions would run the task on
+// ones it did not start with.
+func (r *TaskReconciler) flowFromCopy(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+) (*flowv1alpha1.TaskFlow, copiedHandlers, error) {
 	if r.APIReader == nil {
-		return nil, errNoSnapshotReader
+		return nil, nil, errNoSnapshotReader
 	}
 	name := runner.SnapshotRevisionName(task.Name, task.UID)
 	var rev appsv1.ControllerRevision
 	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &rev); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if !metav1.IsControlledBy(&rev, task) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var snap snapshot
 	if err := json.Unmarshal(rev.Data.Raw, &snap); err != nil {
-		return nil, fmt.Errorf("controller: snapshot revision %q does not decode: %w", name, err)
+		return nil, nil, fmt.Errorf("controller: snapshot revision %q does not decode: %w", name, err)
 	}
 	if snap.Flow.Start == "" && len(snap.Flow.Bindings) == 0 {
-		return nil, fmt.Errorf("controller: snapshot revision %q holds no flow", name)
+		return nil, nil, fmt.Errorf("controller: snapshot revision %q holds no flow", name)
+	}
+	handlers := copiedHandlers(snap.Handlers)
+	if handlers == nil {
+		handlers = copiedHandlers{}
 	}
 	return &flowv1alpha1.TaskFlow{
 		ObjectMeta: metav1.ObjectMeta{Name: task.Spec.Flow, Namespace: task.Namespace},
 		Spec:       snap.Flow,
-	}, nil
+	}, handlers, nil
 }
 
 // snapshotHandlers resolves every handler the snapshot must carry: one per
@@ -126,19 +139,19 @@ func (r *TaskReconciler) snapshotHandlers(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlow,
-) (map[string]flowv1alpha1.TaskHandlerSpec, error) {
+) (copiedHandlers, error) {
 	phases := make([]flowv1alpha1.Phase, 0, len(flow.Spec.Bindings))
 	for phase := range flow.Spec.Bindings {
 		phases = append(phases, phase)
 	}
 	slices.Sort(phases)
-	handlers := make(map[string]flowv1alpha1.TaskHandlerSpec, len(phases)+1)
+	handlers := make(copiedHandlers, len(phases)+1)
 	for _, phase := range phases {
 		name := flow.Spec.Bindings[phase].Handler
 		if _, done := handlers[name]; done {
 			continue
 		}
-		handler, err := r.handlerFor(ctx, task, name, phase)
+		handler, err := r.handlerFor(ctx, task, nil, name, phase)
 		if err != nil {
 			return nil, err
 		}
@@ -151,7 +164,7 @@ func (r *TaskReconciler) snapshotHandlers(
 	if _, done := handlers[name]; done {
 		return handlers, nil
 	}
-	handler, err := r.handlerFor(ctx, task, name, flowv1alpha1.PhaseFinally)
+	handler, err := r.handlerFor(ctx, task, nil, name, flowv1alpha1.PhaseFinally)
 	var broken brokenFlow
 	switch {
 	case err == nil:

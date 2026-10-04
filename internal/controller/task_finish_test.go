@@ -455,15 +455,48 @@ var _ = Describe("finishing a run", func() {
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("never started"))
 	})
 
-	It("fails when the handler disappears before an infrastructure retry can be judged", func() {
+	// 変異: retryInfra が maxInfraRetries を live の handler から読む。
+	It("judges an infrastructure retry by the copy's handler when the live handler is gone", func() {
+		fx.makeFlow()
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		fx.makeTask()
+		job := start()
+
+		fx.deleteHandler()
+
+		podOf(job, "") // exists, but no container ever terminated: never pulled
+		finish(job, batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "the copy's allowance is what is judged against")
+		Expect(taskstate.Current(&tk.Status).InfraRetries).To(BeEquivalentTo(1))
+	})
+
+	// 変異: retryInfra が maxInfraRetries を live の handler から読む。
+	It("judges an infrastructure retry by the copy's allowance when the live handler is edited", func() {
+		fx.makeFlow()
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		fx.makeTask()
+		job := start()
+
+		fx.editHandler(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 0 })
+
+		podOf(job, "")
+		finish(job, batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "an allowance cut on the live handler does not reach a task that has begun")
+	})
+
+	It("fails a task with no copy when the handler disappears before an infrastructure retry can be judged", func() {
 		fx.makeFlow()
 		fx.makeHandler()
 		fx.makeTask()
 		job := start()
+		fx.dropCopy()
 
-		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
-		})).To(Succeed())
+		fx.deleteHandler()
 
 		podOf(job, "") // exists, but no container ever terminated: never pulled
 		finish(job, batchv1.JobReasonBackoffLimitExceeded)

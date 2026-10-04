@@ -283,6 +283,36 @@ var _ = Describe("a fork", func() {
 		}, &again)).To(Succeed(), "the next attempt gets a Job of its own")
 	})
 
+	// 変異: 分岐の retry 判定が maxInfraRetries を live の handler から読む。
+	It("retries a branch by the copy's handler when the live handler is gone", func() {
+		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		forked(string(security))
+		fx.deleteHandler(handlerFor(security))
+
+		fail(jobOf(security, 2), batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "a deleted handler does not stop a fork whose task has its copy")
+		Expect(taskstate.Run(&fx.get().Status, security)).To(Equal(&flowv1alpha1.RunRef{Phase: security, RunID: 2, InfraRetries: 1}))
+
+		fx.reconcile()
+		var again batchv1.Job
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{
+			Name: runner.JobName(fx.name, security, 2, 1), Namespace: resourceNamespace,
+		}, &again)).To(Succeed(), "the next attempt's Job is built from the copy's handler too")
+	})
+
+	It("fails a fork with no copy when a branch never started and its handler is gone", func() {
+		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
+		forkedFrom(string(security), false)
+		fx.deleteHandler(handlerFor(security))
+
+		fail(jobOf(security, 2), batchv1.JobReasonBackoffLimitExceeded)
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+	})
+
 	It("stops the Job a retried branch only just started, even though this reconcile is the first to know its name", func() {
 		setUp(func(h *flowv1alpha1.TaskHandler) { h.Spec.MaxInfraRetries = 1 })
 		forked(string(logic) + "/" + string(security))
