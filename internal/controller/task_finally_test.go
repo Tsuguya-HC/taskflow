@@ -536,9 +536,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		// nobody to retry for, so run 2 never settles — history stays at one
 		// line, run 1's. Only a task with no copy can lose a handler this way.
 		fx.dropCopy()
-		Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskHandler{
-			ObjectMeta: metav1.ObjectMeta{Name: reportHandler, Namespace: resourceNamespace},
-		})).To(Succeed())
+		fx.deleteHandler(reportHandler)
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      reportJob.Name,
