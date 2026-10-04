@@ -67,13 +67,14 @@ type TaskReconciler struct {
 	Now func() time.Time
 	// SidecarImage is what runs prepare and publish in every Job.
 	SidecarImage string
-	// APIReader reads without the manager's cache. It exists for one kind of
-	// object: the ConfigMap a State run is answered in (ADR-0011 決定4). The
-	// controller holds get on those and neither list nor watch, which a
-	// cached read needs — an informer would be refused, and even if it were
-	// not, it would hold every ConfigMap in the cluster in memory to deliver
-	// one key. Reading through here is also what makes the answer's latency
-	// the requeue interval rather than an informer's resync.
+	// APIReader reads without the manager's cache. It is for objects the
+	// controller holds get on and neither list nor watch: the ConfigMap a State
+	// run is answered in (ADR-0011 決定4) and the ControllerRevision a task's
+	// definitions are copied into. A cached read needs list and watch — an
+	// informer would be refused, and even if it were not, it would hold every
+	// ConfigMap in the cluster in memory to deliver one key. Reading through
+	// here is also what makes the answer's latency the requeue interval rather
+	// than an informer's resync.
 	APIReader client.Reader
 }
 
@@ -1150,7 +1151,7 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 	if _, bound := flow.Spec.Bindings[flow.Spec.Start]; !bound {
 		return r.fail(ctx, task, &flow.Spec, fmt.Sprintf("flow %q starts at %q, which nothing binds", flow.Name, flow.Spec.Start))
 	}
-	if _, err := r.ensureSnapshot(ctx, task, flow); err != nil {
+	if err := r.ensureSnapshot(ctx, task, flow); err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
 			return r.fail(ctx, task, &flow.Spec, broken.reason)
@@ -1458,18 +1459,18 @@ func deadlineOf(job *batchv1.Job) *metav1.Time {
 }
 
 // notOwnedError reports that something already sits under a deterministic
-// name but was not put there by this task — the one error all three
-// idempotent create paths (Job, PersistentVolumeClaim, verdict box) raise
+// name but was not put there by this task — the one error all four
+// idempotent create paths (Job, PersistentVolumeClaim, verdict box, snapshot
+// revision) raise
 // when their ownership check fails, so the wording does not drift between
 // them. kind names what sits under the name, for the message.
 //
-// What a caller does with it differs, and is that caller's to decide: ensureJob
-// and ensureWorkspacePVC return it plain, which the reconcile loop retries — a
-// squatter that is itself collected leaves room to recover. ensureVerdictBox
-// wraps it in brokenFlow instead, because a box is where an answer is read
-// from rather than something the framework can retry its way past; see its
-// own doc for why that one fails closed.
-
+// What a caller does with it differs, and is that caller's to decide: ensureJob,
+// ensureWorkspacePVC and the snapshot revision's create return it plain, which
+// the reconcile loop retries — a squatter that is itself collected leaves room
+// to recover. ensureVerdictBox wraps it in brokenFlow instead, because a box is
+// where an answer is read from rather than something the framework can retry
+// its way past; see its own doc for why that one fails closed.
 func notOwnedError(kind, name string, task *flowv1alpha1.Task, owners []metav1.OwnerReference) error {
 	return fmt.Errorf("%s %q exists but is not owned by task %s (uid %s): owners = %s",
 		kind, name, task.Name, task.UID, ownerSummary(owners))
