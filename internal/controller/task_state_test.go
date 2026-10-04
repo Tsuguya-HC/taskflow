@@ -496,8 +496,10 @@ var _ = Describe("a run nothing starts", func() {
 	// A run whose vocabulary is edited away has nothing left to judge an
 	// answer against. For the cleanup run that is not a Failed — the ending
 	// is already decided and does not move (ADR-0009 決定2) — it is a cleanup
-	// that did not happen.
-	It("records a cleanup run whose declaration went away while it waited", func() {
+	// that did not happen. That is what a task with no copy of its
+	// definitions still reads; one with a copy keeps the declaration it began
+	// with (#181).
+	waitingOnCleanup := func(keepCopy bool) *flowv1alpha1.TaskFlow {
 		cleanup := fx.name + "-cleanup"
 		flow := fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: "cleaned"}
@@ -511,6 +513,9 @@ var _ = Describe("a run nothing starts", func() {
 		fx.makeTask()
 
 		fx.reconcile()
+		if !keepCopy {
+			fx.dropCopy()
+		}
 		fx.reconcile()
 		fx.answer("ok", "")
 		fx.reconcile() // the task reaches its ending, owing a cleanup
@@ -519,6 +524,11 @@ var _ = Describe("a run nothing starts", func() {
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, flow)).To(Succeed())
 		flow.Spec.Finally = nil
 		Expect(k8sClient.Update(fx.ctx, flow)).To(Succeed())
+		return flow
+	}
+
+	It("records a cleanup run, for a task with no copy, whose declaration went away while it waited", func() {
+		waitingOnCleanup(false)
 
 		fx.reconcile()
 
@@ -527,6 +537,22 @@ var _ = Describe("a run nothing starts", func() {
 		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Reason).
 			To(Equal(taskstate.ReasonFinallyFailed))
+	})
+
+	// 変異: コピーがあっても live の flow の finally を読む。
+	It("answers a cleanup run from the copy's declaration when the live flow no longer has one", func() {
+		waitingOnCleanup(true)
+		fx.answerFor(flowv1alpha1.PhaseFinally, 2, "cleaned", "")
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(phaseReport), "the ending stands")
+		Expect(tk.Status.History).To(HaveLen(2))
+		Expect(tk.Status.History[1].Directory).To(Equal("cleaned"))
+		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeDeclared)))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(BeNil(),
+			"a cleanup that reported done leaves nothing to say")
 	})
 
 	// The cleanup run is a run like any other (ADR-0009 決定3), so it is

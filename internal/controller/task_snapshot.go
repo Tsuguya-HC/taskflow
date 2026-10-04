@@ -79,6 +79,42 @@ func (r *TaskReconciler) ensureSnapshot(
 	return nil
 }
 
+// flowFromCopy is the flow as the task's copy has it, named for the flow the
+// task asked for: the copy holds the spec only. It returns nil, with no error,
+// for a task that has no copy — none under its name, or one under its name
+// that another task controls, which is never read.
+//
+// A copy that is there and cannot be read is an error rather than a task
+// without one: falling back to the live flow would run the task on a
+// definition it did not start with.
+func (r *TaskReconciler) flowFromCopy(ctx context.Context, task *flowv1alpha1.Task) (*flowv1alpha1.TaskFlow, error) {
+	if r.APIReader == nil {
+		return nil, errors.New("controller: no uncached reader to read a snapshot revision with")
+	}
+	name := runner.SnapshotRevisionName(task.Name, task.UID)
+	var rev appsv1.ControllerRevision
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: name, Namespace: task.Namespace}, &rev); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !metav1.IsControlledBy(&rev, task) {
+		return nil, nil
+	}
+	var snap snapshot
+	if err := json.Unmarshal(rev.Data.Raw, &snap); err != nil {
+		return nil, fmt.Errorf("controller: snapshot revision %q does not decode: %w", name, err)
+	}
+	if snap.Flow.Start == "" && len(snap.Flow.Bindings) == 0 {
+		return nil, fmt.Errorf("controller: snapshot revision %q holds no flow", name)
+	}
+	return &flowv1alpha1.TaskFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: task.Spec.Flow, Namespace: task.Namespace},
+		Spec:       snap.Flow,
+	}, nil
+}
+
 // snapshotHandlers resolves every handler the snapshot must carry: one per
 // binding, plus the cleanup handler when it exists. A binding naming a
 // handler that does not exist fails the task through handlerFor's brokenFlow;
