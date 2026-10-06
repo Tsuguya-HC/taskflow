@@ -17,13 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"k8s.io/apimachinery/pkg/types"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/metrics"
+	"github.com/Tsuguya-HC/taskflow/internal/runner"
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
@@ -155,7 +159,7 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 	It("reports finally's two outcomes at zero when the flow declares one", func() {
 		fx := newFixture()
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: "done"}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: answerDone}
 		})
 		fx.makeHandler()
 		fx.makeTask()
@@ -193,7 +197,7 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 	It("primes finally's outcomes on the reserved-phase path a restarted controller takes", func() {
 		fx := newFixture()
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: "done"}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: answerDone}
 		})
 		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
 			h.Name = fx.name + "-cleanup"
@@ -222,6 +226,43 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		} {
 			value, ok := got[want]
 			Expect(ok).To(BeTrue(), "%v was never reported on the reserved-phase path", want)
+			Expect(value).To(BeZero(), "%v counted something before any cleanup run settled", want)
+		}
+	})
+
+	// The same restart, for a task that began and so holds a copy: the flow it
+	// resolves is read from the copy, and that one has to be primed too.
+	It("primes finally's outcomes on the reserved-phase path for a task that holds a copy", func() {
+		fx := newFixture()
+		flow := fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: answerDone}
+		})
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Name = fx.name + "-cleanup"
+			h.Spec.Phase = flowv1alpha1.PhaseFinally
+		})
+		var cleanup flowv1alpha1.TaskHandler
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name + "-cleanup", Namespace: resourceNamespace}, &cleanup)).To(Succeed())
+		tk := fx.makeTask()
+		data, err := json.Marshal(snapshot{
+			Flow:     *flow.Spec.DeepCopy(),
+			Handlers: map[string]flowv1alpha1.TaskHandlerSpec{cleanup.Name: cleanup.Spec},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Create(fx.ctx, runner.BuildSnapshotRevision(tk, data))).To(Succeed())
+		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		tk.Status.CurrentRuns = []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}}
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		fx.reconcile()
+
+		got := collectedFinallyOutcomes()
+		for _, want := range []finallyOutcome{
+			{fx.name, string(transition.OutcomeDeclared)},
+			{fx.name, string(transition.OutcomeNoAnswer)},
+		} {
+			value, ok := got[want]
+			Expect(ok).To(BeTrue(), "%v was never reported for a task that holds a copy", want)
 			Expect(value).To(BeZero(), "%v counted something before any cleanup run settled", want)
 		}
 	})

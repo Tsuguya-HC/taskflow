@@ -385,6 +385,29 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	}
 }
 
+// Only True counts as a copy having been made. A condition of the type that
+// says anything else is not the marker, whatever else it carries.
+func TestPinnedCountsOnlyATrueMarker(t *testing.T) {
+	s := &flowv1alpha1.TaskStatus{}
+	if Pinned(s) {
+		t.Fatal("a task with no conditions is pinned")
+	}
+	for _, status := range []metav1.ConditionStatus{metav1.ConditionFalse, metav1.ConditionUnknown} {
+		s.Conditions = []metav1.Condition{{
+			Type:   ConditionDefinitionsPinned,
+			Status: status,
+			Reason: ReasonCopied,
+		}}
+		if Pinned(s) {
+			t.Fatalf("a task whose %s is %s is pinned", ConditionDefinitionsPinned, status)
+		}
+	}
+	Pin(s)
+	if !Pinned(s) {
+		t.Fatal("a task Pin was called on is not pinned")
+	}
+}
+
 // A retry is not a run of the phase either: nothing is added to the history
 // Runs counts, so the phase's limit is not spent on it.
 func TestInfraRetryCostsNeitherARunNorTheLimit(t *testing.T) {

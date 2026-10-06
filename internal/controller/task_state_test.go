@@ -490,7 +490,7 @@ var _ = Describe("a run nothing starts", func() {
 		return flow
 	}
 
-	It("records a cleanup run, for a task with no copy, whose declaration went away while it waited", func() {
+	It("records a cleanup run, for a stopped task whose copy was deleted, whose declaration went away while it waited", func() {
 		waitingOnCleanup(false)
 
 		fx.reconcile()

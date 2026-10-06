@@ -65,8 +65,8 @@ const ConditionReady = "Ready"
 
 // ConditionDefinitionsPinned records that a copy of the task's definitions was
 // made. It says nothing of which copy: that comes from the task's name and UID.
-// Once True it is never removed, and nothing reads it but the rule for a copy
-// that has since been deleted.
+// Once True it is never removed: it is what tells a task that lost its copy
+// from one that never had one.
 const ConditionDefinitionsPinned = "DefinitionsPinned"
 
 // ReasonCopied is the reason DefinitionsPinned carries.

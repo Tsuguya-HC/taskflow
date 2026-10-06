@@ -285,12 +285,19 @@ func (fx *fixture) makeBareTask(idle bool) *flowv1alpha1.Task {
 	return tk
 }
 
-// revisions is every ControllerRevision the fixture's task holds a copy in.
+// revisions is every ControllerRevision the fixture's task holds a copy in:
+// the ones it controls.
 func (fx *fixture) revisions() []appsv1.ControllerRevision {
 	var list appsv1.ControllerRevisionList
 	Expect(k8sClient.List(fx.ctx, &list, client.InNamespace(resourceNamespace),
 		client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})).To(Succeed())
-	return list.Items
+	var out []appsv1.ControllerRevision
+	for _, rev := range list.Items {
+		if owner := metav1.GetControllerOf(&rev); owner != nil && owner.UID == fx.taskUID {
+			out = append(out, rev)
+		}
+	}
+	return out
 }
 
 // makeBulky makes a flow of big more handlers, each of which fits in one

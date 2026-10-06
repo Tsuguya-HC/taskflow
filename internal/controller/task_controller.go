@@ -259,23 +259,19 @@ func (r *TaskReconciler) resolveFlow(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 ) (*flowv1alpha1.TaskFlow, copiedHandlers, error) {
-	var flow *flowv1alpha1.TaskFlow
-	var handlers copiedHandlers
 	if task.Status.Phase != "" {
-		var err error
-		if flow, handlers, err = r.flowFromCopy(ctx, task); err != nil {
+		flow, handlers, err := r.flowFromCopy(ctx, task)
+		if err != nil {
 			return nil, nil, err
 		}
-	}
-	if flow == nil {
-		flow = &flowv1alpha1.TaskFlow{}
-		if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, flow); err != nil {
-			return nil, nil, err
+		if flow != nil {
+			// Say what this flow's endings are before any of them happens (ADR-0010).
+			primeFlowMetrics(flow)
+			return flow, handlers, nil
 		}
 	}
-	// Say what this flow's endings are before any of them happens (ADR-0010).
-	primeFlowMetrics(flow)
-	return flow, handlers, nil
+	flow, err := r.liveFlow(ctx, task)
+	return flow, nil, err
 }
 
 // liveFlow is the TaskFlow the task names as it is now, primed like any other.
@@ -364,7 +360,7 @@ func (r *TaskReconciler) startedDefinitions(
 	if err := r.ensureSnapshot(ctx, task, live); err != nil {
 		var broken brokenFlow
 		if errors.As(err, &broken) {
-			return nil, nil, true, r.failStarted(ctx, task, &live.Spec, taskstate.ReasonFlowBroken, broken.reason)
+			return nil, nil, true, r.failStartedAs(ctx, task, &live.Spec, taskstate.ReasonFlowBroken, broken.reason)
 		}
 		return nil, nil, false, err
 	}
@@ -389,15 +385,15 @@ func (r *TaskReconciler) startedDefinitions(
 // unknown, and its date comes from the live flow, if there is one, once it has
 // stopped.
 func (r *TaskReconciler) failLost(ctx context.Context, task *flowv1alpha1.Task) error {
-	return r.failStarted(ctx, task, nil, taskstate.ReasonDefinitionsLost,
+	return r.failStartedAs(ctx, task, nil, taskstate.ReasonDefinitionsLost,
 		fmt.Sprintf("the copy of task %q's definitions is missing", task.Name))
 }
 
-// failStarted fails a started task that has not stopped. Unlike fail it does
+// failStartedAs fails a started task that has not stopped. Unlike fail it does
 // not leave a task with nothing in flight alone, because nothing in flight is
 // here a task waiting to be picked up, not one that finished; and a fork's
 // branches are cancelled, and their Jobs stopped, on the way.
-func (r *TaskReconciler) failStarted(
+func (r *TaskReconciler) failStartedAs(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlowSpec,
