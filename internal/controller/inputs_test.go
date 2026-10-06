@@ -72,6 +72,7 @@ const (
 	phaseSort     flowv1alpha1.Phase = "sort"
 	answerDone                       = "done"
 	answerStuck                      = "stuck"
+	answerCleaned                    = "cleaned"
 	dirBothChosen                    = "logic/security"
 )
 

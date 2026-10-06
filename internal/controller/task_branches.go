@@ -273,22 +273,37 @@ func (r *TaskReconciler) reapCancelledJobs(ctx context.Context, task *flowv1alph
 // running — the definition itself gave out, not one of the branches, so none
 // of them is answered for; every branch still in flight is recorded
 // Cancelled, and only then does the task fail.
-//
-// taskstate.Fail is called directly here rather than through r.fail: by the
-// time the branches are cancelled, currentRuns is empty and the task would
-// look Idle to the guard r.fail keeps against writing over an
-// already-finished task's history. That guard does not apply on this path —
-// a task with branches still running has not finished — so it must be
-// skipped rather than tripped.
 func (r *TaskReconciler) failBranches(
 	ctx context.Context,
 	task *flowv1alpha1.Task,
 	flow *flowv1alpha1.TaskFlowSpec,
 	reason string,
 ) error {
+	return r.failUnguarded(ctx, task, flow, taskstate.ReasonFlowBroken, reason)
+}
+
+// failUnguarded fails a task that has not stopped, whatever it has in flight:
+// a fork's branches are recorded Cancelled and their Jobs stopped, a single run
+// in flight is left to the failed task's ownerReference, and a task with
+// nothing in flight is failed all the same.
+//
+// taskstate.Fail is called directly here rather than through r.fail: by the
+// time the branches are cancelled, currentRuns is empty and the task would
+// look Idle to the guard r.fail keeps against writing over an
+// already-finished task's history. That guard does not apply on this path —
+// the caller has established the task has not finished — so it must be
+// skipped rather than tripped.
+func (r *TaskReconciler) failUnguarded(
+	ctx context.Context,
+	task *flowv1alpha1.Task,
+	flow *flowv1alpha1.TaskFlowSpec,
+	code, reason string,
+) error {
 	now := metav1.NewTime(r.now())
-	taskstate.CancelBranches(&task.Status, reason, now)
-	taskstate.Fail(&task.Status, reason, flow, now)
+	if taskstate.Branching(&task.Status) {
+		taskstate.CancelBranches(&task.Status, reason, now)
+	}
+	taskstate.FailAs(&task.Status, code, reason, flow, now)
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}

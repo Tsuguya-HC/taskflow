@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,8 +39,8 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 )
 
-// 開始した Task は、そのとき写した定義から flow を読む (#181)。写しを持たない
-// Task は今まで通り live の flow を読む。
+// 開始した Task は、そのとき写した定義から flow を読む (#181)。写しを持たずに
+// 始まった Task は、次の reconcile で live の flow から写しを作る (#183)。
 var _ = Describe("a task running from its copy of the flow", func() {
 	var fx *fixture
 	var clock time.Time
@@ -262,34 +263,71 @@ var _ = Describe("a task running from its copy of the flow", func() {
 			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, rev) })
 		}
 
-		// 変異: 名前だけで写しを採る（持ち主の UID を見ない）。
-		It("reads the live flow, not a revision of another task's UID under its name", func() {
+		const strangers = `{"flow":{"start":"調査","bindings":{"調査":{"handler":"elsewhere","next":{"別の報告":"ok"}}}},"handlers":{}}`
+
+		// 変異: 名前だけで写しを採る（持ち主の UID を見ない）。/ 他の UID の写しの上に
+		// 写しを作る。
+		It("is neither advanced nor given a copy while a revision of another task's UID holds its name", func() {
 			fx.makeFlow()
 			fx.makeHandler(stateRunner(timeout))
 			tk := bareTask()
-			revisionBy(tk, types.UID("not-"+string(tk.UID)),
-				`{"flow":{"start":"調査","bindings":{"調査":{"handler":"elsewhere","next":{"別の報告":"ok"}}}},"handlers":{}}`)
+			stranger := "not-" + string(tk.UID)
+			revisionBy(tk, types.UID(stranger), strangers)
+			name := runner.SnapshotRevisionName(tk.Name, tk.UID)
+			var held appsv1.ControllerRevision
+			Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: name, Namespace: resourceNamespace}, &held)).To(Succeed())
 
-			fx.reconcile() // opens the place run 1 is answered in
-			fx.answer("ok", "")
-			fx.reconcile()
+			_, err := fx.reconciler.Reconcile(fx.ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: fx.name, Namespace: resourceNamespace},
+			})
 
-			Expect(fx.get().Status.Phase).To(Equal(phaseReport), "ok leads where the live flow says")
-			Expect(reader.revisions).To(ContainElement(runner.SnapshotRevisionName(tk.Name, tk.UID)),
+			Expect(err).To(HaveOccurred(), "a name someone else holds is retried until it is free, not taken over")
+			Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate))
+			Expect(pinned(fx.get())).To(BeFalse())
+			Expect(jobsOf(fx)).To(BeEmpty())
+			var now appsv1.ControllerRevision
+			Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: name, Namespace: resourceNamespace}, &now)).To(Succeed())
+			Expect(now.ResourceVersion).To(Equal(held.ResourceVersion), "the other task's revision is left as it is")
+			Expect(now.OwnerReferences).To(Equal(held.OwnerReferences))
+			Expect(reader.revisions).To(ContainElement(name),
 				"the copy was looked for under its name; a task that never looked would pass for the wrong reason")
 		})
 
-		// 変異: 写しが無ければ Failed にする（live の flow に戻らない）。
-		It("reads the live flow when no revision exists under its name", func() {
+		// 変異: 名前だけで写しを採る（持ち主の UID を見ない）。
+		It("fails, without reading a revision of another task's UID under its name, once it carries the marker", func() {
 			fx.makeFlow()
 			fx.makeHandler(stateRunner(timeout))
 			tk := bareTask()
+			fx.markPinned()
+			revisionBy(tk, types.UID("not-"+string(tk.UID)), strangers)
+			name := runner.SnapshotRevisionName(tk.Name, tk.UID)
 
+			fx.reconcile()
+
+			got := fx.get()
+			Expect(got.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed), "no copy of its own, so its copy was lost")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", lostReason))
+			Expect(reader.revisions).To(ContainElement(name))
+			Expect(jobsOf(fx)).To(BeEmpty())
+		})
+
+		// 変異: 写しが無ければ Failed にする（作らない）/ 写しを作らず live を読み続ける。
+		It("gets a copy made, and the marker, when no revision exists under its name", func() {
+			flow := fx.makeFlow()
+			fx.makeHandler(stateRunner(timeout))
+			tk := bareTask()
+
+			fx.reconcile() // makes the copy, and may go on to open the verdict box
 			fx.reconcile() // opens the place run 1 is answered in
 			fx.answer("ok", "")
 			fx.reconcile()
 
-			Expect(fx.get().Status.Phase).To(Equal(phaseReport))
+			got := fx.get()
+			Expect(got.Status.Phase).To(Equal(phaseReport))
+			expectPinned(got)
+			held, ok := fx.copyHeld()
+			Expect(ok).To(BeTrue())
+			Expect(held.Flow).To(Equal(flow.Spec))
 			Expect(reader.revisions).To(ContainElement(runner.SnapshotRevisionName(tk.Name, tk.UID)))
 		})
 

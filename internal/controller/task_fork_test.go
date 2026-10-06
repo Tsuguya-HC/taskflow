@@ -24,6 +24,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -508,6 +509,49 @@ var _ = Describe("a fork", func() {
 		}
 		Expect(jobGone(security, 3)).To(BeFalse(),
 			"security's Job had already finished (it answered); cancelled or not, a finished Job's pod stays as autopsy material")
+	})
+
+	// 印があるのに写しが消えた Task は、枝が走っていても Failed になり、枝は
+	// Cancelled として記録され、Job は止められる。変異: fail() の Idle の guard を
+	// 通る経路で落とす / 枝を Cancelled にせず落とす。
+	It("cancels a fork's branches when the copy of a task that has begun is deleted while they run", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.markPinned()
+		fx.dropCopy()
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", lostReason))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+	})
+
+	// 写しも印も無い Task が fork の枝を走らせている途中で、写せない定義に当たった
+	// とき。変異: fail() の Idle の guard を通る経路で落とす / 枝を Cancelled にせず落とす。
+	It("cancels a fork's branches when the copy a task without one needs cannot be made", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.dropCopy()
+		fx.dropMarker()
+		fx.deleteHandler(handlerFor(phaseReport))
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("does not exist"))))
+		Expect(pinned(tk)).To(BeFalse())
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
 	})
 
 	// 変異: コピーがあっても live の flow の束縛で答えを判定する。

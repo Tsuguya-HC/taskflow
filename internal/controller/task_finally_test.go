@@ -48,7 +48,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	const (
 		succeededTTL = time.Hour
 		failedTTL    = 168 * time.Hour
-		dirDone      = "cleaned"
+		dirDone      = answerCleaned
 	)
 
 	// cleanupHandler is a second TaskHandler, named apart from the phase

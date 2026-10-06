@@ -28,8 +28,8 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
 )
 
-// 開始した Task は、handler も写しから読む (#196)。写しを持たない Task は今まで通り
-// live の TaskHandler を読む。
+// 開始した Task は、handler も写しから読む (#196)。写しを持たずに始まった Task は、
+// 次の reconcile でそのときの live の TaskHandler から写しを作る (#183)。
 var _ = Describe("a task running from its copy of the handlers", func() {
 	var fx *fixture
 
@@ -112,36 +112,40 @@ var _ = Describe("a task running from its copy of the handlers", func() {
 		Expect(jobsOf(fx)).To(BeEmpty())
 	})
 
-	// 写しを持たない Task が live を読む性質は、上の 3 つの裏返し。
-	Context("with no copy", func() {
-		// 変異: 写しの有無にかかわらず handler を最初に読んだ値で固定する。
-		It("builds the Job from the live handler's current image", func() {
+	// 写しも印も無い Task は、次の reconcile で、そのときの live の定義から写しを作る。
+	Context("with no copy and no marker", func() {
+		// 変異: 写しを作らず live の handler を読み続ける / 写す handler を最初に読んだ値で固定する。
+		It("makes the copy from the live handler as it is then", func() {
 			fx.makeFlow()
 			fx.makeHandler()
-			fx.makeTask()
-			fx.reconcile() // begin
-			fx.dropCopy()
+			fx.startedWithoutBegin(true)
 			fx.editHandler(func(h *flowv1alpha1.TaskHandler) {
 				h.Spec.JobTemplate.Template.Spec.Containers[0].Image = editedImage
 			})
 
-			fx.reconcile() // creates the Job
+			fx.reconcile() // makes the copy
+			fx.reconcile() // creates the Job, if the reconcile above did not
 
+			held, ok := fx.copyHeld()
+			Expect(ok).To(BeTrue())
+			Expect(held.Handlers[fx.name].JobTemplate.Template.Spec.Containers[0].Image).To(Equal(editedImage))
 			Expect(imageOf(fx)).To(Equal(editedImage))
 		})
 
-		// 変異: handler が無くても Job を作る。
-		It("fails when the live handler is deleted", func() {
+		// 変異: handler が無くても写しを作る / Job を作る。
+		It("fails when the live handler is deleted, and makes no copy", func() {
 			fx.makeFlow()
 			fx.makeHandler()
-			fx.makeTask()
-			fx.reconcile() // begin
-			fx.dropCopy()
+			fx.startedWithoutBegin(true)
 			fx.deleteHandler()
 
 			fx.reconcile()
 
-			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			tk := fx.get()
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			Expect(pinned(tk)).To(BeFalse(), "a copy that could not be made is not one the task says it has")
+			_, ok := fx.copyHeld()
+			Expect(ok).To(BeFalse())
 			Expect(jobsOf(fx)).To(BeEmpty())
 		})
 	})

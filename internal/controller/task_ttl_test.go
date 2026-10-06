@@ -23,14 +23,17 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/metrics"
+	"github.com/Tsuguya-HC/taskflow/internal/runner"
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
@@ -240,6 +243,13 @@ var _ = Describe("expiring a finished task", func() {
 		got := fx.get()
 		Expect(got.Status.ExpiresAt).NotTo(BeNil())
 		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(succeededTTL)))
+		// A task that has stopped is not given a copy: it owes only what the live
+		// flow still says, and a copy would be one nobody reads.
+		var revisions appsv1.ControllerRevisionList
+		Expect(k8sClient.List(fx.ctx, &revisions, client.InNamespace(resourceNamespace),
+			client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})).To(Succeed())
+		Expect(revisions.Items).To(BeEmpty())
+		Expect(pinned(got)).To(BeFalse())
 	})
 
 	It("does not delete a task by the same name created after the one that expired", func() {

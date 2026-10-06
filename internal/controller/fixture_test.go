@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -37,6 +38,7 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
+	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 )
 
 const (
@@ -218,9 +220,81 @@ func (fx *fixture) makeTask() *flowv1alpha1.Task {
 	return tk
 }
 
-// dropCopy makes the task one that has no copy of its definitions: begin wrote
-// one, and a task whose revision is absent is read from the live objects, the
-// way every task began before the copy existed.
+// The marker a task carries once its copy exists, and the reason Ready gives
+// when the copy is gone. Spelled out here rather than read from production code
+// so that a rename shows up as a failing spec: both are values other tools
+// read, and never change.
+const (
+	pinnedType   = "DefinitionsPinned"
+	pinnedReason = "Copied"
+	lostReason   = "DefinitionsLost"
+)
+
+// pinned reports whether tk carries the marker. Only True counts.
+func pinned(tk *flowv1alpha1.Task) bool {
+	return meta.IsStatusConditionTrue(tk.Status.Conditions, pinnedType)
+}
+
+// expectPinned fails the spec unless tk carries the marker as begin writes it.
+func expectPinned(tk *flowv1alpha1.Task) {
+	cond := meta.FindStatusCondition(tk.Status.Conditions, pinnedType)
+	ExpectWithOffset(1, cond).NotTo(BeNil(), "the task's copy was made, and the task says so")
+	ExpectWithOffset(1, cond.Status).To(Equal(metav1.ConditionTrue))
+	ExpectWithOffset(1, cond.Reason).To(Equal(pinnedReason))
+}
+
+// markPinned gives the task the marker as begin writes it. A spec about a task
+// whose copy was lost starts from this, so that what it asserts is the loss and
+// not that begin marked the task.
+func (fx *fixture) markPinned() {
+	tk := fx.get()
+	meta.SetStatusCondition(&tk.Status.Conditions, metav1.Condition{
+		Type: pinnedType, Status: metav1.ConditionTrue, Reason: pinnedReason,
+	})
+	ExpectWithOffset(1, k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+}
+
+// dropMarker makes the task one that carries no marker: the shape of a task
+// that began after the copy existed and before the marker did.
+func (fx *fixture) dropMarker() {
+	tk := fx.get()
+	meta.RemoveStatusCondition(&tk.Status.Conditions, pinnedType)
+	ExpectWithOffset(1, k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+}
+
+// copyHeld is what the task's copy holds, and whether the task has one.
+func (fx *fixture) copyHeld() (snapshot, bool) {
+	var rev appsv1.ControllerRevision
+	err := k8sClient.Get(fx.ctx, types.NamespacedName{
+		Name: runner.SnapshotRevisionName(fx.name, fx.taskUID), Namespace: resourceNamespace,
+	}, &rev)
+	if client.IgnoreNotFound(err) != nil {
+		Fail(err.Error())
+	}
+	if err != nil {
+		return snapshot{}, false
+	}
+	var snap snapshot
+	ExpectWithOffset(1, json.Unmarshal(rev.Data.Raw, &snap)).To(Succeed())
+	return snap, true
+}
+
+// startedWithoutBegin is a task whose status was written without begin: it is
+// on the starting phase, and has no copy and no marker. With inFlight false it
+// has nothing running either, the state a crash between begin's status write
+// and the Job leaves.
+func (fx *fixture) startedWithoutBegin(inFlight bool) *flowv1alpha1.Task {
+	tk := fx.makeTask()
+	taskstate.Begin(&tk.Status, phaseInvestigate)
+	if !inFlight {
+		taskstate.SetCurrent(&tk.Status, nil)
+	}
+	ExpectWithOffset(1, k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+	return tk
+}
+
+// dropCopy makes the task one whose copy of its definitions was deleted: begin
+// wrote one, and the revision is taken away.
 func (fx *fixture) dropCopy() {
 	rev := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
 		Name: runner.SnapshotRevisionName(fx.name, fx.taskUID), Namespace: resourceNamespace,

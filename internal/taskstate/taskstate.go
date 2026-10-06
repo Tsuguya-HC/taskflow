@@ -60,9 +60,25 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/transition"
 )
 
-// ConditionReady is the single condition a task carries: whether the
-// framework can go on with it.
+// ConditionReady is whether the framework can go on with a task.
 const ConditionReady = "Ready"
+
+// ConditionDefinitionsPinned is the marker a task carries once its copy of the
+// definitions exists, with ReasonCopied. It says that a copy was made, never
+// which one: the copy is found from the task's name and UID. Only True counts,
+// reason and message are never read, and once written it is not removed.
+const ConditionDefinitionsPinned = "DefinitionsPinned"
+
+// ReasonCopied is the reason the marker is written with.
+const ReasonCopied = "Copied"
+
+// ReasonDefinitionsLost is why Ready goes false for a task that carries the
+// marker and whose copy is gone. It is used for nothing else.
+const ReasonDefinitionsLost = "DefinitionsLost"
+
+// ReasonFlowBroken is why Ready goes false for a task whose definitions are
+// broken.
+const ReasonFlowBroken = "FlowBroken"
 
 // ReasonHandlerFailed is why Ready goes false for a task that ran to one of
 // its flow's Failure endings. The outcome of that move is Declared — the
@@ -444,6 +460,22 @@ func stamp(
 	status.ExpiresAt = &t
 }
 
+// Pin writes the marker that the task's copy exists. Call it only once the
+// copy has been created.
+func Pin(status *flowv1alpha1.TaskStatus) {
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:    ConditionDefinitionsPinned,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonCopied,
+		Message: "the task's definitions were copied",
+	})
+}
+
+// IsPinned reports whether the task carries the marker.
+func IsPinned(status *flowv1alpha1.TaskStatus) bool {
+	return meta.IsStatusConditionTrue(status.Conditions, ConditionDefinitionsPinned)
+}
+
 // Begin puts a fresh task on the flow's starting phase.
 func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase) {
 	status.Phase = start
@@ -460,11 +492,16 @@ func Begin(status *flowv1alpha1.TaskStatus, start flowv1alpha1.Phase) {
 // wait, not a dead end: the controller keeps looking for a flow of that name
 // on every later reconcile and backfills the date once one appears.
 func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
+	FailAs(status, ReasonFlowBroken, reason, flow, now)
+}
+
+// FailAs is Fail with the reason Ready is given.
+func FailAs(status *flowv1alpha1.TaskStatus, code, reason string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
 	status.Phase = flowv1alpha1.PhaseFailed
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    ConditionReady,
 		Status:  metav1.ConditionFalse,
-		Reason:  "FlowBroken",
+		Reason:  code,
 		Message: reason,
 	})
 	// Failed is reserved, so it is terminal and needs a human on its own

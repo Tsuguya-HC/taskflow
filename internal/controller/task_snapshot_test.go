@@ -79,6 +79,20 @@ var _ = Describe("the revision a task starts from", func() {
 		Expect(got.Handlers).To(Equal(map[string]flowv1alpha1.TaskHandlerSpec{fx.name: stored(fx.name)}))
 	})
 
+	// 変異: 印を書かない / 写しを作る前に印を書く。
+	It("marks the task once the copy exists", func() {
+		fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+
+		fx.reconcile()
+
+		tk := fx.get()
+		expectPinned(tk)
+		Expect(revisionsOf(tk.UID)).To(HaveLen(1))
+		Expect(tk.Status.Conditions).To(HaveLen(1), "the marker is all that begin adds to the conditions")
+	})
+
 	It("begins only the starting phase and nothing else", func() {
 		fx.makeFlow()
 		fx.makeHandler()
@@ -126,6 +140,7 @@ var _ = Describe("the revision a task starts from", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(revisionsOf(tk.UID)).To(BeEmpty(), "a task that never began has nothing to hold still")
+		Expect(pinned(tk)).To(BeFalse(), "a begin that fails has no copy to say it made")
 	})
 
 	// finally の欠落は既存の記録のまま: 「records a missing cleanup handler
@@ -197,6 +212,7 @@ var _ = Describe("the revision a task starts from", func() {
 			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
 				"a copy that fits in no single object must fail the task before its first run")
 			Expect(revisionsOf(tk.UID)).To(BeEmpty())
+			Expect(pinned(fx.get())).To(BeFalse(), "a begin that fails has no copy to say it made")
 		},
 		Entry("refused by the storage under the apiserver", 2),
 		Entry("refused by the apiserver's body limit", 4),
@@ -223,6 +239,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 		Expect(err).To(HaveOccurred(), "a name someone else holds is retried, not taken over")
 		Expect(fx.get().Status.Phase).To(BeEmpty(), "the task does not begin on a copy that is not its own")
+		Expect(pinned(fx.get())).To(BeFalse())
 		var now appsv1.ControllerRevision
 		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(squatter), &now)).To(Succeed())
 		Expect(now.ResourceVersion).To(Equal(stamp))
@@ -244,6 +261,7 @@ var _ = Describe("the revision a task starts from", func() {
 		fx.reconcile()
 
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate))
+		expectPinned(fx.get())
 		var now appsv1.ControllerRevision
 		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(own), &now)).To(Succeed())
 		Expect(now.ResourceVersion).To(Equal(stamp))

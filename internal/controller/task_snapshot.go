@@ -31,8 +31,9 @@ type snapshot struct {
 var errNoSnapshotReader = errors.New("controller: no uncached reader to read a snapshot revision with")
 
 // ensureSnapshot copies the flow's spec and the spec of every handler the
-// flow's bindings name into one ControllerRevision owned by the task, before
-// the task's first run.
+// flow's bindings name into one ControllerRevision owned by the task. It is
+// called when the task begins, or for a task that began before copies existed,
+// and either way before the task runs on the copy.
 //
 // Bindings alone decide which handlers the copy needs: a handler nothing
 // binds is not part of what any run of this task can reach. The cleanup
