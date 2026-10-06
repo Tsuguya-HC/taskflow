@@ -104,6 +104,14 @@ func collectedFinallyOutcomes() map[finallyOutcome]float64 {
 	return out
 }
 
+// forgetFlowMetrics drops every series of one flow, which is what a freshly
+// started controller process has before it reconciles anything.
+func forgetFlowMetrics(flow string) {
+	by := prometheus.Labels{metrics.LabelFlow: flow}
+	metrics.TaskOutcomes.DeletePartialMatch(by)
+	metrics.FinallyOutcomes.DeletePartialMatch(by)
+}
+
 var _ = Describe("What a flow's endings say before they happen", func() {
 	// An ending that happens once rises from nothing, and a range function
 	// given a single sample returns nothing at all — so the endings that
@@ -187,6 +195,59 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 
 		for got := range collectedFinallyOutcomes() {
 			Expect(got.flow).NotTo(Equal(fx.name), "%v declares no finally and must prime nothing", got)
+		}
+	})
+
+	// A controller restart also meets tasks in the middle of a flow: begun,
+	// holding a copy and its marker, at a phase that is neither new nor
+	// reserved. They arrive on the started-task path, which reads the flow from
+	// the copy and has to prime it too. Begin primes this flow on the way in, so
+	// the series are dropped between the two reconciles — the restart's fresh
+	// process is what had none.
+	It("primes the endings on the started-task path for a task that holds a copy and its marker", func() {
+		fx := newFixture()
+		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+			f.Spec.Bindings[phaseInvestigate].Next[phaseBroken] = "broken"
+			f.Spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+				phaseReport: flowv1alpha1.TerminalSuccess,
+				phaseBroken: flowv1alpha1.TerminalFailure,
+			}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: answerDone}
+		})
+		fx.makeHandler()
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Name = fx.name + "-cleanup"
+			h.Spec.Phase = flowv1alpha1.PhaseFinally
+		})
+		fx.makeTask()
+		fx.reconcile()
+		Expect(pinnedOf(fx.get())).NotTo(BeNil(), "begin should have left the task with its copy and marker")
+		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "the task must be mid-flow for this path to mean anything")
+
+		forgetFlowMetrics(fx.name)
+		Expect(collectedOutcomes()).NotTo(HaveKey(outcome{fx.name, string(phaseReport), string(transition.EndingSuccess)}))
+
+		fx.reconcile()
+
+		got := collectedOutcomes()
+		for _, want := range []outcome{
+			{fx.name, string(phaseReport), string(transition.EndingSuccess)},
+			{fx.name, string(phaseBroken), string(transition.EndingFailure)},
+			{fx.name, string(flowv1alpha1.PhaseEscalated), string(transition.EndingEscalated)},
+			{fx.name, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed)},
+		} {
+			value, ok := got[want]
+			Expect(ok).To(BeTrue(), "%v was never reported on the started-task path", want)
+			Expect(value).To(BeZero(), "%v counted something before the task reached any ending", want)
+		}
+		gotFinally := collectedFinallyOutcomes()
+		for _, want := range []finallyOutcome{
+			{fx.name, string(transition.OutcomeDeclared)},
+			{fx.name, string(transition.OutcomeNoAnswer)},
+		} {
+			value, ok := gotFinally[want]
+			Expect(ok).To(BeTrue(), "%v was never reported on the started-task path", want)
+			Expect(value).To(BeZero(), "%v counted something before any cleanup run settled", want)
 		}
 	})
 

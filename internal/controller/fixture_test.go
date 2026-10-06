@@ -228,6 +228,7 @@ const (
 	conditionPinned = "DefinitionsPinned"
 	reasonCopied    = "Copied"
 	reasonLost      = "DefinitionsLost"
+	reasonBroken    = "FlowBroken"
 )
 
 // pinnedOf is the marker a task carries, or nil.

@@ -33,20 +33,6 @@ var _ = Describe("the revision a task starts from", func() {
 		})
 	})
 
-	revisionsOf := func(uid types.UID) []appsv1.ControllerRevision {
-		var list appsv1.ControllerRevisionList
-		Expect(k8sClient.List(fx.ctx, &list, client.InNamespace(resourceNamespace))).To(Succeed())
-		var out []appsv1.ControllerRevision
-		for _, rev := range list.Items {
-			for _, owner := range rev.OwnerReferences {
-				if owner.UID == uid {
-					out = append(out, rev)
-				}
-			}
-		}
-		return out
-	}
-
 	copiedIn := func(rev appsv1.ControllerRevision) snapshot {
 		var got snapshot
 		Expect(json.Unmarshal(rev.Data.Raw, &got)).To(Succeed())
@@ -67,7 +53,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 		fx.reconcile()
 
-		revs := revisionsOf(tk.UID)
+		revs := fx.revisions()
 		Expect(revs).To(HaveLen(1), "begin must copy the flow and handler specs into one ControllerRevision")
 		rev := revs[0]
 		Expect(metav1.IsControlledBy(&rev, tk)).To(BeTrue(), "the copy goes with the task")
@@ -82,13 +68,13 @@ var _ = Describe("the revision a task starts from", func() {
 	It("marks the task as having its copy in the write that begins it", func() {
 		fx.makeFlow()
 		fx.makeHandler()
-		tk := fx.makeTask()
+		fx.makeTask()
 
 		fx.reconcile()
 
 		got := fx.get()
 		Expect(got.Status.Phase).To(Equal(phaseInvestigate))
-		Expect(revisionsOf(tk.UID)).To(HaveLen(1))
+		Expect(fx.revisions()).To(HaveLen(1))
 		marker := pinnedOf(got)
 		Expect(marker).NotTo(BeNil(), "a task that began on a copy says so")
 		Expect(marker.Status).To(Equal(metav1.ConditionTrue))
@@ -111,17 +97,17 @@ var _ = Describe("the revision a task starts from", func() {
 	It("never modifies the revision afterwards", func() {
 		fx.makeFlow()
 		fx.makeHandler()
-		tk := fx.makeTask()
+		fx.makeTask()
 
 		fx.reconcile()
-		first := revisionsOf(tk.UID)
+		first := fx.revisions()
 		Expect(first).To(HaveLen(1))
 		stamp := first[0].ResourceVersion
 
 		fx.reconcile()
 		fx.reconcile()
 
-		again := revisionsOf(tk.UID)
+		again := fx.revisions()
 		Expect(again).To(HaveLen(1))
 		Expect(again[0].ResourceVersion).To(Equal(stamp), "a later reconcile must leave the copy untouched")
 	})
@@ -141,7 +127,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-		Expect(revisionsOf(tk.UID)).To(BeEmpty(), "a task that never began has nothing to hold still")
+		Expect(fx.revisions()).To(BeEmpty(), "a task that never began has nothing to hold still")
 		Expect(pinnedOf(tk)).To(BeNil(), "no copy was made, so nothing is marked")
 	})
 
@@ -152,12 +138,12 @@ var _ = Describe("the revision a task starts from", func() {
 			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup-gone", Done: "swept"}
 		})
 		fx.makeHandler()
-		tk := fx.makeTask()
+		fx.makeTask()
 
 		fx.reconcile()
 
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "a missing cleanup handler does not fail the task")
-		revs := revisionsOf(tk.UID)
+		revs := fx.revisions()
 		Expect(revs).To(HaveLen(1))
 		Expect(copiedIn(revs[0]).Handlers).To(HaveLen(1), "the copy is written without the missing handler")
 	})
@@ -169,11 +155,11 @@ var _ = Describe("the revision a task starts from", func() {
 		})
 		fx.makeHandler()
 		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) { h.Name = cleanup })
-		tk := fx.makeTask()
+		fx.makeTask()
 
 		fx.reconcile()
 
-		revs := revisionsOf(tk.UID)
+		revs := fx.revisions()
 		Expect(revs).To(HaveLen(1))
 		Expect(copiedIn(revs[0]).Handlers).To(HaveKeyWithValue(cleanup, stored(cleanup)))
 	})
@@ -184,13 +170,13 @@ var _ = Describe("the revision a task starts from", func() {
 	DescribeTable("fails before the first run when the copy does not fit in one object",
 		func(big int) {
 			fx.makeBulky(big)
-			tk := fx.makeTask()
+			fx.makeTask()
 
 			fx.reconcile()
 
 			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
 				"a copy that fits in no single object must fail the task before its first run")
-			Expect(revisionsOf(tk.UID)).To(BeEmpty())
+			Expect(fx.revisions()).To(BeEmpty())
 			Expect(pinnedOf(fx.get())).To(BeNil(), "no copy was made, so nothing is marked")
 		},
 		Entry("refused by the storage under the apiserver", 2),

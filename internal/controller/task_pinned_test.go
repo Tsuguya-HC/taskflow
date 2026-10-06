@@ -227,7 +227,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 				cond := ready(tk)
 				Expect(cond).NotTo(BeNil())
 				Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				Expect(cond.Reason).To(Equal("FlowBroken"), "the reason begin gives for the same fault")
+				Expect(cond.Reason).To(Equal(reasonBroken), "the reason begin gives for the same fault")
 				Expect(cond.Message).To(ContainSubstring(fx.name))
 				Expect(cond.Message).To(ContainSubstring("does not exist"))
 				Expect(fx.revisions()).To(BeEmpty(), "nothing was made, so nothing is kept")
@@ -275,7 +275,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 
 				tk := fx.get()
 				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-				Expect(ready(tk).Reason).To(Equal("FlowBroken"))
+				Expect(ready(tk).Reason).To(Equal(reasonBroken))
 				Expect(ready(tk).Message).To(ContainSubstring("do not fit in one object"))
 				Expect(fx.revisions()).To(BeEmpty())
 				Expect(pinnedOf(tk)).To(BeNil())

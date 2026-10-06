@@ -501,7 +501,7 @@ var _ = Describe("a fork", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer says what run"))))
-		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", "FlowBroken"))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", reasonBroken))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
 			"the branch that finished is cancelled along with the rest: its answer was never read")
@@ -545,7 +545,7 @@ var _ = Describe("a fork", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("lost its binding"))))
-		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", "FlowBroken"))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", reasonBroken))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
 			"the branches were still running, unasked, when the fork's own binding disappeared")

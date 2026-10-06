@@ -235,19 +235,18 @@ func forks(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) bool {
 	return bound && binding.Join != nil
 }
 
-// resolveFlow is the one route to the flow a task runs on, and the two must
-// not come apart: a caller that got one by any other means would get a flow
-// whose endings were never primed, which is exactly the gap ADR-0010 closed.
-// Folding the lookup and the prime into one call is what makes a third call
-// site safe by construction rather than by a comment repeated at each one.
+// resolveFlow is the route to the flow for a task that has not begun and for
+// the reserved-phase branch. startedDefinitions is the other: it reads the copy
+// itself, because it has to make or repair one first. Both prime the flow's
+// endings (ADR-0010) before returning it, so a new way of getting a flow must
+// prime it too; a flow got by any other means would have endings that were
+// never primed.
 //
 // A task that has begun runs on its copy, so editing or deleting the live
 // TaskFlow or a live TaskHandler changes nothing for it; the handlers come
 // back with the flow so that one reconcile reads both from the same place. A
 // task that has not begun, and a stopped task with no copy, read the live
-// TaskFlow and get nil handlers, which handlerFor reads live. A started task
-// that has not stopped never gets here without a copy: startedDefinitions
-// makes one or fails it first.
+// TaskFlow and get nil handlers, which handlerFor reads live.
 //
 // A NotFound error is returned as-is rather than interpreted here, because
 // what it means differs by caller: the reserved-phase branch has nothing to
