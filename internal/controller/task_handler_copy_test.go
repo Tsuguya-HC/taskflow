@@ -28,8 +28,8 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
 )
 
-// 開始した Task は、handler も写しから読む (#196)。写しを持たない Task は今まで通り
-// live の TaskHandler を読む。
+// 開始した Task は、handler も写しから読む (#196)。写しを持たずマーカーも無い Task は、
+// 次の reconcile で live の TaskHandler から写しを作り、以後は写しから読む (#183)。
 var _ = Describe("a task running from its copy of the handlers", func() {
 	var fx *fixture
 
@@ -112,37 +112,28 @@ var _ = Describe("a task running from its copy of the handlers", func() {
 		Expect(jobsOf(fx)).To(BeEmpty())
 	})
 
-	// 写しを持たない Task が live を読む性質は、上の 3 つの裏返し。
-	Context("with no copy", func() {
-		// 変異: 写しの有無にかかわらず handler を最初に読んだ値で固定する。
-		It("builds the Job from the live handler's current image", func() {
+	// 写しを持たずマーカーも無い Task は、移行で写しを作る。
+	Context("with no copy and no marker", func() {
+		// 変異: 移行が handler を写さない・移行のあとも live の handler を読む。
+		It("copies the live handler as it is at migration, and reads it from the copy after", func() {
 			fx.makeFlow()
 			fx.makeHandler()
-			fx.makeTask()
-			fx.reconcile() // begin
-			fx.dropCopy()
+			tk := fx.makeBareTask(false)
 			fx.editHandler(func(h *flowv1alpha1.TaskHandler) {
 				h.Spec.JobTemplate.Template.Spec.Containers[0].Image = editedImage
 			})
 
-			fx.reconcile() // creates the Job
+			fx.reconcile() // makes the copy
+			fx.editHandler(func(h *flowv1alpha1.TaskHandler) {
+				h.Spec.JobTemplate.Template.Spec.Containers[0].Image = "example.invalid/agent:edited-again"
+			})
+			fx.reconcile() // creates the Job, if the first did not
 
-			Expect(imageOf(fx)).To(Equal(editedImage))
-		})
-
-		// 変異: handler が無くても Job を作る。
-		It("fails when the live handler is deleted", func() {
-			fx.makeFlow()
-			fx.makeHandler()
-			fx.makeTask()
-			fx.reconcile() // begin
-			fx.dropCopy()
-			fx.deleteHandler()
-
-			fx.reconcile()
-
-			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
-			Expect(jobsOf(fx)).To(BeEmpty())
+			Expect(fx.revisions()).To(HaveLen(1))
+			Expect(pinnedOf(fx.get())).NotTo(BeNil())
+			Expect(fx.get().UID).To(Equal(tk.UID))
+			Expect(imageOf(fx)).To(Equal(editedImage),
+				"the handler as it was when the copy was made; the edit after does not reach the task")
 		})
 	})
 })

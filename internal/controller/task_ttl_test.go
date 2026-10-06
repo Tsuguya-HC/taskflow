@@ -240,6 +240,8 @@ var _ = Describe("expiring a finished task", func() {
 		got := fx.get()
 		Expect(got.Status.ExpiresAt).NotTo(BeNil())
 		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(succeededTTL)))
+		Expect(fx.revisions()).To(BeEmpty(), "a task that has stopped is not given a copy")
+		Expect(pinnedOf(got)).To(BeNil(), "nor a marker for one")
 	})
 
 	It("does not delete a task by the same name created after the one that expired", func() {

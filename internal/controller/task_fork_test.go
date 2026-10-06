@@ -24,6 +24,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -38,11 +39,11 @@ import (
 // runs, and all of them meet at 報告.
 var _ = Describe("a fork", func() {
 	const (
-		security = phaseSecurity
-		logic    = phaseLogic
-		tests    = phaseTests
-		dirDone  = answerDone
-		dirStuck = answerStuck
+		security    = phaseSecurity
+		logic       = phaseLogic
+		tests       = phaseTests
+		dirForkDone = answerDone
+		dirStuck    = answerStuck
 	)
 	var fx *fixture
 	BeforeEach(func() { fx = newFixture() })
@@ -57,7 +58,7 @@ var _ = Describe("a fork", func() {
 
 	// setUp makes the fork's flow and a handler for every phase of it.
 	setUp := func(mut ...func(*flowv1alpha1.TaskHandler)) {
-		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirDone, flowv1alpha1.PhaseEscalated: dirStuck}
+		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirForkDone, flowv1alpha1.PhaseEscalated: dirStuck}
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 				phaseInvestigate: {
@@ -161,13 +162,13 @@ var _ = Describe("a fork", func() {
 		Expect(securityJob.Spec.Template.Spec.InitContainers[1].Args).NotTo(ContainElement("--"+contract.FlagMany),
 			"a branch answers with exactly one directory")
 
-		answer(logicJob, dirDone)
-		answer(testsJob, dirDone)
+		answer(logicJob, dirForkDone)
+		answer(testsJob, dirForkDone)
 		fx.reconcile()
 		Expect(phasesInFlight()).To(Equal([]flowv1alpha1.Phase{security}), "two have met at the join, one is still running")
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate))
 
-		answer(securityJob, dirDone)
+		answer(securityJob, dirForkDone)
 		fx.reconcile()
 		tk = fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport), "the last branch to arrive starts the join")
@@ -492,7 +493,7 @@ var _ = Describe("a fork", func() {
 		setUp()
 		forked(string(logic) + "/" + string(security))
 
-		answer(jobOf(security, 3), dirDone)
+		answer(jobOf(security, 3), dirForkDone)
 		fx.rewriteCopy(func(snap *snapshot) { withoutBinding(&snap.Flow, security) })
 
 		fx.reconcile()
@@ -500,6 +501,7 @@ var _ = Describe("a fork", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer says what run"))))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", reasonBroken))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
 			"the branch that finished is cancelled along with the rest: its answer was never read")
@@ -515,7 +517,7 @@ var _ = Describe("a fork", func() {
 		setUp()
 		forked(string(logic) + "/" + string(security))
 
-		answer(jobOf(security, 3), dirDone)
+		answer(jobOf(security, 3), dirForkDone)
 		dropBinding(security)
 
 		fx.reconcile()
@@ -543,6 +545,7 @@ var _ = Describe("a fork", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("lost its binding"))))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", reasonBroken))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
 			"the branches were still running, unasked, when the fork's own binding disappeared")
@@ -569,6 +572,47 @@ var _ = Describe("a fork", func() {
 		}
 	})
 
+	// 変異: 写しが消えた Task を、分岐を畳まずに fail() だけで落とす。
+	It("cancels every branch, and stops their Jobs, when the task's copy is deleted while they run", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.markPinned()
+		fx.dropCopy()
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Reason).To(Equal(reasonLost))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+		Expect(fx.revisions()).To(BeEmpty())
+	})
+
+	// 変異: 移行の失敗を、分岐を畳まずに fail() だけで落とす。
+	It("cancels every branch, and stops their Jobs, when migrating a task that began before the copy fails", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.beforeCopy()
+		fx.deleteHandler(handlerFor(phaseReport))
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).To(ContainSubstring("does not exist"))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+		Expect(fx.revisions()).To(BeEmpty())
+		Expect(pinnedOf(tk)).To(BeNil())
+	})
+
 	It("keeps a cancelled branch's work out of the cleanup run's sweep while its Job's grace period runs", func() {
 		// A flow of its own, not setUp: this is the one spec that needs every
 		// handler on the flow workspace, including the fork's own and the
@@ -582,10 +626,10 @@ var _ = Describe("a fork", func() {
 			spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
 		}
 		cleanupName := fx.name + "-cleanup"
-		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirDone, flowv1alpha1.PhaseEscalated: dirStuck}
+		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirForkDone, flowv1alpha1.PhaseEscalated: dirStuck}
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{}
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanupName, Done: dirDone}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanupName, Done: dirForkDone}
 			f.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 				phaseInvestigate: {
 					Handler: fx.name,

@@ -48,7 +48,6 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	const (
 		succeededTTL = time.Hour
 		failedTTL    = 168 * time.Hour
-		dirDone      = "cleaned"
 	)
 
 	// cleanupHandler is a second TaskHandler, named apart from the phase
@@ -116,15 +115,16 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// says, leaving the task stopped — and, when its flow declares one, owed a
 	// cleanup run.
 	//
-	// keepCopy false drops the copy once the phase has settled: the stopped
-	// task then reads the live definitions for its cleanup run, the way a
-	// stopped task with no copy does (#181).
+	// keepCopy false deletes the copy once the phase has settled: the stopped
+	// task, marked as it is, then reads the live definitions for its cleanup
+	// run, and is not failed for the copy it lacks (#183).
 	runPhaseFrom := func(message string, keepCopy bool) {
 		fx.reconcile() // begin
 		fx.reconcile() // create the Job
 		finish(fx.job(1), message)
 		fx.reconcile() // settle
 		if !keepCopy {
+			Expect(pinnedOf(fx.get())).NotTo(BeNil(), "begin marked the task, and it has stopped: its lost copy is no failure")
 			fx.dropCopy()
 		}
 	}
@@ -397,7 +397,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			Expect(jobsOf(fx)).To(HaveLen(1), "the handler made after the task began does not start a cleanup Job")
 		})
 
-		It("is used by a task with no copy", func() {
+		It("is used by a stopped task whose copy was deleted", func() {
 			fx.makeFlow(withCleanup)
 			fx.makeHandler()
 			fx.makeTask()  // no cleanup handler exists
@@ -406,10 +406,12 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			fx.reconcile() // create the Job
 			finish(fx.job(1), "ok\nnothing to report")
 			fx.reconcile() // settle
+			Expect(pinnedOf(fx.get())).NotTo(BeNil(), "begin marked the task, and it has stopped: its lost copy is no failure")
 			fx.dropCopy()
 
 			fx.reconcile()
 
+			Expect(fx.get().Status.Phase).To(Equal(phaseReport))
 			Expect(cleanupJob()).NotTo(BeNil())
 		})
 	})

@@ -159,8 +159,7 @@ var _ = Describe("a run nothing starts", func() {
 	})
 
 	// The handler is read once, to learn how long the wait may be. A task with
-	// no copy finds it gone at that moment as the same broken definition it is
-	// anywhere else; one with a copy does not read the live handler at all.
+	// a copy does not read the live handler at all.
 	Context("when the handler went away before the run could be dated", func() {
 		// placed brings a task to the reconcile that dates its run: the box
 		// the run waits in is named in status but not yet opened.
@@ -187,17 +186,6 @@ var _ = Describe("a run nothing starts", func() {
 			tk := fx.get()
 			Expect(tk.Status.Phase).To(Equal(phaseInvestigate), "a deleted handler is no reason to fail a task that has its copy")
 			Expect(taskstate.Current(&tk.Status).Deadline).NotTo(BeNil(), "the wait is as long as the copy's handler says")
-		})
-
-		It("fails a run of a task with no copy", func() {
-			placed()
-			fx.dropCopy()
-			nameBox()
-			fx.deleteHandler()
-
-			fx.reconcile()
-
-			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		})
 	})
 
@@ -476,7 +464,7 @@ var _ = Describe("a run nothing starts", func() {
 	waitingOnCleanup := func(keepCopy bool) *flowv1alpha1.TaskFlow {
 		cleanup := fx.name + "-cleanup"
 		flow := fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: "cleaned"}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: dirDone}
 		})
 		fx.makeHandler(stateRunner(timeout))
 		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
@@ -491,6 +479,7 @@ var _ = Describe("a run nothing starts", func() {
 		fx.answer("ok", "")
 		fx.reconcile() // the task reaches its ending, owing a cleanup
 		if !keepCopy {
+			Expect(pinnedOf(fx.get())).NotTo(BeNil(), "begin marked the task, and it has stopped: its lost copy is no failure")
 			fx.dropCopy()
 		}
 		fx.reconcile() // opens the place the cleanup run is answered in
@@ -501,13 +490,13 @@ var _ = Describe("a run nothing starts", func() {
 		return flow
 	}
 
-	It("records a cleanup run, for a task with no copy, whose declaration went away while it waited", func() {
+	It("records a cleanup run, for a stopped task whose copy was deleted, whose declaration went away while it waited", func() {
 		waitingOnCleanup(false)
 
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(phaseReport), "the ending stands")
+		Expect(tk.Status.Phase).To(Equal(phaseReport), "the ending stands, and a stopped task whose copy is gone is not a failed one")
 		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Reason).
 			To(Equal(taskstate.ReasonFinallyFailed))
@@ -516,14 +505,14 @@ var _ = Describe("a run nothing starts", func() {
 	// 変異: コピーがあっても live の flow の finally を読む。
 	It("answers a cleanup run from the copy's declaration when the live flow no longer has one", func() {
 		waitingOnCleanup(true)
-		fx.answerFor(flowv1alpha1.PhaseFinally, 2, "cleaned", "")
+		fx.answerFor(flowv1alpha1.PhaseFinally, 2, dirDone, "")
 
 		fx.reconcile()
 
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(phaseReport), "the ending stands")
 		Expect(tk.Status.History).To(HaveLen(2))
-		Expect(tk.Status.History[1].Directory).To(Equal("cleaned"))
+		Expect(tk.Status.History[1].Directory).To(Equal(dirDone))
 		Expect(tk.Status.History[1].Outcome).To(Equal(string(transition.OutcomeDeclared)))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(BeNil(),
 			"a cleanup that reported done leaves nothing to say")
@@ -535,7 +524,7 @@ var _ = Describe("a run nothing starts", func() {
 	It("is answered the same way for the cleanup run", func() {
 		cleanup := fx.name + "-cleanup"
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: "cleaned"}
+			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanup, Done: dirDone}
 			f.Spec.TTL = &flowv1alpha1.TTLSpec{Succeeded: &metav1.Duration{Duration: time.Hour}}
 		})
 		fx.makeHandler(stateRunner(timeout))
@@ -554,7 +543,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		Expect(fx.get().Status.Phase).To(Equal(phaseReport), "the ending does not move while the cleanup waits")
 		Expect(fx.get().Status.ExpiresAt).To(BeNil(), "and it is not dated until the cleanup settles")
-		fx.answerFor(flowv1alpha1.PhaseFinally, 2, "cleaned", "")
+		fx.answerFor(flowv1alpha1.PhaseFinally, 2, dirDone, "")
 
 		fx.reconcile()
 
@@ -563,7 +552,7 @@ var _ = Describe("a run nothing starts", func() {
 		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(2))
 		Expect(tk.Status.History[1].Phase).To(Equal(flowv1alpha1.PhaseFinally))
-		Expect(tk.Status.History[1].Directory).To(Equal("cleaned"))
+		Expect(tk.Status.History[1].Directory).To(Equal(dirDone))
 		Expect(tk.Status.ExpiresAt).NotTo(BeNil(), "the cleanup settled, so the task is dated")
 	})
 })
