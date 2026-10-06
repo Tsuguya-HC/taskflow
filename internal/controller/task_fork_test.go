@@ -24,6 +24,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -567,6 +568,47 @@ var _ = Describe("a fork", func() {
 		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
 			Expect(jobGone(phase, runID)).To(BeFalse(), "%s's Job runs on", phase)
 		}
+	})
+
+	// 変異: 写しが消えた Task を、分岐を畳まずに fail() だけで落とす。
+	It("cancels every branch, and stops their Jobs, when the task's copy is deleted while they run", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.markPinned()
+		fx.dropCopy()
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Reason).To(Equal(reasonLost))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+		Expect(fx.revisions()).To(BeEmpty())
+	})
+
+	// 変異: 移行の失敗を、分岐を畳まずに fail() だけで落とす。
+	It("cancels every branch, and stops their Jobs, when migrating a task that began before the copy fails", func() {
+		setUp()
+		forked(string(logic) + "/" + string(security))
+		fx.beforeCopy()
+		fx.deleteHandler(handlerFor(phaseReport))
+
+		fx.reconcile()
+
+		tk := fx.get()
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).To(ContainSubstring("does not exist"))
+		Expect(tk.Status.CurrentRuns).To(BeEmpty())
+		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
+		for phase, runID := range map[flowv1alpha1.Phase]int32{logic: 2, security: 3, tests: 4} {
+			Expect(jobGone(phase, runID)).To(BeTrue(), "%s's Job is stopped along with the task", phase)
+		}
+		Expect(fx.revisions()).To(BeEmpty())
+		Expect(pinnedOf(tk)).To(BeNil())
 	})
 
 	It("keeps a cancelled branch's work out of the cleanup run's sweep while its Job's grace period runs", func() {

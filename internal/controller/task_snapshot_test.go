@@ -2,12 +2,10 @@ package controller
 
 import (
 	"encoding/json"
-	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -79,6 +77,24 @@ var _ = Describe("the revision a task starts from", func() {
 		Expect(got.Handlers).To(Equal(map[string]flowv1alpha1.TaskHandlerSpec{fx.name: stored(fx.name)}))
 	})
 
+	// 変異: begin の status 書き込みにマーカーを載せない・Copied 以外の reason・
+	// True 以外の status を書く。
+	It("marks the task as having its copy in the write that begins it", func() {
+		fx.makeFlow()
+		fx.makeHandler()
+		tk := fx.makeTask()
+
+		fx.reconcile()
+
+		got := fx.get()
+		Expect(got.Status.Phase).To(Equal(phaseInvestigate))
+		Expect(revisionsOf(tk.UID)).To(HaveLen(1))
+		marker := pinnedOf(got)
+		Expect(marker).NotTo(BeNil(), "a task that began on a copy says so")
+		Expect(marker.Status).To(Equal(metav1.ConditionTrue))
+		Expect(marker.Reason).To(Equal(reasonCopied))
+	})
+
 	It("begins only the starting phase and nothing else", func() {
 		fx.makeFlow()
 		fx.makeHandler()
@@ -126,6 +142,7 @@ var _ = Describe("the revision a task starts from", func() {
 		tk := fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
 		Expect(revisionsOf(tk.UID)).To(BeEmpty(), "a task that never began has nothing to hold still")
+		Expect(pinnedOf(tk)).To(BeNil(), "no copy was made, so nothing is marked")
 	})
 
 	// finally の欠落は既存の記録のまま: 「records a missing cleanup handler
@@ -166,30 +183,7 @@ var _ = Describe("the revision a task starts from", func() {
 	// 束ねた写しだけが載らないようにする。変異は拒否の形の判定を 1 つ落とす。
 	DescribeTable("fails before the first run when the copy does not fit in one object",
 		func(big int) {
-			blobOf := func(seed byte) string {
-				blob := make([]byte, 900<<10)
-				for i := range blob {
-					blob[i] = seed + byte(i%26)
-				}
-				return string(blob)
-			}
-			fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-				for i := range big {
-					binding := f.Spec.Bindings[phaseInvestigate]
-					binding.Handler = fmt.Sprintf("%s-big-%d", fx.name, i)
-					f.Spec.Bindings[flowv1alpha1.Phase(fmt.Sprintf("束-%d", i))] = binding
-				}
-			})
-			fx.makeHandler()
-			for i := range big {
-				name := fmt.Sprintf("%s-big-%d", fx.name, i)
-				seed := byte('a' + i)
-				fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
-					h.Name = name
-					c := &h.Spec.JobTemplate.Template.Spec.Containers[0]
-					c.Env = append(c.Env, corev1.EnvVar{Name: "BLOB", Value: blobOf(seed)})
-				})
-			}
+			fx.makeBulky(big)
 			tk := fx.makeTask()
 
 			fx.reconcile()
@@ -197,6 +191,7 @@ var _ = Describe("the revision a task starts from", func() {
 			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
 				"a copy that fits in no single object must fail the task before its first run")
 			Expect(revisionsOf(tk.UID)).To(BeEmpty())
+			Expect(pinnedOf(fx.get())).To(BeNil(), "no copy was made, so nothing is marked")
 		},
 		Entry("refused by the storage under the apiserver", 2),
 		Entry("refused by the apiserver's body limit", 4),
@@ -243,7 +238,9 @@ var _ = Describe("the revision a task starts from", func() {
 
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate))
+		got := fx.get()
+		Expect(got.Status.Phase).To(Equal(phaseInvestigate))
+		Expect(pinnedOf(got)).NotTo(BeNil(), "taking over its own copy is a begin like any other, and marks the task")
 		var now appsv1.ControllerRevision
 		Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(own), &now)).To(Succeed())
 		Expect(now.ResourceVersion).To(Equal(stamp))

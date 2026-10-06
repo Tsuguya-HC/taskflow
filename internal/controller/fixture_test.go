@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -37,6 +38,7 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
+	"github.com/Tsuguya-HC/taskflow/internal/taskstate"
 )
 
 const (
@@ -52,6 +54,7 @@ const (
 	sidecarImage  = "example.invalid/agent-sidecar:v0"
 	workspaceVol  = "work"
 	workspacePath = "/workspace"
+	dirDone       = "cleaned"
 )
 
 // Every spec gets its own names. Sharing them let one spec's leftover Job —
@@ -218,14 +221,105 @@ func (fx *fixture) makeTask() *flowv1alpha1.Task {
 	return tk
 }
 
-// dropCopy makes the task one that has no copy of its definitions: begin wrote
-// one, and a task whose revision is absent is read from the live objects, the
-// way every task began before the copy existed.
+// The marker's wire values, spelled out here rather than read from the
+// package under test: they never change, and a rename there should fail these
+// specs rather than follow along.
+const (
+	conditionPinned = "DefinitionsPinned"
+	reasonCopied    = "Copied"
+	reasonLost      = "DefinitionsLost"
+)
+
+// pinnedOf is the marker a task carries, or nil.
+func pinnedOf(tk *flowv1alpha1.Task) *metav1.Condition {
+	return meta.FindStatusCondition(tk.Status.Conditions, conditionPinned)
+}
+
+// markPinned puts the marker on the task by hand, so a spec about what a
+// marked task whose copy is gone does does not also depend on begin having
+// written it.
+func (fx *fixture) markPinned() {
+	tk := fx.get()
+	meta.SetStatusCondition(&tk.Status.Conditions, metav1.Condition{
+		Type: conditionPinned, Status: metav1.ConditionTrue, Reason: reasonCopied,
+	})
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+}
+
+// unpin takes the marker off, the shape of a task that began when a copy was
+// written and nothing marked it.
+func (fx *fixture) unpin() {
+	tk := fx.get()
+	meta.RemoveStatusCondition(&tk.Status.Conditions, conditionPinned)
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+}
+
+// dropCopy deletes the copy begin wrote, as someone deleting the revision
+// would. The task keeps whatever marker it has: a task that began marked is
+// then one whose copy was lost, and one without it (see beforeCopy) is one that
+// never had a copy.
 func (fx *fixture) dropCopy() {
 	rev := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
 		Name: runner.SnapshotRevisionName(fx.name, fx.taskUID), Namespace: resourceNamespace,
 	}}
 	Expect(k8sClient.Delete(fx.ctx, rev)).To(Succeed(), "begin should have written the copy that is being dropped")
+}
+
+// beforeCopy makes a begun task the shape every task that began before a copy
+// was written has: no copy, and nothing marking one.
+func (fx *fixture) beforeCopy() {
+	fx.dropCopy()
+	fx.unpin()
+}
+
+// makeBareTask makes a task whose status was written without begin, so it has
+// no copy and no marker, and either has its first run in flight or, idle,
+// nothing in flight at all.
+func (fx *fixture) makeBareTask(idle bool) *flowv1alpha1.Task {
+	tk := fx.makeTask()
+	taskstate.Begin(&tk.Status, phaseInvestigate)
+	if idle {
+		taskstate.SetCurrent(&tk.Status, nil)
+	}
+	Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+	return tk
+}
+
+// revisions is every ControllerRevision the fixture's task holds a copy in.
+func (fx *fixture) revisions() []appsv1.ControllerRevision {
+	var list appsv1.ControllerRevisionList
+	Expect(k8sClient.List(fx.ctx, &list, client.InNamespace(resourceNamespace),
+		client.MatchingLabels{runner.LabelTaskUID: string(fx.taskUID)})).To(Succeed())
+	return list.Items
+}
+
+// makeBulky makes a flow of big more handlers, each of which fits in one
+// object while the copy of all of them does not.
+func (fx *fixture) makeBulky(big int) {
+	blobOf := func(seed byte) string {
+		blob := make([]byte, 900<<10)
+		for i := range blob {
+			blob[i] = seed + byte(i%26)
+		}
+		return string(blob)
+	}
+	fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
+		for i := range big {
+			binding := f.Spec.Bindings[phaseInvestigate]
+			binding.Handler = fmt.Sprintf("%s-big-%d", fx.name, i)
+			f.Spec.Bindings[flowv1alpha1.Phase(fmt.Sprintf("束-%d", i))] = binding
+		}
+	})
+	fx.makeHandler()
+	for i := range big {
+		name := fmt.Sprintf("%s-big-%d", fx.name, i)
+		seed := byte('a' + i)
+		fx.makeHandler(func(h *flowv1alpha1.TaskHandler) {
+			h.Name = name
+			c := &h.Spec.JobTemplate.Template.Spec.Containers[0]
+			c.Env = append(c.Env, corev1.EnvVar{Name: "BLOB", Value: blobOf(seed)})
+		})
+	}
 }
 
 // rewriteCopy changes what the task's copy holds: a revision's data cannot be
