@@ -145,8 +145,8 @@ func TestDesignDescribesTheCopy(t *testing.T) {
 	mustContain(t, "§10 cleanup table", cleanup, "ControllerRevision")
 }
 
-// The words DefinitionsLost and ControllerRevision stay in these sections
-// when a sentence's verdict is flipped, so the sentences are pinned whole.
+// Flipping a sentence's verdict leaves the word DefinitionsLost in its
+// section, so the sentences are pinned whole.
 func TestDesignSaysWhichDefinitionsTheCopyDecides(t *testing.T) {
 	design := read(t, "design.md")
 
