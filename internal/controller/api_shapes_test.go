@@ -54,7 +54,7 @@ const phaseGave flowv1alpha1.Phase = "失敗"
 
 // These are not copied from any worked example — names, handlers and budget
 // differ. What they check is the shape the design requires: a declaration
-// decides its own vocabulary, the two reserved names cannot be bound, and the
+// decides its own vocabulary, the reserved name cannot be bound, and the
 // required fields are enforced. They run against a real API server so the
 // generated schema — enums, required fields, the embedded PodSpec under the
 // curated JobTemplate type — is what gets tested, not a struct literal that

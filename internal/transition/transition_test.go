@@ -385,17 +385,16 @@ func TestDeclaredEndingsLeaveOutBoundPhases(t *testing.T) {
 	}
 }
 
-// The framework's own two can happen to any flow — Escalated whenever an
-// answer cannot be read, Failed whenever the flow turns out to be broken — so
-// they are reported whether or not the flow names them, and naming one does
-// not report it twice.
-func TestDeclaredEndingsAlwaysIncludeTheReservedTwo(t *testing.T) {
+// The framework's own TaskFailed can happen to any flow, so it is
+// reported whether or not the flow names it, and naming it does not
+// report it twice.
+func TestDeclaredEndingsAlwaysIncludeTheReservedOne(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding
 	}{
-		{"a flow that never mentions them", sampleFlow()},
-		{"a flow that declares an escalate directory", withRefusal()},
+		{"a flow that never mentions it", sampleFlow()},
+		{"a flow that declares a refusal directory", withRefusal()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: tc.bindings})

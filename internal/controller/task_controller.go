@@ -1390,6 +1390,8 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
+	logf.FromContext(ctx).Info("task failed without a run to settle",
+		"phase", task.Status.Phase, "outcome", transition.OutcomeStructural, "reason", reason)
 	r.announce(task, flow, flowv1alpha1.PhaseTaskFailed, reason, string(transition.OutcomeStructural))
 	return nil
 }

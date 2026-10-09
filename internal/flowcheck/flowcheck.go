@@ -134,7 +134,7 @@ func checkOldTerminalNames(spec *flowv1alpha1.TaskFlowSpec, bindings *field.Path
 			}
 		}
 	}
-	for _, terminal := range sortedPhases(terminalsAsPhases(spec.Terminals)) {
+	for _, terminal := range sortedTerminals(spec.Terminals) {
 		if oldTerminal(terminal) {
 			errs = append(errs, field.Forbidden(bindings.Child("terminals").Key(string(terminal)),
 				fmt.Sprintf("%s is no longer a terminal; name TaskFailed instead", terminal)))
@@ -150,14 +150,13 @@ func oldTerminal(phase flowv1alpha1.Phase) bool {
 	return phase == flowv1alpha1.Phase("Escalated") || phase == flowv1alpha1.Phase("Failed")
 }
 
-// terminalsAsPhases lists the phases a terminals map declares, so the old
-// names among them can be refused in name order like every other mistake.
-func terminalsAsPhases(terminals map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity) map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
-	out := make(map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding, len(terminals))
+func sortedTerminals(terminals map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity) []flowv1alpha1.Phase {
+	phases := make([]flowv1alpha1.Phase, 0, len(terminals))
 	for phase := range terminals {
-		out[phase] = flowv1alpha1.PhaseBinding{}
+		phases = append(phases, phase)
 	}
-	return out
+	sortPhases(phases)
+	return phases
 }
 
 // checkNext judges one binding's edges: where they may lead, and what the
@@ -379,7 +378,7 @@ func walk(spec *flowv1alpha1.TaskFlowSpec) (reached map[flowv1alpha1.Phase]bool,
 	return reached, endings
 }
 
-// sortedPhases and sortedDestinations exist so that a flow with several
+// sortedPhases, sortedDestinations and sortedTerminals exist so that a flow with several
 // mistakes is told about them in the same order every time. Ranging a map
 // would make the report depend on the hash seed, which turns one wrong flow
 // into an error message that differs between two identical applies.
