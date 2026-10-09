@@ -3,6 +3,7 @@
 - **status**: accepted（2026-09-05、人間の承認）
 - **根拠**: issue #101。PR #100 のレビューで、design.md が 2 箇所で参照している
   `handlerHash` / `flowHash` に実装が 1 行も無いことが分かり、実装するか記述を落とすかを決めた
+- **一部を覆された**: [ADR-0014](0014-pin-definitions-at-start.md)（決定 3〜5 と未解決。決定 1・2 は残る）
 
 **決定**:
 
