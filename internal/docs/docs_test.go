@@ -42,8 +42,6 @@ func read(t *testing.T, rel ...string) string {
 	return string(b)
 }
 
-// section returns the lines from the first line with the prefix start up to
-// (not including) the next line that begins with one of the stops.
 func section(t *testing.T, md, start string, stops ...string) string {
 	t.Helper()
 	lines := strings.Split(md, "\n")
@@ -69,8 +67,6 @@ func section(t *testing.T, md, start string, stops ...string) string {
 	return strings.Join(lines[from:to], "\n")
 }
 
-// headerBullets returns the bullets under the title: from the status line to
-// the first blank line.
 func headerBullets(t *testing.T, adr string) []string {
 	t.Helper()
 	lines := strings.Split(adr, "\n")
@@ -149,8 +145,22 @@ func TestDesignDescribesTheCopy(t *testing.T) {
 	mustContain(t, "§10 cleanup table", cleanup, "ControllerRevision")
 }
 
-// A row per rejected option, as ADR-0009 and ADR-0012 did: those rows name
-// the ADR that decided them.
+// The words DefinitionsLost and ControllerRevision stay in these sections
+// when a sentence's verdict is flipped, so the sentences are pinned whole.
+func TestDesignSaysWhichDefinitionsTheCopyDecides(t *testing.T) {
+	design := read(t, "design.md")
+
+	finally := section(t, design, "### 終端の後に 1 回だけ走る `finally`", "### ", "## ")
+	mustContain(t, "§5 finally", finally,
+		"写しが消されて `DefinitionsLost` で `Failed` になったときも走らない")
+
+	ttl := section(t, design, "### Task の TTL", "### ", "## ")
+	mustContain(t, "§10 Task の TTL", ttl,
+		"写しの flow から決まり、live の flow の編集は届かない")
+}
+
+// Each option ADR-0014 rejected has its own row in §11, so a row dropped or
+// merged into another leaves fewer than four.
 func TestDesignRejectedIdeasHaveTheFourRowsOfADR0014(t *testing.T) {
 	rejected := section(t, read(t, "design.md"), "## 11. 却下した案と理由", "---", "## 12.")
 	n := 0
