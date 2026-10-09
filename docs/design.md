@@ -274,7 +274,7 @@ status:
   history: [...]              # 上限付きリングバッファ
   conditions:
     - {type: DefinitionsPinned, status: "True", reason: Copied}   # 写しを作った後に付き、消えない
-    # Ready=False は、人間が見る必要のある終端に着いたときだけ付く（§5）
+    # Ready=False は、人間が見る必要のある終端に着いたとき、または finally が失敗したときに付く（§5）
 ```
 
 status は写しの名前も参照も持たない。持つのは `DefinitionsPinned` だけで、写しは Task の名前と UID から

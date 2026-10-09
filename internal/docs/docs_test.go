@@ -159,6 +159,43 @@ func TestDesignSaysWhichDefinitionsTheCopyDecides(t *testing.T) {
 		"写しの flow から決まり、live の flow の編集は届かない")
 }
 
+// The only sentences that say whether a new or edited definition reaches a
+// Task that is already running, and whether a Task that lost its copy runs
+// its cleanup. Flipping either leaves every word the other tests look for.
+func TestDesignSaysWhoSeesNewDefinitionsAndWhetherALostCopyCleansUp(t *testing.T) {
+	design := read(t, "design.md")
+
+	api := section(t, design, "## 4. API", "## 5. ")
+	mustContain(t, "§4", api, "届くのはその後に作られた Task だけ。")
+
+	contradictions := section(t, design, "### 実行時の矛盾は修復せず `Failed`", "### ", "## ")
+	mustContain(t, "§5 runtime contradictions", contradictions,
+		"cleanup の run は走らせない（live の finally handler は Task が固定したものではない）")
+}
+
+// A Task that ended on Success carries no Ready=False until its finally
+// fails; the status example must not say the condition comes with the
+// ending alone.
+func TestDesignSaysReadyFalseAlsoComesFromAFailedFinally(t *testing.T) {
+	design := read(t, "design.md")
+	var line string
+	for l := range strings.SplitSeq(design, "\n") {
+		if strings.Contains(strings.TrimSpace(l), "# Ready=False") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatal("the status example has no comment on Ready=False")
+	}
+	if strings.Contains(line, "だけ付く") {
+		t.Errorf("the comment on Ready=False says it comes with the ending alone: %q", line)
+	}
+	if !strings.Contains(line, "finally が失敗したとき") {
+		t.Errorf("the comment on Ready=False does not say a failed finally brings it: %q", line)
+	}
+}
+
 // Each option ADR-0014 rejected has its own row in §11, so a row dropped or
 // merged into another leaves fewer than four.
 func TestDesignRejectedIdeasHaveTheFourRowsOfADR0014(t *testing.T) {
