@@ -115,7 +115,7 @@ var _ = Describe("expiring a finished task", func() {
 		complete("") // exit 0, said nothing
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.ExpiresAt).NotTo(BeNil())
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
 	})
@@ -126,7 +126,7 @@ var _ = Describe("expiring a finished task", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.ExpiresAt).NotTo(BeNil())
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
 	})
@@ -137,7 +137,7 @@ var _ = Describe("expiring a finished task", func() {
 		// assertion below is a delta rather than an absolute count for that
 		// reason.
 		labels := prometheus.Labels{
-			metrics.LabelFlow: metrics.FlowUnresolved, metrics.LabelPhase: string(flowv1alpha1.PhaseFailed), metrics.LabelSeverity: string(transition.EndingFailed),
+			metrics.LabelFlow: metrics.FlowUnresolved, metrics.LabelPhase: string(flowv1alpha1.PhaseTaskFailed), metrics.LabelSeverity: string(transition.EndingTaskFailed), metrics.LabelOutcome: string(transition.OutcomeStructural),
 		}
 		before := testutil.ToFloat64(metrics.TaskOutcomes.With(labels))
 
@@ -145,7 +145,7 @@ var _ = Describe("expiring a finished task", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.ExpiresAt).To(BeNil())
 
 		// The flow does not exist, so the metric's flow label must be the
@@ -189,16 +189,16 @@ var _ = Describe("expiring a finished task", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the task to be deleted, got %v", err)
 	})
 
-	It("backfills expiresAt on a task that reached Escalated before this field existed", func() {
+	It("backfills expiresAt on a task that reached TaskFailed before this field existed", func() {
 		fx.makeFlow(withTTL)
 		tk := fx.makeTask()
 		// A task from before the TTL machinery existed: terminal, with
 		// nothing in flight, but no date — Advance never ran to stamp one.
-		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
 		labels := prometheus.Labels{
-			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseEscalated), metrics.LabelSeverity: string(transition.EndingEscalated),
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseTaskFailed), metrics.LabelSeverity: string(transition.EndingTaskFailed), metrics.LabelOutcome: string(transition.OutcomeNoAnswer),
 		}
 		before := testutil.ToFloat64(metrics.TaskOutcomes.With(labels))
 
@@ -218,7 +218,7 @@ var _ = Describe("expiring a finished task", func() {
 
 	It("leaves expiresAt unset when backfilling and the flow is gone too", func() {
 		tk := fx.makeTask() // no makeFlow: Spec.Flow names nothing that exists
-		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 
 		fx.reconcile()

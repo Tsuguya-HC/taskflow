@@ -108,7 +108,7 @@ var _ = Describe("a task running from its copy of the handlers", func() {
 
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed), "the copy has no handler, and the live one is not a stand-in for it")
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed), "the copy has no handler, and the live one is not a stand-in for it")
 		Expect(jobsOf(fx)).To(BeEmpty())
 	})
 

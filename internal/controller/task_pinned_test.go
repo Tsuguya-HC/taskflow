@@ -110,7 +110,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 
 	outcome := func(flow string) prometheus.Labels {
 		return prometheus.Labels{
-			metrics.LabelFlow: flow, metrics.LabelPhase: string(flowv1alpha1.PhaseFailed), metrics.LabelSeverity: string(transition.EndingFailed),
+			metrics.LabelFlow: flow, metrics.LabelPhase: string(flowv1alpha1.PhaseTaskFailed), metrics.LabelSeverity: string(transition.EndingTaskFailed), metrics.LabelOutcome: string(transition.OutcomeStructural),
 		}
 	}
 
@@ -223,7 +223,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 		Context("when a binding names a handler that does not exist", func() {
 			failsWith := func(tk *flowv1alpha1.Task) {
 				GinkgoHelper()
-				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 				cond := ready(tk)
 				Expect(cond).NotTo(BeNil())
 				Expect(cond.Status).To(Equal(metav1.ConditionFalse))
@@ -274,7 +274,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 				fx.reconcile()
 
 				tk := fx.get()
-				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 				Expect(ready(tk).Reason).To(Equal(reasonBroken))
 				Expect(ready(tk).Message).To(ContainSubstring("do not fit in one object"))
 				Expect(fx.revisions()).To(BeEmpty())
@@ -295,7 +295,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 				fx.reconcile()
 
 				tk := fx.get()
-				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+				Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 				Expect(ready(tk).Message).To(ContainSubstring("does not exist"))
 				Expect(tk.Status.ExpiresAt).To(BeNil())
 				Expect(fx.revisions()).To(BeEmpty())
@@ -338,7 +338,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 			fx.reconcile()
 
 			tk := fx.get()
-			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 			cond := ready(tk)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
@@ -355,7 +355,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 			fx.reconcile()
 
 			tk = fx.get()
-			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 			Expect(ready(tk).Reason).To(Equal(reasonLost), "it never changes")
 			Expect(tk.Status.ExpiresAt).NotTo(BeNil())
 			Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
@@ -374,7 +374,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 			fx.reconcile()
 
 			tk := fx.get()
-			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 			Expect(ready(tk).Reason).To(Equal(reasonLost))
 			Expect(tk.Status.ExpiresAt).To(BeNil())
 		})
@@ -387,7 +387,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 			fx.reconcile()
 
 			tk := fx.get()
-			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 			Expect(ready(tk).Reason).To(Equal(reasonLost))
 			Expect(tk.Status.ExpiresAt).To(BeNil())
 			Expect(fx.revisions()).To(BeEmpty())

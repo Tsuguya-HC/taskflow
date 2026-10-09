@@ -139,7 +139,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 
 		tk := get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 
 		// A second reconcile must not rewrite a task that already failed —
@@ -156,7 +156,7 @@ var _ = Describe("starting a task", func() {
 
 		reconcileOnce()
 
-		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 	})
 
 	// A fork added to a phase the run never reaches must not stop a task
@@ -206,7 +206,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 
 		tk := get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
 			types.NamespacedName{Name: runner.JobName(name, phaseInvestigate, 1, 0), Namespace: resourceNamespace},
 			&batchv1.Job{}))).To(BeTrue(), "no Job should exist for a phase that cannot run")
@@ -238,14 +238,14 @@ var _ = Describe("starting a task", func() {
 	// rename it out from under a task that already finished. Neither of the
 	// framework's own terminal phases needs the flow at all to know it is
 	// done, so this must never reach fail().
-	It("leaves an Escalated task alone when its flow disappears", func() {
+	It("leaves a TaskFailed task alone when its flow disappears", func() {
 		flow := makeFlow()
 		makeHandler()
 		makeTask()
 
 		reconcileOnce()
 		tk := get()
-		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
 		tk.Status.CurrentRuns = nil
 		Expect(k8sClient.Status().Update(ctx, tk)).To(Succeed())
 
@@ -253,11 +253,11 @@ var _ = Describe("starting a task", func() {
 
 		reconcileOnce()
 
-		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated),
-			"a deleted flow must not overwrite an Escalated task with Failed")
+		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
+			"a deleted flow must not overwrite a TaskFailed task")
 	})
 
-	// Unlike Escalated, a flow-defined terminal status (an ordinary name with
+	// Unlike TaskFailed, a flow-defined terminal status (an ordinary name with
 	// no outgoing binding) can only be recognized as terminal by fail's own
 	// idempotency guard once the flow that declared it is gone — there is no
 	// binding table left to consult.
@@ -387,7 +387,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce() // begins the task on phaseInvestigate
 		reconcileOnce() // tries to build the Job, and the mismatch surfaces here
 
-		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 	})
 
 	// The r.Get at the top of ensureJob only ever misses a Job that is

@@ -158,7 +158,7 @@ const (
 	// run is given them.
 	//
 	// EnvEnding is what stopping there meant — Success or Failure as the flow
-	// declared it, Escalated or Failed for the framework's own two, Undeclared
+	// declared it, TaskFailed for the framework's own, Undeclared
 	// for a flow that never said. EnvEndingPhase is the status name it stopped
 	// at, which EnvPhase cannot carry because that says what this run is, and
 	// this run is the cleanup. EnvEndingOutcome is the framework's account of

@@ -104,9 +104,9 @@ spec:
                               flow: this framework does not know what the work is, so it has no business
                               naming its stages. "調査" and "Planning" are equally valid.
 
-                              Three names are the framework's rather than the author's. Two of them are
-                              answers it decides — see ReservedPhases — and the third is PhaseFinally,
-                              which is not an answer at all but the name a cleanup run is recorded under.
+                              One name is the framework's rather than the author's. It is an answer it
+                              decides — see ReservedPhases — and PhaseFinally, which is not an answer
+                              at all but the name a cleanup run is recorded under.
                             type: string
                           type: array
                           x-kubernetes-list-type: set
@@ -171,7 +171,7 @@ spec:
                 description: |-
                   MaxRunsPerPhase caps how many times any one phase may run in a task of
                   this flow. A move to a phase that has already run this many times goes
-                  to Escalated instead (ADR-0012).
+                  to TaskFailed instead (ADR-0012).
 
                   It counts runs of a phase rather than the edges that led back to one.
                   Counting edges charged a cycle once for every phase it re-entered, so
@@ -250,10 +250,10 @@ spec:
                   failed:
                     default: 168h
                     description: |-
-                      Failed applies to a task that stopped at Escalated or Failed, however
+                      Failed applies to a task that stopped at TaskFailed, however
                       it got there — the framework forcing a stop or the flow itself
-                      declaring the edge with next. A human has to look at those, so they
-                      wait longer.
+                      declaring the edge with next. A human has to look at it, so it
+                      waits longer.
                     type: string
                   succeeded:
                     default: 1h
@@ -493,10 +493,10 @@ spec:
             - message: terminals may only name a phase with no binding of its own,
                 since a phase something binds is not where the flow ends
               rule: '!has(self.terminals) || self.terminals.all(p, !(p in self.bindings))'
-            - message: Escalated and Failed are the framework's own endings and their
-                meaning is not the flow's to declare
-              rule: '!has(self.terminals) || (!(''Escalated'' in self.terminals) &&
-                !(''Failed'' in self.terminals))'
+            - message: TaskFailed is the framework's own ending and its meaning is
+                not the flow's to declare (Escalated and Failed are its old names)
+              rule: '!has(self.terminals) || ((''TaskFailed'' in self.terminals) ==
+                false && !(''Escalated'' in self.terminals) && !(''Failed'' in self.terminals))'
           status:
             description: |-
               TaskFlowStatus reports whether the flow was accepted. Nothing reconciles a

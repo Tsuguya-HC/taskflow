@@ -45,13 +45,13 @@ const (
 
 func forkFlow() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	toSort := func() map[flowv1alpha1.Phase]string {
-		return map[flowv1alpha1.Phase]string{phaseSort: "done", flowv1alpha1.PhaseEscalated: dirStuck}
+		return map[flowv1alpha1.Phase]string{phaseSort: "done", flowv1alpha1.PhaseTaskFailed: dirStuck}
 	}
 	return map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 		phasePick: {
 			Handler: "pick",
 			Next: map[flowv1alpha1.Phase]string{
-				phaseSecurity: dirSecurity, phaseLogic: dirLogic, flowv1alpha1.PhaseEscalated: dirStuck,
+				phaseSecurity: dirSecurity, phaseLogic: dirLogic, flowv1alpha1.PhaseTaskFailed: dirStuck,
 			},
 			Join: &flowv1alpha1.JoinSpec{Phase: phaseSort, Always: []flowv1alpha1.Phase{phaseTests}},
 		},
@@ -98,22 +98,20 @@ func TestAForkThatStops(t *testing.T) {
 		next    flowv1alpha1.Phase
 		outcome Outcome
 	}{
-		"nothing written":              {dir: "", next: flowv1alpha1.PhaseEscalated, outcome: OutcomeNoAnswer},
-		"a word nothing declares":      {dir: "maybe", next: flowv1alpha1.PhaseEscalated, outcome: OutcomeNoAnswer},
-		"escalating on purpose":        {dir: dirStuck, next: flowv1alpha1.PhaseEscalated, outcome: OutcomeDeclined},
-		"escalating beside a branch":   {dir: dirSecurity + "/" + dirStuck, next: flowv1alpha1.PhaseEscalated, outcome: OutcomeNoAnswer},
-		"a branch at its run limit":    {dir: dirLogic, next: flowv1alpha1.PhaseEscalated, outcome: OutcomeRunLimitReached},
-		"one word, two statuses":       {dir: dirDup, next: flowv1alpha1.PhaseFailed, outcome: OutcomeStructural},
-		"Failed named as a status":     {dir: dirBroken, next: flowv1alpha1.PhaseFailed, outcome: OutcomeStructural},
-		"an edge straight to the join": {dir: "none", next: flowv1alpha1.PhaseFailed, outcome: OutcomeStructural},
-		"a branch nothing binds":       {dir: "later", next: flowv1alpha1.PhaseFailed, outcome: OutcomeStructural},
+		"nothing written":              {dir: "", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
+		"a word nothing declares":      {dir: "maybe", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
+		"escalating on purpose":        {dir: dirStuck, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeDeclined},
+		"escalating beside a branch":   {dir: dirSecurity + "/" + dirStuck, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
+		"a branch at its run limit":    {dir: dirLogic, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeRunLimitReached},
+		"one word, two statuses":       {dir: dirDup, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeStructural},
+		"an edge straight to the join": {dir: "none", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeStructural},
+		"a branch nothing binds":       {dir: "later", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeStructural},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			b := forkFlow()
 			b[phasePick].Next["重複"] = dirDup
 			b[phasePick].Next["二重"] = dirDup
-			b[phasePick].Next[flowv1alpha1.PhaseFailed] = dirBroken
 			b[phasePick].Next[phaseSort] = "none"
 			b[phasePick].Next["未実装"] = "later"
 			runs := ranOnce(phasePick)
@@ -132,8 +130,8 @@ func TestAnAlwaysBranchAtItsLimitStopsTheFork(t *testing.T) {
 	runs := ranOnce(phasePick)
 	runs[phaseTests] = 2
 	got := Fork(Input{Bindings: forkFlow(), Phase: phasePick, Directory: dirSecurity, Runs: runs, MaxRuns: 2})
-	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeRunLimitReached || !strings.Contains(got.Detail, string(phaseTests)) {
-		t.Fatalf("got %+v, want Escalated/RunLimitReached naming tests", got)
+	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeRunLimitReached || !strings.Contains(got.Detail, string(phaseTests)) {
+		t.Fatalf("got %+v, want TaskFailed/RunLimitReached naming tests", got)
 	}
 }
 
@@ -159,8 +157,8 @@ func TestAForkThatIsNotOne(t *testing.T) {
 		"a limit below one": {Bindings: forkFlow(), Phase: phasePick, Directory: dirSecurity},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := Fork(in); got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
-				t.Fatalf("got %+v, want Failed/Structural", got)
+			if got := Fork(in); got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeStructural {
+				t.Fatalf("got %+v, want TaskFailed/Structural", got)
 			}
 		})
 	}

@@ -111,7 +111,7 @@ type SettledBranch struct {
 //     (task_controller.go) reads as "written but never started" and drives
 //     all over again. If branches that did not settle this reconcile are
 //     still running, nothing moves yet — the task stays at the fork.
-//   - if one of them instead decided the task's ending (Escalated, Failed,
+//   - if one of them instead decided the task's ending (TaskFailed,
 //     ... — anything but the join; the first such branch in phase order,
 //     when more than one did) — every other settled branch is recorded
 //     first, in phase order, each under its own outcome; every branch still

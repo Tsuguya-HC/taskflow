@@ -223,9 +223,9 @@ spec:
                         flow: this framework does not know what the work is, so it has no business
                         naming its stages. "調査" and "Planning" are equally valid.
 
-                        Three names are the framework's rather than the author's. Two of them are
-                        answers it decides — see ReservedPhases — and the third is PhaseFinally,
-                        which is not an answer at all but the name a cleanup run is recorded under.
+                        One name is the framework's rather than the author's. It is an answer it
+                        decides — see ReservedPhases — and PhaseFinally, which is not an answer
+                        at all but the name a cleanup run is recorded under.
                       type: string
                     runID:
                       format: int32
@@ -283,7 +283,7 @@ spec:
                 description: |-
                   ExpiresAt is when the controller deletes this task, set once it stops.
                   The moment is fixed here rather than derived from the flow's ttl each
-                  time, so a task at Escalated keeps its date even after the flow that
+                  time, so a task at TaskFailed keeps its date even after the flow that
                   set it is edited or gone — the same reason the reserved phases need no
                   flow to be terminal.
                 format: date-time
@@ -310,9 +310,9 @@ spec:
                         flow: this framework does not know what the work is, so it has no business
                         naming its stages. "調査" and "Planning" are equally valid.
 
-                        Three names are the framework's rather than the author's. Two of them are
-                        answers it decides — see ReservedPhases — and the third is PhaseFinally,
-                        which is not an answer at all but the name a cleanup run is recorded under.
+                        One name is the framework's rather than the author's. It is an answer it
+                        decides — see ReservedPhases — and PhaseFinally, which is not an answer
+                        at all but the name a cleanup run is recorded under.
                       type: string
                     reason:
                       description: |-
@@ -360,9 +360,9 @@ spec:
                   flow: this framework does not know what the work is, so it has no business
                   naming its stages. "調査" and "Planning" are equally valid.
 
-                  Three names are the framework's rather than the author's. Two of them are
-                  answers it decides — see ReservedPhases — and the third is PhaseFinally,
-                  which is not an answer at all but the name a cleanup run is recorded under.
+                  One name is the framework's rather than the author's. It is an answer it
+                  decides — see ReservedPhases — and PhaseFinally, which is not an answer
+                  at all but the name a cleanup run is recorded under.
                 type: string
               runID:
                 description: |-

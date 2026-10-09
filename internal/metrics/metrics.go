@@ -46,28 +46,38 @@ const (
 // TaskOutcomes counts tasks by how they ended.
 //
 // severity is the ending, not the phase: Success and Failure as the flow
-// declared them, Escalated and Failed for the framework's own two, and
+// declared them, TaskFailed for the framework's own, and
 // Undeclared for a flow that stopped somewhere without ever saying what
 // stopping there means. Keeping Undeclared as a value of its own is what
 // makes "no flow has declared its endings yet" visible instead of looking
 // like a quiet run of successes.
 //
+// outcome is the framework's account of the move that stopped the task —
+// Declared for one that followed an edge the flow wrote down, NoAnswer for
+// one whose run gave no single answer, RunLimitReached for one stopped at
+// the run limit, Structural for one whose definition was broken. It is what
+// separates the two cases sharing the TaskFailed phase: work that never
+// concluded, and a definition that was broken. Like every label here its
+// cardinality is fixed by the code, not by a task.
+//
 // flow is either the name of a TaskFlow that exists or FlowUnresolved, never
 // a caller-supplied string that failed to resolve to one — Task.spec.flow has
 // no length or pattern limit, and a task's own author decides it, so treating
 // it as a label value would let cardinality grow at runtime by whoever can
-// create Tasks. Both other labels are the phases and endings a flow's own
-// author declared in git, so the cardinality of this metric is the number of
-// flows times the number of phases they declare, plus exactly one row for
-// FlowUnresolved — a flow fails to resolve only through fail(), which always
-// lands on Failed, so the phase and severity paired with it never vary —
-// bounded by what is in git, not by anything a task can do at runtime.
+// create Tasks. The other labels are the phases and endings a flow's own
+// author declared in git and the framework's own account of the move, so the
+// cardinality of this metric is the number of flows times the number of
+// phases they declare times the outcomes that can stop them, plus exactly one
+// row for FlowUnresolved — a flow fails to resolve only through fail(), which
+// always lands on TaskFailed, so the phase, severity and outcome paired with
+// it never vary — bounded by what is in git and by the code, not by anything
+// a task can do at runtime.
 var TaskOutcomes = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "taskflow_task_outcomes_total",
 		Help: "Tasks that reached a phase they stop at, by what that ending means.",
 	},
-	[]string{LabelFlow, LabelPhase, LabelSeverity},
+	[]string{LabelFlow, LabelPhase, LabelSeverity, LabelOutcome},
 )
 
 // FinallyOutcomes counts the cleanup runs that follow an ending, by whether
@@ -91,9 +101,9 @@ var FinallyOutcomes = prometheus.NewCounterVec(
 	[]string{LabelFlow, LabelOutcome},
 )
 
-// PrimeOutcome creates the child series for one ending and leaves it at zero,
-// so a later increment reads as a rise rather than as a series appearing from
-// nowhere.
+// PrimeOutcome creates the child series for one ending and one outcome and
+// leaves it at zero, so a later increment reads as a rise rather than as a
+// series appearing from nowhere.
 //
 // A CounterVec's child is born at its first Inc, with no zero sample before
 // it, and a range function given a single sample returns nothing at all — so
@@ -105,9 +115,9 @@ var FinallyOutcomes = prometheus.NewCounterVec(
 //
 // The caller decides which endings exist, because that is a question about
 // flows; this package only knows how to say it.
-func PrimeOutcome(flow, phase, severity string) {
+func PrimeOutcome(flow, phase, severity, outcome string) {
 	TaskOutcomes.With(prometheus.Labels{
-		LabelFlow: flow, LabelPhase: phase, LabelSeverity: severity,
+		LabelFlow: flow, LabelPhase: phase, LabelSeverity: severity, LabelOutcome: outcome,
 	})
 }
 

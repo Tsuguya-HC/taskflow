@@ -58,13 +58,13 @@ var _ = Describe("a fork", func() {
 
 	// setUp makes the fork's flow and a handler for every phase of it.
 	setUp := func(mut ...func(*flowv1alpha1.TaskHandler)) {
-		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirForkDone, flowv1alpha1.PhaseEscalated: dirStuck}
+		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirForkDone, flowv1alpha1.PhaseTaskFailed: dirStuck}
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Bindings = map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 				phaseInvestigate: {
 					Handler: fx.name,
 					Next: map[flowv1alpha1.Phase]string{
-						security: string(security), logic: string(logic), flowv1alpha1.PhaseEscalated: dirStuck,
+						security: string(security), logic: string(logic), flowv1alpha1.PhaseTaskFailed: dirStuck,
 					},
 					Join: &flowv1alpha1.JoinSpec{Phase: phaseReport, Always: []flowv1alpha1.Phase{tests}},
 				},
@@ -189,7 +189,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		lines := make([]string, 0, len(tk.Status.History))
 		for _, h := range tk.Status.History {
@@ -232,7 +232,7 @@ var _ = Describe("a fork", func() {
 		forked(string(security))
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("run as Jobs"))))
 	})
 
@@ -305,7 +305,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("which does not exist"))))
 	})
 
@@ -328,7 +328,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		var retried batchv1.Job
 		err := k8sClient.Get(fx.ctx, types.NamespacedName{
 			Name: runner.JobName(fx.name, security, 3, 1), Namespace: resourceNamespace,
@@ -345,7 +345,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		last := tk.Status.History[len(tk.Status.History)-1]
 		Expect(last.Phase).To(Equal(security))
 		Expect(last.Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
@@ -360,7 +360,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[len(tk.Status.History)-1].Phase).To(Equal(security))
 	})
 
@@ -372,7 +372,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[len(tk.Status.History)-1].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 	})
 
@@ -399,7 +399,7 @@ var _ = Describe("a fork", func() {
 
 		fx.reconcile()
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer forks"))))
 	})
 
@@ -459,7 +459,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer says who fills run"))))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests),
@@ -484,7 +484,7 @@ var _ = Describe("a fork", func() {
 		tk := fx.get()
 		Expect(tk.Status.Conditions).NotTo(ContainElement(HaveField("Message", ContainSubstring("no longer says"))),
 			"the copy still says who fills it")
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated),
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 			"the branch that never started is judged like any other, not reported as a broken flow")
 		Expect(tk.Status.History[len(tk.Status.History)-1].Phase).To(Equal(security))
 	})
@@ -499,7 +499,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("no longer says what run"))))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", reasonBroken))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
@@ -543,7 +543,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("lost its binding"))))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)).To(HaveField("Reason", reasonBroken))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
@@ -582,7 +582,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Reason).To(Equal(reasonLost))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
@@ -602,7 +602,7 @@ var _ = Describe("a fork", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).To(ContainSubstring("does not exist"))
 		Expect(tk.Status.CurrentRuns).To(BeEmpty())
 		Expect(cancelledLines(tk)).To(ConsistOf(logic, security, tests))
@@ -626,7 +626,7 @@ var _ = Describe("a fork", func() {
 			spec.Containers[0].VolumeMounts[0].Name = contract.WorkspaceVolume
 		}
 		cleanupName := fx.name + "-cleanup"
-		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirForkDone, flowv1alpha1.PhaseEscalated: dirStuck}
+		toReport := map[flowv1alpha1.Phase]string{phaseReport: dirForkDone, flowv1alpha1.PhaseTaskFailed: dirStuck}
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{}
 			f.Spec.Finally = &flowv1alpha1.FinallySpec{Handler: cleanupName, Done: dirForkDone}
@@ -634,7 +634,7 @@ var _ = Describe("a fork", func() {
 				phaseInvestigate: {
 					Handler: fx.name,
 					Next: map[flowv1alpha1.Phase]string{
-						security: string(security), logic: string(logic), flowv1alpha1.PhaseEscalated: dirStuck,
+						security: string(security), logic: string(logic), flowv1alpha1.PhaseTaskFailed: dirStuck,
 					},
 					Join: &flowv1alpha1.JoinSpec{Phase: phaseReport, Always: []flowv1alpha1.Phase{tests}},
 				},
@@ -659,11 +659,11 @@ var _ = Describe("a fork", func() {
 		})
 
 		forked(string(logic) + "/" + string(security))
-		answer(jobOf(logic, 2), dirStuck) // decides Escalated; security(3) and tests(4) are cancelled
+		answer(jobOf(logic, 2), dirStuck) // decides TaskFailed; security(3) and tests(4) are cancelled
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(taskstate.Current(&tk.Status)).NotTo(BeNil(), "the flow declares a cleanup run")
 		Expect(taskstate.Current(&tk.Status).Phase).To(Equal(flowv1alpha1.PhaseFinally))
 
@@ -689,11 +689,11 @@ var _ = Describe("a fork", func() {
 		Expect(k8sClient.Update(fx.ctx, &flow)).To(Succeed())
 
 		forked(string(logic) + "/" + string(security))
-		answer(jobOf(logic, 2), dirStuck) // decides Escalated; security(3) and tests(4) are cancelled
-		fx.reconcile()                    // settles Escalated; no finally, so ExpiresAt is set in the same write
+		answer(jobOf(logic, 2), dirStuck) // decides TaskFailed; security(3) and tests(4) are cancelled
+		fx.reconcile()                    // settles TaskFailed; no finally, so ExpiresAt is set in the same write
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.ExpiresAt).NotTo(BeNil(), "no finally means the date is written the moment the task stops")
 		Expect(cancelledLines(tk)).To(ConsistOf(security, tests))
 

@@ -48,8 +48,8 @@ const (
 	TerminalSuccess TerminalSeverity = "Success"
 	// TerminalFailure is an ending somebody has to see. The run finished and
 	// the handler concluded; what it concluded is that something is wrong.
-	// This is not Escalated — nothing is undecided — and not Failed, which
-	// is a defect in the flow rather than a finding about the work.
+	// This is not TaskFailed — nothing about the work failed to conclude here —
+	// which is a finding about the flow rather than a finding about the work.
 	TerminalFailure TerminalSeverity = "Failure"
 )
 
@@ -95,7 +95,7 @@ type PhaseBinding struct {
 // and can be checked at admission; what the run decides is only which of them
 // to start (P9). What each branch may do is limited so that the fork and its
 // join enclose a region with one way in and one way out: a branch leaves only
-// to Join.Phase or to Escalated, and nothing outside reaches into it (ADR-0013
+// to Join.Phase or to TaskFailed, and nothing outside reaches into it (ADR-0013
 // 決定2). For now a branch is exactly one phase (決定3).
 type JoinSpec struct {
 	// Phase is where the branches meet. It must be a phase this flow binds.
@@ -124,10 +124,10 @@ type TTLSpec struct {
 	// +kubebuilder:default="1h"
 	// +optional
 	Succeeded *metav1.Duration `json:"succeeded,omitempty"`
-	// Failed applies to a task that stopped at Escalated or Failed, however
+	// Failed applies to a task that stopped at TaskFailed, however
 	// it got there — the framework forcing a stop or the flow itself
-	// declaring the edge with next. A human has to look at those, so they
-	// wait longer.
+	// declaring the edge with next. A human has to look at it, so it
+	// waits longer.
 	// +kubebuilder:default="168h"
 	// +optional
 	Failed *metav1.Duration `json:"failed,omitempty"`
@@ -160,8 +160,8 @@ type FlowWorkspace struct {
 
 // FinallySpec is the run that follows the ending.
 //
-// A task stops at a phase nothing binds, or at one of the framework's own two
-// answers, and until this existed that was the last thing that happened to it.
+// A task stops at a phase nothing binds, or at the framework's own
+// answer, and until this existed that was the last thing that happened to it.
 // Nothing could be taken down afterwards — a branch, a comment, a post — and
 // the only place that can still reach those is a pod of this task, while its
 // uid and its workspace are still there. So a flow may name one handler to run
@@ -191,7 +191,7 @@ type FinallySpec struct {
 // created, and not re-derived per task.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.terminals) || self.terminals.all(p, !(p in self.bindings))",message="terminals may only name a phase with no binding of its own, since a phase something binds is not where the flow ends"
-// +kubebuilder:validation:XValidation:rule="!has(self.terminals) || (!('Escalated' in self.terminals) && !('Failed' in self.terminals))",message="Escalated and Failed are the framework's own endings and their meaning is not the flow's to declare"
+// +kubebuilder:validation:XValidation:rule="!has(self.terminals) || (('TaskFailed' in self.terminals) == false && !('Escalated' in self.terminals) && !('Failed' in self.terminals))",message="TaskFailed is the framework's own ending and its meaning is not the flow's to declare (Escalated and Failed are its old names)"
 type TaskFlowSpec struct {
 	Profile Profile `json:"profile"`
 
@@ -226,7 +226,7 @@ type TaskFlowSpec struct {
 
 	// MaxRunsPerPhase caps how many times any one phase may run in a task of
 	// this flow. A move to a phase that has already run this many times goes
-	// to Escalated instead (ADR-0012).
+	// to TaskFailed instead (ADR-0012).
 	//
 	// It counts runs of a phase rather than the edges that led back to one.
 	// Counting edges charged a cycle once for every phase it re-entered, so

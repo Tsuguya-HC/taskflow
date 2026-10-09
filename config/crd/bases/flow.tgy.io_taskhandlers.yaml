@@ -8986,14 +8986,14 @@ spec:
               phase:
                 description: |-
                   Phase this handler can fill — a status name from the flow's own
-                  vocabulary. The framework owns only two names and refuses those; every
+                  vocabulary. The framework owns only one name and refuses it; every
                   other string is the author's to choose.
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
-                - message: Escalated and Failed are decided by the controller; a handler
-                    cannot fill them
-                  rule: self != 'Escalated' && self != 'Failed'
+                - message: TaskFailed is decided by the controller; a handler cannot
+                    fill it (Escalated and Failed are its old names)
+                  rule: self != 'TaskFailed' && self != 'Escalated' && self != 'Failed'
               runner:
                 default:
                   type: Job

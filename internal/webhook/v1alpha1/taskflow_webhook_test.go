@@ -92,10 +92,10 @@ var _ = Describe("TaskFlow validating webhook", func() {
 		Expect(k8sClient.Create(ctx, flow)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, flow)).To(Succeed()) })
 
-		flow.Spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
+		flow.Spec.Bindings[phaseInvestigate].Next["Failed"] = "broken"
 		err := k8sClient.Update(ctx, flow)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("Failed"))
+		Expect(err.Error()).To(ContainSubstring("TaskFailed"))
 	})
 
 	It("admits an edit that leaves the flow coherent", func() {
@@ -103,7 +103,7 @@ var _ = Describe("TaskFlow validating webhook", func() {
 		Expect(k8sClient.Create(ctx, flow)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, flow)).To(Succeed()) })
 
-		flow.Spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = "escalate"
+		flow.Spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseTaskFailed] = "refuse"
 		Expect(k8sClient.Update(ctx, flow)).To(Succeed())
 	})
 })

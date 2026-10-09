@@ -104,9 +104,9 @@ func TestClosedOutRefusesAnUndeclaredDirectory(t *testing.T) {
 		t.Skip("root ignores directory modes")
 	}
 	out := prepared(t)
-	err := os.Mkdir(filepath.Join(out, "escalate"), 0o755)
+	err := os.Mkdir(filepath.Join(out, "undeclared"), 0o755)
 	if !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("mkdir escalate/ in the closed run: err = %v, want permission denied", err)
+		t.Fatalf("mkdir undeclared/ in the closed run: err = %v, want permission denied", err)
 	}
 }
 

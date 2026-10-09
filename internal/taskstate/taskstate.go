@@ -168,7 +168,7 @@ func InFinally(status *flowv1alpha1.TaskStatus) bool {
 // would be answering it both ways.
 func needsAHuman(e transition.Ending) bool {
 	switch e {
-	case transition.EndingEscalated, transition.EndingFailed, transition.EndingFailure:
+	case transition.EndingTaskFailed, transition.EndingFailure:
 		return true
 	default:
 		return false
@@ -415,8 +415,8 @@ func FinishFinally(
 		})
 	}
 	// The ending's own answer to "does somebody have to come and look" is still
-	// true — a task that escalated is no less escalated for having been tidied
-	// up after — so both reasons for the longer ttl are taken together.
+	// true — a task that stopped at TaskFailed is no less stopped for having been
+	// tidied up after — so both reasons for the longer ttl are taken together.
 	stamp(status, flow, !done || endingNeededAHuman, now)
 }
 
@@ -426,7 +426,7 @@ func FinishFinally(
 // Which of the two durations applies follows one rule: an ending somebody
 // has to come and look at keeps the task around for ttl.failed, and every
 // other ending takes ttl.succeeded. That covers the framework's own two
-// however they were reached — including an Escalated edge the flow declared
+// however they were reached — including a TaskFailed edge the flow declared
 // with next — and an ending the flow itself marked Failure, which is a task
 // that finished with bad news and would otherwise be swept away in an hour
 // while nobody was looking. A nil flow, a nil ttl or a nil duration leaves
@@ -498,7 +498,7 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.Tas
 
 // FailAs is Fail with the reason Ready carries.
 func FailAs(status *flowv1alpha1.TaskStatus, readyReason, message string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
-	status.Phase = flowv1alpha1.PhaseFailed
+	status.Phase = flowv1alpha1.PhaseTaskFailed
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    ConditionReady,
 		Status:  metav1.ConditionFalse,
@@ -555,9 +555,9 @@ func RetryInfra(status *flowv1alpha1.TaskStatus) {
 }
 
 // InfraRetriesExhausted reports whether another infrastructure retry is
-// allowed. When it is not, the task escalates rather than failing: something
-// outside the handler kept it from running, and that is for a human to look
-// at.
+// allowed. When it is not, the task stops at TaskFailed rather than failing outright:
+// something outside the handler kept it from running, and that is for a human
+// to look at.
 func InfraRetriesExhausted(status *flowv1alpha1.TaskStatus, max int32) bool {
 	run := Current(status)
 	if run == nil {

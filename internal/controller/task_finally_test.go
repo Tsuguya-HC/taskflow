@@ -213,7 +213,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		// numbers together is the mistake this design set out not to inherit.
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
 			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport),
-			metrics.LabelSeverity: string(transition.EndingUndeclared),
+			metrics.LabelSeverity: string(transition.EndingUndeclared), metrics.LabelOutcome: string(transition.OutcomeDeclared),
 		}))).To(BeNumerically("==", 1))
 	})
 
@@ -287,7 +287,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(cleanupJob()).NotTo(BeNil(), "the cleanup run is still started; the reap ahead of it does not block it")
 	})
 
-	// Escalated is the motive for the whole feature: nothing can be bound to
+	// TaskFailed is the motive for the whole feature: nothing can be bound to
 	// it, so until now a task that ended there had no run left in which to put
 	// anything back.
 	It("runs after an escalation, which nothing could be bound to", func() {
@@ -298,18 +298,18 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		runPhase("") // exit 0, said nothing
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue())
 
 		fx.reconcile()
-		Expect(envOf(cleanupJob(), runner.EnvEnding)).To(Equal(string(transition.EndingEscalated)))
+		Expect(envOf(cleanupJob(), runner.EnvEnding)).To(Equal(string(transition.EndingTaskFailed)))
 		Expect(envOf(cleanupJob(), runner.EnvEndingOutcome)).To(Equal(string(transition.OutcomeNoAnswer)),
 			"a cleanup run may report differently for a run that said nothing, so it is told which it was")
 		finish(cleanupJob(), dirDone+"\nthe branch is gone")
 		fx.reconcile()
 
 		tk = fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated),
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 			"the escalation stands; somebody still has to come and look at it")
 		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
 		Expect(ready).NotTo(BeNil())
@@ -445,7 +445,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		fx.reconcile() // the flow starts at a phase nothing binds
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue(),
 			"a definition being wrong is no reason to leave behind whatever the task already made")
 		Expect(tk.Status.History).To(BeEmpty())
@@ -455,8 +455,8 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{
 			Name: runner.JobName(fx.name, flowv1alpha1.PhaseFinally, 1, 0), Namespace: resourceNamespace,
 		}, &job)).To(Succeed())
-		Expect(envOf(&job, runner.EnvEnding)).To(Equal(string(transition.EndingFailed)))
-		Expect(envOf(&job, runner.EnvEndingPhase)).To(Equal(string(flowv1alpha1.PhaseFailed)))
+		Expect(envOf(&job, runner.EnvEnding)).To(Equal(string(transition.EndingTaskFailed)))
+		Expect(envOf(&job, runner.EnvEndingPhase)).To(Equal(string(flowv1alpha1.PhaseTaskFailed)))
 		Expect(envOf(&job, runner.EnvEndingOutcome)).To(BeEmpty())
 	})
 
@@ -561,7 +561,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 		fx.reconcile()
 
 		tk = fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message", ContainSubstring("which does not exist"))))
 		Expect(tk.Status.History).To(HaveLen(1), "run 2 never settled, so it left nothing behind")
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue())
@@ -573,8 +573,8 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 			Name: runner.JobName(fx.name, flowv1alpha1.PhaseFinally, 3, 0), Namespace: resourceNamespace,
 		}, &cleanup)).To(Succeed())
 
-		Expect(envOf(&cleanup, runner.EnvEnding)).To(Equal(string(transition.EndingFailed)))
-		Expect(envOf(&cleanup, runner.EnvEndingPhase)).To(Equal(string(flowv1alpha1.PhaseFailed)))
+		Expect(envOf(&cleanup, runner.EnvEnding)).To(Equal(string(transition.EndingTaskFailed)))
+		Expect(envOf(&cleanup, runner.EnvEndingPhase)).To(Equal(string(flowv1alpha1.PhaseTaskFailed)))
 		Expect(envOf(&cleanup, runner.EnvEndingOutcome)).To(BeEmpty(),
 			"history's one line is run 1's verdict, not this ending's — reporting nothing is the honest answer")
 	})

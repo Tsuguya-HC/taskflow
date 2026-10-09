@@ -256,16 +256,24 @@ var _ = Describe("the API refuses what the design forbids", func() {
 		invalid(k8sClient.Create(ctx, flow), "spec.profile")
 	})
 
-	DescribeTable("refuses a handler bound to a name the framework owns",
-		func(reserved flowv1alpha1.Phase) {
+	It("refuses a handler bound to the name the framework owns", func() {
+		h := &flowv1alpha1.TaskHandler{
+			ObjectMeta: metav1.ObjectMeta{Name: "handler-for-taskfailed", Namespace: resourceNamespace},
+			Spec:       flowv1alpha1.TaskHandlerSpec{Phase: flowv1alpha1.PhaseTaskFailed},
+		}
+		invalid(k8sClient.Create(ctx, h), "a handler cannot fill it")
+	})
+
+	DescribeTable("refuses a handler bound to an old terminal, naming the single one",
+		func(old flowv1alpha1.Phase) {
 			h := &flowv1alpha1.TaskHandler{
-				ObjectMeta: metav1.ObjectMeta{Name: "handler-for-" + strings.ToLower(string(reserved)), Namespace: resourceNamespace},
-				Spec:       flowv1alpha1.TaskHandlerSpec{Phase: reserved},
+				ObjectMeta: metav1.ObjectMeta{Name: "handler-for-" + strings.ToLower(string(old)), Namespace: resourceNamespace},
+				Spec:       flowv1alpha1.TaskHandlerSpec{Phase: old},
 			}
-			invalid(k8sClient.Create(ctx, h), "a handler cannot fill them")
+			invalid(k8sClient.Create(ctx, h), "TaskFailed")
 		},
-		Entry("Escalated", flowv1alpha1.PhaseEscalated),
-		Entry("Failed", flowv1alpha1.PhaseFailed),
+		Entry("Escalated", flowv1alpha1.Phase("Escalated")),
+		Entry("Failed", flowv1alpha1.Phase("Failed")),
 	)
 
 	It("accepts a flow that says what its endings mean", func() {
@@ -335,8 +343,9 @@ var _ = Describe("the API refuses what the design forbids", func() {
 			}
 			invalid(k8sClient.Create(ctx, flow), "not the flow's to declare")
 		},
-		Entry("Escalated", flowv1alpha1.PhaseEscalated),
-		Entry("Failed", flowv1alpha1.PhaseFailed),
+		Entry("TaskFailed", flowv1alpha1.PhaseTaskFailed),
+		Entry("Escalated", flowv1alpha1.Phase("Escalated")),
+		Entry("Failed", flowv1alpha1.Phase("Failed")),
 	)
 
 	It("refuses a flow with no bindings at all", func() {
@@ -360,7 +369,7 @@ var _ = Describe("the API refuses what the design forbids", func() {
 		}
 		// Next has no declared destination, so the run it would dispatch could
 		// never produce a directory that maps anywhere — MinProperties=1 stops
-		// that at creation instead of at the first Escalated.
+		// that at creation instead of at the first TaskFailed.
 		invalid(k8sClient.Create(ctx, flow), "next")
 	})
 

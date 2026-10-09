@@ -8,11 +8,12 @@
 **決定**:
 
 1. **宣言された終端を、起きる前から 0 として出す。** 対象は `taskflow_task_outcomes_total`
-   （flow ごとに「終端フェーズ 1 つにつき 1 行」と、予約語 `Escalated` / `Failed` の 2 行）と、
+   （flow ごとに「終端フェーズ 1 つにつき outcome 1 つあたり 1 行」と、予約語 `TaskFailed` の 4 行（`NoAnswer` / `Declined` / `RunLimitReached` / `Structural`）と、
    `finally` を宣言した flow の `taskflow_finally_outcomes_total`（`Declared` / `NoAnswer` の 2 行）の
    両方。同じ「最初の `Inc()` で 1 として生まれる」問題を抱えている点で同型で、片方だけ塞いでも
-   もう片方でまためったに起きないものほど見えない、が成り立つ。severity / outcome はどちらも
-   フェーズ単位で一意に決まるので、**直積にはしない**。系列数は宣言された flow の数とその終端数で
+   もう片方でまためったに起きないものほど見えない、が成り立つ。severity はフェーズ単位で一意に決まるので、宣言された終端は outcome（`Declared` / `Rework`）との
+   直積にはしない。`TaskFailed` の 4 outcome は、作業が結論に届かなかったのか定義が壊れていたのかを
+   区別するために数えるものなので、ここだけ直積にする。系列数は宣言された flow の数とその終端数で
    決まり、上限は git が持つ
 2. **打つのは Task が flow を解決した時。`TaskFlow` の reconciler は新設しない。** 0 が要るのは
    「その flow の Task が終端に着く**前**」であって「TaskFlow が存在する瞬間」ではない。Task の
@@ -26,7 +27,7 @@
    全面移行したが、それは Certificate ごとに series が増える設計だったからで、**こちらは
    git にある flow の数で閉じている**
 4. **`<unresolved>` の 1 行は起動時に出す。** `flow` が解決しなかった場合に出るのは
-   `(<unresolved>, Failed, Failed)` ただ 1 通りで、flow に依存しない。`fail()` は必ず `Failed` に
+   `(<unresolved>, TaskFailed, TaskFailed, Structural)` ただ 1 通りで、flow に依存しない。`fail()` は必ず `TaskFailed` に
    着くので、phase と severity がこれ以外の値と組むことがない
 5. **gauge は足さない。** 「今どれだけの Task が人間を待っているか」は counter ではなく gauge の
    問いで、Argo が `argo_workflows_count`（名前は counter・実体は gauge）を作り直した issue #12589 と
@@ -42,7 +43,7 @@
 いる成熟したプロジェクトは 1 件も見つからなかった**。Prometheus 本体の自己監視 mixin は
 `increase(counter[5m]) > 0` を無防備に使い、Tekton は問題として認識した形跡すらない。それでも
 彼らが困らないのは、対象の counter が頻繁に動くか、取りこぼしても次の機会に気づけるからで、
-**taskflow の `Failure` / `Escalated` はどちらでもない**。design.md §9 が「人間が見るべき瞬間」と
+**taskflow の `Failure` / `TaskFailed` はどちらでもない**。design.md §9 が「人間が見るべき瞬間」と
 定義したものは、その定義上めったに起きず、そして metric は**人間に届く唯一の経路**になっている
 （§5 の表で Event は `Failure` だけ、条件は kubectl を見に行った人にしか届かない）。
 めったに起きないものを取りこぼす向きに壊れているのは、ここでは相場の問題ではなく約束の問題。
@@ -71,7 +72,7 @@ upstream の最終的な答えは provider 側（OpenMetrics の created timesta
   決定 2 が「Task が flow を解決したとき」に打つと決めた以上、0 が実際に取られるかは prime と終端の
   間にスクレイプが 1 回挟まるかどうかで決まり、そこは提供側が握っていない。本番で実測して踏んだ:
   宣言されたディレクトリを何も書かない handler を仕込んだ flow を新しく作り、その 1 本目を流したところ、
-  `Escalated` の系列は**最初のサンプルから 1** で、同じ時刻に生まれた同じ flow の他の 2 系列は 0 だった
+  `TaskFailed` の系列は**最初のサンプルから 1** で、同じ時刻に生まれた同じ flow の他の 2 系列は 0 だった
   — prime は間違いなく走っていて、間に合わなかったのはスクレイプの方。2 本目からは系列が確立している
   ので立ち上がりは見える（同じ実測で `increase() > 0` から alert の発火、Alertmanager での受理まで
   確認した）。残る穴は「その flow の初回」ちょうど 1 回で、しかも run が数十秒で終わる flow に限られる。

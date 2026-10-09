@@ -38,7 +38,7 @@ import (
 //     last line of history;
 //   - the cleanup run follows the run that decided the ending (decidingLine),
 //     and is shown nothing when none did. After a fork's branch stopped the
-//     task it is shown every branch sent to Escalated in the same step, not
+//     task it is shown every branch sent to TaskFailed in the same step, not
 //     only the one that decided it.
 //
 // prev is 0 for a task's first run.
@@ -78,7 +78,7 @@ func ledBy(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, run *flowv1
 		}
 		deciding := history[i]
 		if fork, ok := forkOf(flow, deciding.Phase); ok {
-			return deciding.RunID, escalatedBranches(history[:i+1], flow, fork)
+			return deciding.RunID, stoppedBranches(history[:i+1], flow, fork)
 		}
 		return deciding.RunID, answerOf(deciding)
 	}
@@ -156,11 +156,11 @@ func arrivals(history []flowv1alpha1.HistoryEntry, flow *flowv1alpha1.TaskFlowSp
 	return arrived
 }
 
-// escalatedBranches is every branch of fork that the step which stopped the
-// task sent to Escalated, read back from the end of lines: the branches of the
+// stoppedBranches is every branch of fork that the step which stopped the
+// task sent to TaskFailed, read back from the end of lines: the branches of the
 // fork recorded since its own last line, less those that were cancelled or had
 // reached the join (ADR-0013 決定4・6).
-func escalatedBranches(lines []flowv1alpha1.HistoryEntry, flow *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase) []runner.InputEntry {
+func stoppedBranches(lines []flowv1alpha1.HistoryEntry, flow *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase) []runner.InputEntry {
 	var inputs []runner.InputEntry
 	for _, h := range slices.Backward(lines) {
 		if !isBranchOf(flow, fork, h.Phase) {

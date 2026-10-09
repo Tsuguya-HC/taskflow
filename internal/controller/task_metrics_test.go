@@ -34,7 +34,7 @@ import (
 
 // outcome names one series of taskflow_task_outcomes_total.
 type outcome struct {
-	flow, phase, severity string
+	flow, phase, severity, outcome string
 }
 
 // collectedOutcomes reads the series that exist, rather than asking for one
@@ -65,6 +65,8 @@ func collectedOutcomes() map[outcome]float64 {
 				key.phase = l.GetValue()
 			case metrics.LabelSeverity:
 				key.severity = l.GetValue()
+			case metrics.LabelOutcome:
+				key.outcome = l.GetValue()
 			}
 		}
 		out[key] = d.GetCounter().GetValue()
@@ -132,10 +134,18 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 
 		got := collectedOutcomes()
 		for _, want := range []outcome{
-			{fx.name, string(phaseReport), string(transition.EndingSuccess)},
-			{fx.name, string(phaseBroken), string(transition.EndingFailure)},
-			{fx.name, string(flowv1alpha1.PhaseEscalated), string(transition.EndingEscalated)},
-			{fx.name, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed)},
+			{fx.name, string(phaseReport), string(transition.EndingSuccess), string(transition.OutcomeDeclared)},
+			{fx.name, string(phaseReport), string(transition.EndingSuccess), string(transition.OutcomeRework)},
+			{fx.name, string(phaseBroken), string(transition.EndingFailure), string(transition.OutcomeDeclared)},
+			{fx.name, string(phaseBroken), string(transition.EndingFailure), string(transition.OutcomeRework)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeNoAnswer)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeDeclined)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeRunLimitReached)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeStructural)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeNoAnswer)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeDeclined)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeRunLimitReached)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeStructural)},
 		} {
 			value, ok := got[want]
 			Expect(ok).To(BeTrue(), "%v was never reported, so nothing could see it rise", want)
@@ -225,16 +235,24 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		Expect(fx.get().Status.Phase).To(Equal(phaseInvestigate), "the task must be mid-flow for this path to mean anything")
 
 		forgetFlowMetrics(fx.name)
-		Expect(collectedOutcomes()).NotTo(HaveKey(outcome{fx.name, string(phaseReport), string(transition.EndingSuccess)}))
+		Expect(collectedOutcomes()).NotTo(HaveKey(outcome{fx.name, string(phaseReport), string(transition.EndingSuccess), string(transition.OutcomeDeclared)}))
 
 		fx.reconcile()
 
 		got := collectedOutcomes()
 		for _, want := range []outcome{
-			{fx.name, string(phaseReport), string(transition.EndingSuccess)},
-			{fx.name, string(phaseBroken), string(transition.EndingFailure)},
-			{fx.name, string(flowv1alpha1.PhaseEscalated), string(transition.EndingEscalated)},
-			{fx.name, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed)},
+			{fx.name, string(phaseReport), string(transition.EndingSuccess), string(transition.OutcomeDeclared)},
+			{fx.name, string(phaseReport), string(transition.EndingSuccess), string(transition.OutcomeRework)},
+			{fx.name, string(phaseBroken), string(transition.EndingFailure), string(transition.OutcomeDeclared)},
+			{fx.name, string(phaseBroken), string(transition.EndingFailure), string(transition.OutcomeRework)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeNoAnswer)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeDeclined)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeRunLimitReached)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeStructural)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeNoAnswer)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeDeclined)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeRunLimitReached)},
+			{fx.name, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeStructural)},
 		} {
 			value, ok := got[want]
 			Expect(ok).To(BeTrue(), "%v was never reported on the started-task path", want)
@@ -252,7 +270,7 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 	})
 
 	// A controller restart is the one time a task already sitting at
-	// Escalated or Failed and still owed a cleanup run is reconciled: it
+	// TaskFailed and still owed a cleanup run is reconciled: it
 	// arrives on the reserved-phase branch, never on the one below it, so
 	// that branch has to prime too.
 	It("primes finally's outcomes on the reserved-phase path a restarted controller takes", func() {
@@ -267,11 +285,11 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		tk := fx.makeTask()
 		// This is what stop() actually writes for a task whose flow declares
 		// finally (taskstate.go): the ending stands, and CurrentRun points at
-		// the cleanup run still owed. A task at Escalated or Failed with no
+		// the cleanup run still owed. A task at TaskFailed with no
 		// CurrentRun is the opposite case — one that already had, or never
 		// owed, a cleanup — so leaving it out here would test a state stop()
 		// never produces for this flow.
-		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
 		tk.Status.CurrentRuns = []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}}
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		Expect(taskstate.InFinally(&tk.Status)).To(BeTrue(), "the task must actually be owed a cleanup run for this path to mean anything")
@@ -311,7 +329,7 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Create(fx.ctx, runner.BuildSnapshotRevision(tk, data))).To(Succeed())
-		tk.Status.Phase = flowv1alpha1.PhaseEscalated
+		tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
 		tk.Status.CurrentRuns = []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}}
 		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 

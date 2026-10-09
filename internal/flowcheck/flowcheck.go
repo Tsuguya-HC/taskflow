@@ -51,6 +51,8 @@ func Check(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
 	bindings := path.Child("bindings")
 
+	errs = append(errs, checkOldTerminalNames(spec, bindings)...)
+
 	for _, phase := range sortedPhases(spec.Bindings) {
 		key := bindings.Key(string(phase))
 		switch {
@@ -99,10 +101,63 @@ func Check(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 	if !endings {
 		errs = append(errs, field.Invalid(bindings, nil,
 			fmt.Sprintf("no path from %q reaches a phase this flow leaves unbound, so no task of this flow can "+
-				"finish on its own terms — Escalated does not count, since it is where the framework puts work "+
+				"finish on its own terms — TaskFailed does not count, since it is where the framework puts work "+
 				"nobody decided", spec.Start)))
 	}
 	return errs
+}
+
+// checkOldTerminalNames refuses the two names the single terminal
+// replaced, wherever a flow declares names — binding keys, next
+// destinations, terminals, and always entries. They stopped being reserved,
+// so without this a flow written for them would read as an unbound declared
+// ending and pass silently, succeeding a task nobody decided.
+func checkOldTerminalNames(spec *flowv1alpha1.TaskFlowSpec, bindings *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	for _, phase := range sortedPhases(spec.Bindings) {
+		if oldTerminal(phase) {
+			errs = append(errs, field.Forbidden(bindings.Key(string(phase)),
+				fmt.Sprintf("%s is no longer a terminal; name TaskFailed instead", phase)))
+		}
+		for _, dest := range sortedDestinations(spec.Bindings[phase].Next) {
+			if oldTerminal(dest) {
+				errs = append(errs, field.Forbidden(bindings.Key(string(phase)).Child("next").Key(string(dest)),
+					fmt.Sprintf("%s is no longer a terminal; name TaskFailed instead", dest)))
+			}
+		}
+		if join := spec.Bindings[phase].Join; join != nil {
+			for i, always := range join.Always {
+				if oldTerminal(always) {
+					errs = append(errs, field.Forbidden(bindings.Key(string(phase)).Child("join").Child("always").Index(i),
+						fmt.Sprintf("%s is no longer a terminal; name TaskFailed instead", always)))
+				}
+			}
+		}
+	}
+	for _, terminal := range sortedPhases(terminalsAsPhases(spec.Terminals)) {
+		if oldTerminal(terminal) {
+			errs = append(errs, field.Forbidden(bindings.Child("terminals").Key(string(terminal)),
+				fmt.Sprintf("%s is no longer a terminal; name TaskFailed instead", terminal)))
+		}
+	}
+	return errs
+}
+
+// oldTerminal reports whether phase is one of the two names TaskFailed
+// replaced. Binding keys and next destinations holding them used to be valid
+// spellings of the framework's own answer; now they are only stale.
+func oldTerminal(phase flowv1alpha1.Phase) bool {
+	return phase == flowv1alpha1.Phase("Escalated") || phase == flowv1alpha1.Phase("Failed")
+}
+
+// terminalsAsPhases lists the phases a terminals map declares, so the old
+// names among them can be refused in name order like every other mistake.
+func terminalsAsPhases(terminals map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity) map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
+	out := make(map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding, len(terminals))
+	for phase := range terminals {
+		out[phase] = flowv1alpha1.PhaseBinding{}
+	}
+	return out
 }
 
 // checkNext judges one binding's edges: where they may lead, and what the
@@ -118,10 +173,6 @@ func checkNext(binding flowv1alpha1.PhaseBinding, path *field.Path) field.ErrorL
 		switch dest {
 		case "":
 			errs = append(errs, field.Invalid(key, dir, "an edge must say which phase it leads to"))
-		case flowv1alpha1.PhaseFailed:
-			errs = append(errs, field.Forbidden(key,
-				"Failed means the definition is broken, which is not something a run gets to conclude about "+
-					"the flow it is running; Escalated is the reserved name an edge may name"))
 		case flowv1alpha1.PhaseFinally:
 			errs = append(errs, field.Forbidden(key,
 				"the cleanup run follows the ending rather than being somewhere a verdict can lead, so no "+
@@ -145,7 +196,7 @@ func checkNext(binding flowv1alpha1.PhaseBinding, path *field.Path) field.ErrorL
 
 // checkJoin judges one fork: where its branches meet, which branches it has,
 // and that each of them is a single phase that goes nowhere but the join or
-// Escalated (ADR-0013 決定2 and the v1 limits of 決定3). Whether anything
+// TaskFailed (ADR-0013 決定2 and the v1 limits of 決定3). Whether anything
 // outside the fork reaches into a branch is a question about every binding at
 // once, and checkBranchEntry asks it.
 func checkJoin(spec *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase, bindings *field.Path) field.ErrorList {
@@ -176,7 +227,7 @@ func checkJoin(spec *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase, binding
 	}
 	if chosen == 0 {
 		errs = append(errs, field.Invalid(path, nil,
-			"a fork needs at least one destination besides Escalated for its run to choose; with none, "+
+			"a fork needs at least one destination besides TaskFailed for its run to choose; with none, "+
 				"the only thing its run could ever write is a refusal"))
 	}
 
@@ -204,7 +255,7 @@ func checkJoin(spec *flowv1alpha1.TaskFlowSpec, fork flowv1alpha1.Phase, binding
 }
 
 // checkBranch judges one branch against the v1 shape: a single phase, bound,
-// with no fork of its own, whose every edge leads to the join or Escalated
+// with no fork of its own, whose every edge leads to the join or TaskFailed
 // and at least one leads to the join.
 func checkBranch(
 	spec *flowv1alpha1.TaskFlowSpec,
@@ -230,10 +281,10 @@ func checkBranch(
 		switch dest {
 		case join:
 			meets = true
-		case flowv1alpha1.PhaseEscalated:
+		case flowv1alpha1.PhaseTaskFailed:
 		default:
 			errs = append(errs, field.Invalid(path.Child("next").Key(string(dest)), binding.Next[dest],
-				fmt.Sprintf("a branch leaves only to where its branches meet (%q) or to Escalated; anywhere else "+
+				fmt.Sprintf("a branch leaves only to where its branches meet (%q) or to TaskFailed; anywhere else "+
 					"and the fork would wait for a branch that is no longer coming", join)))
 		}
 	}

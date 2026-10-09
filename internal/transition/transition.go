@@ -47,9 +47,9 @@ const (
 	// OutcomeNoAnswer is a run that produced no single directory — none, or
 	// several, or it ran out of time. Not an approval; a human looks at it.
 	OutcomeNoAnswer Outcome = "NoAnswer"
-	// OutcomeDeclined followed a declared edge to Escalated: the flow gave
+	// OutcomeDeclined followed a declared edge to TaskFailed: the flow gave
 	// this phase a directory meaning "I will not decide this", and the run
-	// wrote into it. It ends the same way NoAnswer does — a human takes it
+	// wrote into it. It ends the same way NoAnswer does — somebody takes it
 	// from here — but it is the opposite kind of event. Silence is what a
 	// run that crashed, ran out of turns or said nothing leaves behind;
 	// this is a run that finished, chose, and left a report saying why.
@@ -92,12 +92,11 @@ type Result struct {
 
 // Next decides the phase to run after Phase finished writing into Directory.
 //
-// The framework's own answers are built in and cannot be declared away:
+// The framework's own answer is built in and cannot be declared away:
 //
-//	two statuses, one directory    -> Failed     (undecidable)
-//	Failed named as a destination  -> Failed     (not an answer)
-//	no single directory written    -> Escalated  (nothing was decided)
-//	a phase at its run limit       -> Escalated
+//	two statuses, one directory    -> TaskFailed (undecidable)
+//	no single directory written    -> TaskFailed (nothing was decided)
+//	a phase at its run limit       -> TaskFailed
 //
 // Two further cases are answered below that the controller never actually
 // asks about, because Reconcile and collect settle them before a run gets
@@ -108,7 +107,7 @@ type Result struct {
 // pass — the reason those tests are not proof that the branch is live.
 //
 // Every other move follows the flow's own table — including an edge the flow
-// declared to Escalated, which is the one reserved name it may name as a
+// declared to TaskFailed, which is the one reserved name it may name as a
 // destination.
 func Next(in Input) Result {
 	binding, bound := in.Bindings[in.Phase]
@@ -125,7 +124,7 @@ func Next(in Input) Result {
 		// down in the taskstate package, next to the invariant it depends
 		// on.
 		return Result{
-			Next:    flowv1alpha1.PhaseFailed,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeStructural,
 			Detail:  "phase " + string(in.Phase) + " has no binding in this flow",
 		}
@@ -137,7 +136,7 @@ func Next(in Input) Result {
 			detail = "the run produced no single answer"
 		}
 		return Result{
-			Next:    flowv1alpha1.PhaseEscalated,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeNoAnswer,
 			Detail:  detail,
 		}
@@ -158,7 +157,7 @@ func Next(in Input) Result {
 	switch {
 	case found > 1:
 		return Result{
-			Next:    flowv1alpha1.PhaseFailed,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeStructural,
 			Detail:  "directory " + in.Directory + " selects more than one status",
 		}
@@ -175,43 +174,27 @@ func Next(in Input) Result {
 		// that never started, and the next reconcile begins it again from
 		// the flow's start.
 		return Result{
-			Next:    flowv1alpha1.PhaseEscalated,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeNoAnswer,
 			Detail:  "no status is declared for directory " + in.Directory,
 		}
 	}
 
-	// Escalated is the one reserved name a flow may send work to. Declaring
+	// TaskFailed is the one reserved name a flow may send work to. Declaring
 	// it gives the phase a directory for "I will not decide this", so a run
 	// that cannot conclude has somewhere to say so — and to leave a report —
 	// instead of only being able to fall silent. What it cannot do is bind
-	// Escalated to a handler, which is the thing the reservation is actually
+	// TaskFailed to a handler, which is the thing the reservation is actually
 	// protecting: no answer must never be one line away from the success
 	// path (§5). This is a destination, so that concern does not arise.
 	//
-	// It skips the run limit below because Escalated is terminal on its own
+	// It skips the run limit below because TaskFailed is terminal on its own
 	// say-so: there is no run after it to count.
-	if dest == flowv1alpha1.PhaseEscalated {
+	if dest == flowv1alpha1.PhaseTaskFailed {
 		return Result{
-			Next:    flowv1alpha1.PhaseEscalated,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeDeclined,
-			Detail:  "escalated on purpose, by writing into " + in.Directory,
-		}
-	}
-
-	// Failed is not. It means the definition is broken, which is never
-	// something the work gets to conclude, so a flow naming it as a
-	// destination is itself the defect. Admission now refuses that flow at
-	// creation (#17 / ADR-0006), but this check stays anyway: nothing here
-	// may depend on admission having run (ADR-0006 decision 5), and a flow
-	// can still be edited after a task has already started (#19). So the
-	// task stops here rather than reaching Failed under an outcome that
-	// would read like a declared edge.
-	if dest == flowv1alpha1.PhaseFailed {
-		return Result{
-			Next:    flowv1alpha1.PhaseFailed,
-			Outcome: OutcomeStructural,
-			Detail:  "directory " + in.Directory + " is declared to reach Failed, which is the framework's own",
+			Detail:  "declined on purpose, by writing into " + in.Directory,
 		}
 	}
 
@@ -222,7 +205,7 @@ func Next(in Input) Result {
 	// task of the flow as though the work had run out of rounds.
 	if in.MaxRuns < 1 {
 		return Result{
-			Next:    flowv1alpha1.PhaseFailed,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeStructural,
 			Detail:  fmt.Sprintf("maxRunsPerPhase is %d, which lets no phase run", in.MaxRuns),
 		}
@@ -233,7 +216,7 @@ func Next(in Input) Result {
 	n := in.Runs[dest]
 	if n >= in.MaxRuns {
 		return Result{
-			Next:    flowv1alpha1.PhaseEscalated,
+			Next:    flowv1alpha1.PhaseTaskFailed,
 			Outcome: OutcomeRunLimitReached,
 			Detail:  fmt.Sprintf("%s has already run %d of %d times", dest, n, in.MaxRuns),
 		}
@@ -280,10 +263,9 @@ const (
 	// gets nothing rather than a wrong answer.
 	EndingRunning Ending = ""
 
-	// EndingEscalated and EndingFailed are the framework's own two, and are
-	// not the flow's to redefine.
-	EndingEscalated Ending = Ending(flowv1alpha1.PhaseEscalated)
-	EndingFailed    Ending = Ending(flowv1alpha1.PhaseFailed)
+	// EndingTaskFailed is the framework's own, and is not the flow's to
+	// redefine.
+	EndingTaskFailed Ending = Ending(flowv1alpha1.PhaseTaskFailed)
 
 	// EndingSuccess and EndingFailure are what the flow declared in
 	// terminals.
@@ -302,16 +284,14 @@ const (
 // EndingOf reports what reaching phase means, or EndingRunning when it is not
 // somewhere a task stops.
 //
-// The framework's two reserved names answer for themselves and are checked
-// first: what Escalated means does not depend on a flow, which is what lets a
+// The framework's reserved name answers for itself and is checked
+// first: what TaskFailed means does not depend on a flow, which is what lets a
 // task that reached it be reported even after the flow is gone — flow may be
-// nil for exactly that reason, and still get the right answer for those two.
+// nil for exactly that reason, and still get the right answer for it.
 func EndingOf(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) Ending {
 	switch {
-	case phase == flowv1alpha1.PhaseEscalated:
-		return EndingEscalated
-	case phase == flowv1alpha1.PhaseFailed:
-		return EndingFailed
+	case phase == flowv1alpha1.PhaseTaskFailed:
+		return EndingTaskFailed
 	case flow == nil, !IsTerminal(flow.Bindings, phase):
 		return EndingRunning
 	}
@@ -325,8 +305,8 @@ func EndingOf(flow *flowv1alpha1.TaskFlowSpec, phase flowv1alpha1.Phase) Ending 
 }
 
 // IsTerminal reports whether a task that reached phase has stopped: a status
-// with no binding is where the flow ends, and the framework's own two answers
-// always end it.
+// with no binding is where the flow ends, and the framework's own answer
+// always ends it.
 func IsTerminal(bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding, phase flowv1alpha1.Phase) bool {
 	if phase.IsReserved() {
 		return true
@@ -354,9 +334,9 @@ type PhaseEnding struct {
 //
 // The stopping places are the destinations no binding claims: every next a
 // binding names, minus the phases that are themselves bound. The framework's
-// own two are always among them whether or not a flow names them — Escalated
-// can happen to any flow that cannot read an answer, and Failed to any flow
-// that turns out to be broken — so they are added rather than discovered.
+// own is always among them whether or not a flow names it — TaskFailed
+// can happen to any flow whose answer cannot be read or whose definition
+// turns out to be broken — so it is added rather than discovered.
 //
 // Each phase appears once, with the single ending it means. severity is not a
 // dimension a phase varies over: EndingOf reads it from the flow's own
@@ -397,4 +377,22 @@ func DeclaredEndings(spec *flowv1alpha1.TaskFlowSpec) []PhaseEnding {
 // two identical flows prime the same series in the same order every time.
 func sortPhases(phases []flowv1alpha1.Phase) {
 	slices.Sort(phases)
+}
+
+// PrimeOutcomes lists the outcomes an ending can be counted with, so priming
+// can create each series before it happens. A declared ending is reached by
+// following an edge, which leaves Declared, or by looping back onto a phase
+// that already ran its share, which leaves Rework or RunLimitReached only
+// when the destination is itself — and a destination nothing binds never
+// runs, so the limit never stops a task on a declared ending. The limit can
+// still stop a rework to a bound phase mid-flow, but that move lands on
+// TaskFailed rather than on the declared ending, so priming the pairing
+// there would claim a series that never counts. The single framework ending
+// takes every outcome that can stop a task: silence, refusal, the run
+// limit, and a broken definition.
+func PrimeOutcomes(ending PhaseEnding) []Outcome {
+	if ending.Phase == flowv1alpha1.PhaseTaskFailed {
+		return []Outcome{OutcomeNoAnswer, OutcomeDeclined, OutcomeRunLimitReached, OutcomeStructural}
+	}
+	return []Outcome{OutcomeDeclared, OutcomeRework}
 }

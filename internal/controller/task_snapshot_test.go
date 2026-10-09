@@ -126,7 +126,7 @@ var _ = Describe("the revision a task starts from", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(fx.revisions()).To(BeEmpty(), "a task that never began has nothing to hold still")
 		Expect(pinnedOf(tk)).To(BeNil(), "no copy was made, so nothing is marked")
 	})
@@ -174,7 +174,7 @@ var _ = Describe("the revision a task starts from", func() {
 
 			fx.reconcile()
 
-			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
+			Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 				"a copy that fits in no single object must fail the task before its first run")
 			Expect(fx.revisions()).To(BeEmpty())
 			Expect(pinnedOf(fx.get())).To(BeNil(), "no copy was made, so nothing is marked")
