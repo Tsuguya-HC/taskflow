@@ -38,7 +38,7 @@ import (
 
 // 開始した Task は、定義の写しを持つ。写しを持たずマーカー (DefinitionsPinned) も
 // 無い Task は、次の reconcile で写しを作る。マーカーがあるのに写しが無い Task は
-// Failed にする (#183)。
+// TaskFailed にする (#183)。
 var _ = Describe("a started task and its copy of the definitions", func() {
 	var fx *fixture
 	var clock time.Time
@@ -234,7 +234,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 				Expect(pinnedOf(tk)).To(BeNil())
 			}
 
-			DescribeTable("goes to Failed, dated and cleaned up by the live flow",
+			DescribeTable("goes to TaskFailed, dated and cleaned up by the live flow",
 				func(idleTask bool) {
 					fx.makeFlow(withTTL) // no handler for it is made
 					fx.makeBareTask(idleTask)
@@ -265,8 +265,8 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 			})
 		})
 
-		// 1 object に収まらない写しは、Failed にする。拒否の形は大きさで違う。
-		DescribeTable("goes to Failed when the copy does not fit in one object",
+		// 1 object に収まらない写しは、TaskFailed にする。拒否の形は大きさで違う。
+		DescribeTable("goes to TaskFailed when the copy does not fit in one object",
 			func(big int) {
 				fx.makeBulky(big)
 				fx.makeBareTask(false)
@@ -329,7 +329,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 
 		// 変異: 写しが無いときに live から写しを作り直す・live の flow から掃除と
 		// ttl を引く・FlowUnresolved 以外で数える・理由を FlowBroken にする。
-		It("goes to Failed with a run in flight, owed no cleanup and given no date yet", func() {
+		It("goes to TaskFailed with a run in flight, owed no cleanup and given no date yet", func() {
 			lostCopy(withCleanup)
 			makeCleanupHandler()
 			labels := outcome(metrics.FlowUnresolved)
@@ -365,7 +365,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 		})
 
 		// 変異: 走行中の判定のために live の flow を読む。
-		It("goes to Failed with this reason, not \"does not exist\", when the live flow is gone too", func() {
+		It("goes to TaskFailed with this reason, not \"does not exist\", when the live flow is gone too", func() {
 			lostCopy()
 			Expect(k8sClient.Delete(fx.ctx, &flowv1alpha1.TaskFlow{
 				ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
@@ -380,7 +380,7 @@ var _ = Describe("a started task and its copy of the definitions", func() {
 		})
 
 		// 変異: fail() の Idle の門を通る経路で失敗させる。
-		It("goes to Failed with nothing in flight, which fail() alone would leave alone", func() {
+		It("goes to TaskFailed with nothing in flight, which fail() alone would leave alone", func() {
 			lostCopy(withTTL)
 			idle()
 

@@ -290,7 +290,7 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 	// TaskFailed is the motive for the whole feature: nothing can be bound to
 	// it, so until now a task that ended there had no run left in which to put
 	// anything back.
-	It("runs after an escalation, which nothing could be bound to", func() {
+	It("runs after TaskFailed, which nothing could be bound to", func() {
 		fx.makeFlow(withCleanup)
 		fx.makeHandler()
 		makeCleanupHandler()
@@ -310,13 +310,13 @@ var _ = Describe("the cleanup run that follows an ending", func() {
 
 		tk = fx.get()
 		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
-			"the escalation stands; somebody still has to come and look at it")
+			"the ending stands; the cleanup run does not change how the task stopped")
 		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Reason).To(Equal(string(transition.OutcomeNoAnswer)),
-			"the reason a human is wanted is still the run that said nothing, not the cleanup")
+			"the reason the task failed is still the run that said nothing, not the cleanup")
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)),
-			"an escalation tidied up after is no less an escalation")
+			"a task tidied up after TaskFailed is dated as TaskFailed")
 	})
 
 	It("says so when the cleanup run does not report it cleaned up", func() {

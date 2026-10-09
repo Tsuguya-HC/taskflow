@@ -8,7 +8,7 @@
 
 1. **TaskFlow の create / update は ValidatingAdmissionWebhook が検査する。** design.md §5 の表の
    うち、**単一の TaskFlow 内で閉じるもの全部**を Go で 1 箇所に書く（`start` からの到達性、終端に
-   到達する経路の存在、同じ binding での判定ディレクトリ重複、`Failed` を `next` の行き先に、
+   到達する経路の存在、同じ binding での判定ディレクトリ重複、旧終端名 `Escalated` / `Failed` を `bindings` のキー・`next` の行き先・`always`・`terminals` に、
    予約語を `bindings` のキーに、`start` が未束縛、判定ディレクトリ名の形と `.prepared-by` の予約）
 2. **graph 系を CEL では書かない。** CEL は推移閉包を書けない。取れる代案は 2 つあり、どちらも
    採らない — 「誰も指していないフェーズ」だけを見る弱い版は本体から切り離された閉路を取り
@@ -24,7 +24,7 @@
 4. **別オブジェクトを参照する検査は webhook に入れない。** handler の実在と `spec.phase` の一致は
    定義時に弾いてはいけない — admission が別オブジェクトの存在に依存してはならず、handler が
    まだ無いことを理由に TaskFlow を拒否すると適用順で詰む。design.md §8「遅延バインディングの
-   代償」の立場（framework は実在確認をしない）を維持し、実行時の `brokenFlow` → `Failed` のまま
+   代償」の立場（framework は実在確認をしない）を維持し、実行時の `brokenFlow` → `TaskFailed` のまま
 5. **admission が走ったことに依存する実装にしない。** `internal/transition` の実行時検査は
    webhook が入っても残す。編集済みの flow が走行中のタスクの足元に残るため（#19）
 

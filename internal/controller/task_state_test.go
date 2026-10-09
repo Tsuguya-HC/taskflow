@@ -175,7 +175,7 @@ var _ = Describe("a run nothing starts", func() {
 			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		}
 
-		// 変異: 写しを持つ Task でも live の handler が無ければ Failed にする。
+		// 変異: 写しを持つ Task でも live の handler が無ければ TaskFailed にする。
 		It("dates a run of a task with a copy by the copy's handler", func() {
 			placed()
 			nameBox()
@@ -456,7 +456,7 @@ var _ = Describe("a run nothing starts", func() {
 	})
 
 	// A run whose vocabulary is edited away has nothing left to judge an
-	// answer against. For the cleanup run that is not a Failed — the ending
+	// answer against. For the cleanup run that is not a TaskFailed — the ending
 	// is already decided and does not move (ADR-0009 決定2) — it is a cleanup
 	// that did not happen. A task with a copy keeps the declaration it began
 	// with; keepCopy false drops the copy once the ending is reached, so the

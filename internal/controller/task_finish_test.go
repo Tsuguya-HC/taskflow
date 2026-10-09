@@ -508,7 +508,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Message).To(ContainSubstring("which does not exist"))
 
-		// This Failed came from r.fail(), not from settle() reading the flow's
+		// This TaskFailed came from r.fail(), not from settle() reading the flow's
 		// own table — the one path that used to leave the metric silent about a
 		// flow broken badly enough to lose a handler mid-run.
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{

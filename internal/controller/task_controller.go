@@ -50,7 +50,7 @@ import (
 // brokenFlow says the fault is structural rather than the work's: a definition
 // that contradicts itself, or a place the framework has to own that something
 // else got to first. It is carried as an error so that every path out of the
-// reconcile goes through one place that writes Failed, instead of each caller
+// reconcile goes through one place that writes TaskFailed, instead of each caller
 // remembering to.
 type brokenFlow struct{ reason string }
 
@@ -187,7 +187,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// them apart: begin and Advance never set it to a phase without first
 	// confirming a binding, so a ref naming anything but the cleanup run means
 	// a run was in flight and the flow was edited out from under it. That is a
-	// structural fault (§5 "実行時の矛盾は修復せず Failed"), not a quiet finish,
+	// structural fault (§5 "実行時の矛盾は修復せず TaskFailed"), not a quiet finish,
 	// so it must not be indistinguishable from success. A ref naming the
 	// cleanup run is the one legitimate way a stopped task still has one
 	// (ADR-0009), and no ref at all means the task was terminal on arrival.
@@ -774,7 +774,7 @@ func (r *TaskReconciler) ensureVerdictBox(
 			// on its own once GC has caught up. A box is not retried — it is
 			// where the run's answer is read from, and an answer read out of
 			// something this task does not control cannot be trusted at any
-			// distance, so this goes through brokenFlow to Failed the same
+			// distance, so this goes through brokenFlow to TaskFailed the same
 			// direction ADR-0011 決定3 already fails closed in.
 			if !metav1.IsControlledBy(&box, task) {
 				return nil, brokenFlow{notOwnedError("verdict box", run.VerdictBox, task, box.OwnerReferences).Error()}
@@ -955,7 +955,7 @@ func (r *TaskReconciler) settleRun(
 
 // brokeDuringRun is what a broken definition does to the run that found it.
 //
-// For a phase's run the task is Failed: the fault is in the flow, no verdict
+// For a phase's run the task is TaskFailed: the fault is in the flow, no verdict
 // from it can be trusted, and nothing is repaired (§5). For the cleanup run it
 // is not, because the ending is already decided and a decided ending does not
 // move (ADR-0009 決定2) — the same fault is recorded as a cleanup that did not
@@ -1182,9 +1182,6 @@ func (r *TaskReconciler) announce(
 	flowLabel := metrics.FlowUnresolved
 	if flow != nil {
 		flowLabel = task.Spec.Flow
-	}
-	if outcome == "" {
-		outcome = string(transition.OutcomeStructural)
 	}
 	metrics.TaskOutcomes.With(prometheus.Labels{
 		metrics.LabelFlow: flowLabel, metrics.LabelPhase: string(phase), metrics.LabelSeverity: string(ending),
@@ -1470,7 +1467,7 @@ func (r *TaskReconciler) ensureJob(
 
 	// Reconcile only ever calls this with a phase it already confirmed is
 	// bound — an unbound current phase is either a quiet finish or, with a
-	// run in flight, a Failed of its own, and neither reaches here — or with
+	// run in flight, a TaskFailed of its own, and neither reaches here — or with
 	// the cleanup run, which terminal reaches only for a task whose status
 	// says one is owed. For a task without a copy, either declaration can
 	// still have been edited away between that check and this lookup, which is
@@ -1547,7 +1544,7 @@ func (r *TaskReconciler) ensureJob(
 // RBAC, not this check.
 //
 // An Invalid on create is the flow's volumeClaimTemplate being unusable as
-// written — a definition problem, so it goes through brokenFlow to Failed
+// written — a definition problem, so it goes through brokenFlow to TaskFailed
 // rather than being retried into the same rejection forever. StatefulSet
 // left that surfacing to the moment the claim is made too, but with nothing
 // watching, an apply that passed turned into pods that never came; here the

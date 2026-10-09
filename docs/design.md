@@ -22,7 +22,7 @@ date: 2026-08-21
 - 判定不能を承認に化けさせない（fail-closed）
 - 差し戻しループの回数制限
 - 実行後の掃除（K8s 内 / 外）
-- エスカレーション経路
+- 結論まで行けなかった作業の止め方と、止まった理由の記録
 
 **本質的な価値は「無人で回せるようになること」。** cron に載せて忘れられる状態を作るのが目的で、
 個々の機能ではない。
@@ -455,17 +455,17 @@ test: {handler: test, next: {Review: done, TaskFailed: refuse}}
   `inputs` ビュー（`/inputs/<枝のフェーズ>/`、§7）で各枝の答えを読む
 - 枝が走っている間、`status.phase` は分岐元のまま、`currentRuns` に枝ごとの run が並ぶ（ADR-0013 決定8）。
   番号は分岐元の run の次から枝の名前順に払う
-- その reconcile で終わった枝はまとめて決着させる（`taskstate.SettleBranches`）。1 本でも `TaskFailed`（や
-  `Failed`）に着いたら Task はそこで止まり、まだ走っている枝は `Cancelled` として記録して Job を消す
+- その reconcile で終わった枝はまとめて決着させる（`taskstate.SettleBranches`）。1 本でも `TaskFailed` に着いたら
+  Task はそこで止まり、まだ走っている枝は `Cancelled` として記録して Job を消す
   （fail-fast）。history には「決着した他の枝 → `Cancelled` の枝 → 終端を決めた枝」の順に積む
 - Job の削除は status の書き込みの**後**に行う（先に書けば削除が失敗しても metric と Event は届く）。
   削除そのものは history から読み直せる状態そのものにしてあり、その reconcile で
   失敗しても、コントローラが再起動しても、後続の reconcile（cleanup run が始まる前も含む）が同じ
-  Cancelled 行を見つけて改めて消す。枝を回す経路に入れないまま Task が Failed になる経路 — 写しが
+  Cancelled 行を見つけて改めて消す。枝を回す経路に入れないまま Task が TaskFailed になる経路 — 写しが
   消された（`DefinitionsLost`）、写しの無い Task の移行が失敗した — も同じ削除を通り、そのとき分岐元に
   いた Task は枝が `Cancelled` と記録され Job が止まる。走行中の run の binding が消えることは、写しを
   持つ Task には起こらない
-- v1 の制限: 枝はフェーズ 1 つ、枝は Job runner だけ（State の枝は実行時に `Failed`）
+- v1 の制限: 枝はフェーズ 1 つ、枝は Job runner だけ（State の枝は実行時に `TaskFailed`）
 
 1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
 
@@ -633,7 +633,7 @@ JobTemplateSpec をそのまま開放すると、設計の不変条件をユー�
 | `ttlSecondsAfterFinished` | verdict 回収前に Job が消える。掃除は Task の TTL + ownerRef に一本化（`Cancelled` と記録された並列の枝の Job だけが例外 — ADR-0013 決定4、`reapCancelledJobs`。まだ終わっていないものだけを対象にし、TTL を待たない） | 同上 |
 | `activeDeadlineSeconds` | `spec.timeout` が唯一の真実。コントローラが Job に書き込む（kubelet 側でも効かせる二重化） | 同上 |
 | `completions` / `parallelism`（1 以外） | 1 run = 1 verdict が壊れる | 同上 |
-| `restartPolicy: OnFailure` | 同上（Pod 内再起動で run ディレクトリに前回の残骸が残る）。`Never` のみ許可 | **reconcile 時に Go コードで拒否**（`internal/runner/job.go` の `checkReserved`）。Task が動く時点で `Failed` になるのであって、`TaskHandler` の作成自体は防げていない |
+| `restartPolicy: OnFailure` | 同上（Pod 内再起動で run ディレクトリに前回の残骸が残る）。`Never` のみ許可 | **reconcile 時に Go コードで拒否**（`internal/runner/job.go` の `checkReserved`）。Task が動く時点で `TaskFailed` になるのであって、`TaskHandler` の作成自体は防げていない |
 
 上の 5 種は型からフィールドが消えているので、CRD の validation で「拒否する」対象がそもそも
 存在しない。CEL で書けているのは `phase` に `TaskFailed` を予約するルールだけ
@@ -719,11 +719,11 @@ next: {報告: ok, TaskFailed: refuse}
 | 何も書かなかった / 途中で死んだ / 時間切れ | `NoAnswer` | 沈黙。理由はフレームワーク側の推測しかない |
 | `refuse/` に書いた | `Declined` | 本人の理由とレポート |
 
-これは後退の修正でもある。Step 0 の試作には `escalate/` があって理由付きで返っていたのに、
+これは後退の修正でもある。Step 0 の試作には判定を降りるディレクトリがあって理由付きで返っていたのに、
 CRD 化で「書かない」しか無くなっていた。**打ち切りで終わった run と、判定を降りた run が、
 どちらも「何も書かなかった」として history に同じ形で残ってしまう。**
 
-旧名 `Escalated` / `Failed` は予約ではなくなったが、束縛キー・`next` の行き先・`terminals`・
+旧名 `Escalated` / `Failed` は予約ではなくなったが、束縛キー・`next` の行き先・`always`・`terminals`・
 handler の `phase` として書くと `TaskFailed` を案内して拒否される。外したままにすると古い定義が
 「束縛の無い宣言終端」として黙って通り、成功扱いで消えるため。
 
@@ -914,7 +914,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | profile に含まれるフェーズに binding が無い | 実行中に「行き先はあるが担い手が無い」で止まる | 未実装（#18。profile はフェーズ**名**を要求する形のまま未決） |
 | profile に無いフェーズの binding がある | 意図の取り違え。黙って無視しない | 同上 |
 | `next` の行き先が未束縛でも終端でもない | 実行時の停止を作成時のエラーに変える | 該当なし。束縛の無いフェーズが終端そのもの（§5「終端の意味は flow が宣言する」）なので、この条件を満たす行き先は存在しない |
-| `next` のキー・`bindings` のキー・`terminals` のキー・handler の `phase` に `Escalated` / `Failed` が現れる | 旧名。`TaskFailed` を名指すこと | webhook（`bindings`・`next`。`terminals` と handler の `phase` は CEL も同じ規則） |
+| `next` のキー・`bindings` のキー・`always`・`terminals` のキー・handler の `phase` に `Escalated` / `Failed` が現れる | 旧名。`TaskFailed` を名指すこと | webhook（`bindings`・`next`・`always`。`terminals` と handler の `phase` は CEL も同じ規則） |
 | `terminals` のキーが束縛のあるフェーズ | 終端ではないものを終端と言っている | CEL |
 | `terminals` のキーが `TaskFailed` | 予約語。framework 自身の終端の意味は flow のものではない | CEL |
 | 同じ binding 内で 2 ステータスが同じディレクトリを指す | 実行時に行き先が決まらない | webhook |
@@ -985,7 +985,7 @@ Task から。矛盾は上の表のとおり、遷移の瞬間に、写しに対
   TTL なしで落ち、無い Task は何もしない
 - **止まっていて写しが無い**（写しが作られる前に止まった、開始時に失敗した、止まった後に写しが消された）。
   そのままにする。残っている負債（cleanup の run と `expiresAt`）のために live の flow と TaskHandler を
-  読む。写しを消しても、終わった Task が `TaskFailed` 以外に変わることは無い
+  読む。写しを消しても、終わった Task が `TaskFailed` に変わることは無い
 - **別の UID の revision。** Task の名前の下に別の UID が controller として持つ revision は読まず、写しが
   無いものとして扱う。移行はその名前に写しを作れないのでエラーを返して再試行し、回収が名前を空けるまで
   Task は進みも落ちもしない。開始時も同じ。印があれば `DefinitionsLost` になる
@@ -1856,7 +1856,7 @@ P2（コントローラはポリシーを持たない）の分離がリポ境界
    workspace を virtio-fs 越しに見ており、**書き戻しが残ったままコンテナが exit すると
    ゲストエージェントが応答を失う**。shim は終了コードを取れず、Pod 内の**全**コンテナに 255 を
    付ける — ファイルは落ちているのに Job は Failed になり、infra retry を焼いてから Task が
-   Failed で終わる。判定ディレクトリは正しく書かれているので、**書けたのに落ちる**という
+   TaskFailed で終わる。判定ディレクトリは正しく書かれているので、**書けたのに落ちる**という
    最も紛らわしい壊れ方をする。
 
    **2026-09-05 実測**:

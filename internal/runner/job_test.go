@@ -323,7 +323,7 @@ func TestEndingPhaseVarRefsAreEscaped(t *testing.T) {
 	phase := flowv1alpha1.Phase("報告-$(GITHUB_TOKEN)")
 	job := build(t, Input{
 		Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
-		Ending: &Ending{Meaning: "Escalated", Phase: phase, Outcome: "NoAnswer"},
+		Ending: &Ending{Meaning: "TaskFailed", Phase: phase, Outcome: "NoAnswer"},
 	})
 
 	want := `報告-$$(GITHUB_TOKEN)`

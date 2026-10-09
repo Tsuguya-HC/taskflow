@@ -201,8 +201,8 @@ func Next(in Input) Result {
 	// A limit below one would refuse every phase, the start's successor
 	// included, and a flow that can run nothing past its first phase is not
 	// what anybody wrote. The schema's minimum and default keep it from
-	// arriving here; this answers it anyway rather than escalating every
-	// task of the flow as though the work had run out of rounds.
+	// arriving here; this answers it anyway rather than stopping every
+	// task of the flow at TaskFailed as though the work had run out of rounds.
 	if in.MaxRuns < 1 {
 		return Result{
 			Next:    flowv1alpha1.PhaseTaskFailed,

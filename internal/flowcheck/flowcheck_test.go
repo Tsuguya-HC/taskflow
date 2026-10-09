@@ -45,7 +45,7 @@ const (
 )
 
 // What the broken flows below are made of: a handler nobody wrote, a
-// directory declared to reach Failed, and a name that is a path rather than
+// directory declared to reach a name a flow may not send work to, and a name that is a path rather than
 // a path element. handlerCleanup is the one a flow names for the run that
 // follows the ending, which is a handler like any other.
 const (
@@ -123,7 +123,7 @@ func TestAcceptsADeclaredEdgeToTaskFailed(t *testing.T) {
 	spec := sampleFlow()
 	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseTaskFailed] = dirRefuse
 	if got := check(spec); len(got) != 0 {
-		t.Fatalf("a declared escalation was refused: %v", got)
+		t.Fatalf("a declared edge to TaskFailed was refused: %v", got)
 	}
 }
 
@@ -329,7 +329,7 @@ func TestRefuses(t *testing.T) {
 			mention: "no task of this flow can finish",
 		},
 		{
-			name: "a flow whose only way out is escalation",
+			name: "a flow whose only way out is TaskFailed",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				delete(s.Bindings[phaseReport].Next, phaseDone)
 				s.Bindings[phaseReport].Next[flowv1alpha1.PhaseTaskFailed] = dirRefuse

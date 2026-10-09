@@ -20,8 +20,6 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/util/validation/field"
-
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 )
 
@@ -36,15 +34,6 @@ const (
 	redFailed    = flowv1alpha1.Phase("Failed")
 )
 
-func redRefused(spec *flowv1alpha1.TaskFlowSpec) []string {
-	errs := Check(spec, field.NewPath("spec"))
-	lines := make([]string, 0, len(errs))
-	for _, e := range errs {
-		lines = append(lines, e.Field+": "+e.ErrorBody())
-	}
-	return lines
-}
-
 // Catches walk counting the single terminal as a way for a task to finish
 // on its own terms, instead of refusing a flow whose only way out is the
 // framework's own answer (#217).
@@ -52,7 +41,7 @@ func TestRefusesAFlowWhoseOnlyWayOutIsTaskFailed(t *testing.T) {
 	spec := sampleFlow()
 	delete(spec.Bindings[phaseReport].Next, phaseDone)
 	spec.Bindings[phaseReport].Next[redTerminal] = "refuse"
-	got := redRefused(spec)
+	got := check(spec)
 	for _, line := range got {
 		if strings.Contains(line, "TaskFailed") {
 			return
@@ -68,7 +57,7 @@ func TestRefusesTaskFailedBoundToAHandler(t *testing.T) {
 		Handler: "red-owner",
 		Next:    map[flowv1alpha1.Phase]string{phaseDone: "red-handled"},
 	}
-	got := redRefused(spec)
+	got := check(spec)
 	for _, line := range got {
 		if strings.HasPrefix(line, `spec.bindings[TaskFailed]:`) &&
 			strings.Contains(line, "framework's own") {
@@ -90,7 +79,7 @@ func TestRefusesTheOldTerminalsWithAPointerToTaskFailed(t *testing.T) {
 				Handler: "red-owner",
 				Next:    map[flowv1alpha1.Phase]string{phaseDone: "red-handled"},
 			}
-			got := redRefused(spec)
+			got := check(spec)
 			hit := false
 			for _, line := range got {
 				if strings.HasPrefix(line, "spec.bindings["+string(old)+"]:") &&
@@ -114,7 +103,7 @@ func TestRefusesTheOldTerminalsAsDestinations(t *testing.T) {
 		t.Run(string(old), func(t *testing.T) {
 			spec := sampleFlow()
 			spec.Bindings[phaseInvestigate].Next[old] = "legacy"
-			got := redRefused(spec)
+			got := check(spec)
 			hit := false
 			for _, line := range got {
 				if strings.Contains(line, "TaskFailed") {
@@ -125,20 +114,5 @@ func TestRefusesTheOldTerminalsAsDestinations(t *testing.T) {
 				t.Fatalf("wanted %s refused with TaskFailed named, got %v", old, got)
 			}
 		})
-	}
-}
-
-// Catches a branch still forced to leave only to Escalated instead of the
-// single terminal (#217).
-func TestABranchMayLeaveOnlyToTaskFailed(t *testing.T) {
-	spec := forkFlow()
-	for dest := range spec.Bindings[phaseSecurity].Next {
-		if dest == redEscalated {
-			delete(spec.Bindings[phaseSecurity].Next, dest)
-			spec.Bindings[phaseSecurity].Next[redTerminal] = dirStuck
-		}
-	}
-	if got := redRefused(spec); len(got) != 0 {
-		t.Fatalf("a branch leaving to TaskFailed was refused: %v", got)
 	}
 }

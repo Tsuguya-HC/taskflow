@@ -181,7 +181,7 @@ var _ = Describe("a fork", func() {
 			"the join was led to by the last of its branches to arrive, not the one with the highest run number")
 	})
 
-	It("stops at the first branch to escalate, cancelling the ones still running", func() {
+	It("stops at the first branch to reach TaskFailed, cancelling the ones still running", func() {
 		setUp()
 		forked(string(logic) + "/" + string(security))
 

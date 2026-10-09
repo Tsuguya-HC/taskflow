@@ -113,7 +113,7 @@ func TestDirectoriesComeFromTheDeclaration(t *testing.T) {
 	}
 }
 
-func TestNoSingleAnswerEscalates(t *testing.T) {
+func TestNoSingleAnswerEndsAtTaskFailed(t *testing.T) {
 	for _, why := range []string{"nothing was written", "two directories were written", "the run timed out"} {
 		t.Run(why, func(t *testing.T) {
 			got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, NoAnswer: why, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
@@ -141,7 +141,7 @@ func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
 
 // The handler cannot invent this — the directory would not exist — but a flow
 // edited under a running task can leave one behind.
-func TestUndeclaredDirectoryEscalates(t *testing.T) {
+func TestUndeclaredDirectoryEndsAtTaskFailed(t *testing.T) {
 	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: "looks-fine", Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want TaskFailed/NoAnswer", got.Next, got.Outcome)
@@ -151,7 +151,7 @@ func TestUndeclaredDirectoryEscalates(t *testing.T) {
 // Writing into the declared refusal directory and writing nothing at all
 // both stop the task at TaskFailed, and that is the point of separating them:
 // the outcome is what tells a human whether there is a report to read or a
-// run that died. Run 1 of the first real task escalated on max-turns and was
+// run that died. Run 1 of the first real task stopped on max-turns and was
 // indistinguishable in the history from a deliberate hand-off.
 func TestDeclaredRefusalIsNotSilence(t *testing.T) {
 	got := Next(Input{Bindings: withRefusal(), Phase: phaseInvestigate, Directory: dirRefuse,
@@ -166,7 +166,7 @@ func TestDeclaredRefusalIsNotSilence(t *testing.T) {
 	silent := Next(Input{Bindings: withRefusal(), Phase: phaseInvestigate, NoAnswer: "the run ran out of turns",
 		Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if silent.Next != got.Next {
-		t.Fatalf("silence went to %q and a declared escalation to %q; both stop the task", silent.Next, got.Next)
+		t.Fatalf("silence went to %q and a declared refusal to %q; both stop the task", silent.Next, got.Next)
 	}
 	if silent.Outcome == got.Outcome {
 		t.Fatalf("both outcomes are %q; the history cannot tell a report from a run that died", got.Outcome)
@@ -238,14 +238,11 @@ func TestAnUndeclaredEndingIsNotASuccess(t *testing.T) {
 	}
 }
 
-// Escalated answers for itself before the bindings are consulted, which is
+// TaskFailed answers for itself before the bindings are consulted, which is
 // what lets a task that reached it still be reported after its flow is gone.
-func TestTheReservedEndingsNeedNoFlow(t *testing.T) {
+func TestTheReservedEndingNeedsNoFlow(t *testing.T) {
 	if got := EndingOf(nil, flowv1alpha1.PhaseTaskFailed); got != EndingTaskFailed {
 		t.Fatalf("ending = %q, want TaskFailed with no flow to read", got)
-	}
-	if got := EndingOf(nil, flowv1alpha1.PhaseTaskFailed); got != EndingTaskFailed {
-		t.Fatalf("ending = %q, want Failed with no flow to read", got)
 	}
 }
 
@@ -279,7 +276,7 @@ func TestReworkIsRecordedAgainstTheLimit(t *testing.T) {
 	}
 }
 
-func TestAPhaseAtItsLimitEscalates(t *testing.T) {
+func TestAPhaseAtItsLimitEndsAtTaskFailed(t *testing.T) {
 	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore,
 		Runs: map[flowv1alpha1.Phase]int32{phaseInvestigate: 3}, MaxRuns: 3})
 	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeRunLimitReached {
@@ -438,7 +435,7 @@ func TestDeclaredEndingsAreOrderedTheSameEveryTime(t *testing.T) {
 	}
 }
 
-// fail() reaches Failed with no flow at all, and asking a nil spec what it
+// fail() reaches TaskFailed with no flow at all, and asking a nil spec what it
 // declares must not panic on the way there.
 func TestDeclaredEndingsOfNothing(t *testing.T) {
 	if got := DeclaredEndings(nil); got != nil {

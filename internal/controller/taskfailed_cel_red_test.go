@@ -34,7 +34,7 @@ var _ = Describe("the API around the single terminal", func() {
 	ctx := context.Background()
 
 	// The CEL rule on TaskHandlerSpec.Phase is a literal copy of the
-	// reserved names, so it has to move with them (#217).
+	// reserved name, so it has to move with it (#217).
 	It("refuses a handler for the single terminal, naming it", func() {
 		h := &flowv1alpha1.TaskHandler{
 			ObjectMeta: metav1.ObjectMeta{Name: "handler-for-taskfailed", Namespace: resourceNamespace},

@@ -58,14 +58,6 @@ func redBindings() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	}
 }
 
-func redRuns(phases ...flowv1alpha1.Phase) map[flowv1alpha1.Phase]int32 {
-	r := map[flowv1alpha1.Phase]int32{}
-	for _, p := range phases {
-		r[p]++
-	}
-	return r
-}
-
 // Catches IsReserved still answering for the two old names instead of the
 // single terminal (#217).
 func TestTaskFailedIsTheReservedTerminal(t *testing.T) {
@@ -92,7 +84,7 @@ func TestABoundTaskFailedStillStops(t *testing.T) {
 // Catches Next stopping silence at the old Escalated (#217).
 func TestSilenceEndsAtTaskFailed(t *testing.T) {
 	got := Next(Input{Bindings: redBindings(), Phase: redPhaseA, NoAnswer: redSilentWhy,
-		Runs: redRuns(redPhaseA), MaxRuns: 3})
+		Runs: ranOnce(redPhaseA), MaxRuns: 3})
 	if got.Next != redTerminal || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want TaskFailed/NoAnswer", got.Next, got.Outcome)
 	}
@@ -120,7 +112,7 @@ func TestABrokenDefinitionEndsAtTaskFailed(t *testing.T) {
 	t.Run("two statuses sharing a directory", func(t *testing.T) {
 		b := redBindings()
 		b[redPhaseA].Next["red-other"] = "ok"
-		got := Next(Input{Bindings: b, Phase: redPhaseA, Directory: "ok", Runs: redRuns(redPhaseA), MaxRuns: 3})
+		got := Next(Input{Bindings: b, Phase: redPhaseA, Directory: "ok", Runs: ranOnce(redPhaseA), MaxRuns: 3})
 		if got.Next != redTerminal || got.Outcome != OutcomeStructural {
 			t.Fatalf("got %q/%q, want TaskFailed/Structural", got.Next, got.Outcome)
 		}
@@ -132,7 +124,7 @@ func TestABrokenDefinitionEndsAtTaskFailed(t *testing.T) {
 func TestADeclaredEdgeToTaskFailedIsDeclined(t *testing.T) {
 	b := redBindings()
 	b[redPhaseA].Next[redTerminal] = redRefuseDir
-	got := Next(Input{Bindings: b, Phase: redPhaseA, Directory: redRefuseDir, Runs: redRuns(redPhaseA), MaxRuns: 3})
+	got := Next(Input{Bindings: b, Phase: redPhaseA, Directory: redRefuseDir, Runs: ranOnce(redPhaseA), MaxRuns: 3})
 	if got.Next != redTerminal || got.Outcome != OutcomeDeclined {
 		t.Fatalf("got %q/%q, want TaskFailed/Declined", got.Next, got.Outcome)
 	}

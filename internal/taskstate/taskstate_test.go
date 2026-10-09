@@ -111,7 +111,7 @@ func TestRunsDuringFinallyCountsNeitherTheEndingNorFinally(t *testing.T) {
 	}
 	got := Runs(s, flow())
 	if got[flowv1alpha1.PhaseTaskFailed] != 0 {
-		t.Fatalf("Escalated ran %d times, want 0: it is where the task stopped, not a phase about to run", got[flowv1alpha1.PhaseTaskFailed])
+		t.Fatalf("TaskFailed ran %d times, want 0: it is where the task stopped, not a phase about to run", got[flowv1alpha1.PhaseTaskFailed])
 	}
 	if got[flowv1alpha1.PhaseFinally] != 0 {
 		t.Fatalf("Finally ran %d times, want 0: the cleanup run in flight is skipped by name", got[flowv1alpha1.PhaseFinally])
@@ -229,7 +229,7 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 	Advance(s, spec(), dirOK, res, at)
 
 	if s.Phase != flowv1alpha1.PhaseTaskFailed {
-		t.Fatalf("phase = %q, want Failed", s.Phase)
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
 	if cond == nil {
@@ -365,7 +365,7 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	Fail(s, "flow \"sample-flow\" does not exist in this namespace", nil, at)
 
 	if s.Phase != flowv1alpha1.PhaseTaskFailed {
-		t.Fatalf("phase = %q, want Failed", s.Phase)
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 	if Current(s) != nil {
 		t.Fatal("a failed task has nothing in flight")
@@ -717,7 +717,7 @@ func TestFailStartsTheCleanupRunToo(t *testing.T) {
 	Fail(s, "the flow lost the binding it was running", specWithCleanup(ttl(time.Hour, 168*time.Hour)), at)
 
 	if s.Phase != flowv1alpha1.PhaseTaskFailed {
-		t.Fatalf("phase = %q, want Failed", s.Phase)
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 	if !InFinally(s) || Current(s).RunID != 2 {
 		t.Fatalf("currentRun = %+v, want the cleanup run as run 2", Current(s))

@@ -108,7 +108,7 @@ var _ = Describe("expiring a finished task", func() {
 		Expect(tk.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(succeededTTL)))
 	})
 
-	It("dates an escalated task with ttl.failed", func() {
+	It("dates a task stopped at TaskFailed with ttl.failed", func() {
 		fx.makeFlow(withTTL)
 		fx.makeHandler()
 		fx.makeTask()

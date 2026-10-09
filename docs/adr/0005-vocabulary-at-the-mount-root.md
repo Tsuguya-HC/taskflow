@@ -2,13 +2,13 @@
 
 - **status**: accepted（2026-09-05、人間の承認）
 - **根拠**: issue #92。棚を読む側が `results/<runID>/out/ok/report.md` の `out/` を落として
-  Escalated を踏んだ（ADR-0002/0003 を読んだ上で書いてなお）。実測 2026-09-05（下記）
+  TaskFailed を踏んだ（ADR-0002/0003 を読んだ上で書いてなお）。実測 2026-09-05（下記）
 
 **利用側から見た形**（これが先。機構はここから導出した）:
 
 ```yaml
 volumeMounts:
-  - {name: flow-workspace, mountPath: /workspace}                              # この run: /workspace/ok, /workspace/escalate
+  - {name: flow-workspace, mountPath: /workspace}                              # この run: /workspace/ok, /workspace/refuse
   - {name: flow-workspace, mountPath: /shelf, subPath: results, readOnly: true} # 棚: /shelf/<runID>/ok/report.md
 ```
 
@@ -54,7 +54,7 @@ chmod は EPERM（従来どおり、prepare はそこを触らない）
 
 **失うもの**: handler が workspace の run 直下を作業領域として使うこと（0555 になる）。作業
 領域は `/tmp`（readOnlyRootFilesystem 下で emptyDir を持ち込む必要があり、既存 handler は全部
-そうしている）。Escalated の残骸（ADR-0003 決定4）は work/<runID>/ に語彙とマークがそのまま残る
+そうしている）。TaskFailed の残骸（ADR-0003 決定4）は work/<runID>/ に語彙とマークがそのまま残る
 
 **覆したもの**: ADR-0001 の「`out/` を敷く」、ADR-0002 決定5 の `work/<runID>/out/...`、
 ADR-0003 決定2の実装（`MakeRun` の旧 doc コメント）が前提にしていた「run ディレクトリは agent の

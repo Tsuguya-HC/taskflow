@@ -505,8 +505,7 @@ func FailAs(status *flowv1alpha1.TaskStatus, readyReason, message string, flow *
 		Reason:  readyReason,
 		Message: message,
 	})
-	// Failed is reserved, so it is terminal and needs a human on its own
-	// say-so; Expire reaches that without consulting the flow's bindings or
+	// TaskFailed is reserved, so it is terminal on its own say-so; Expire reaches that without consulting the flow's bindings or
 	// terminals, which is what makes a nil flow here mean only "no ttl to
 	// read" rather than "cannot tell what this ending was". A flow this broken
 	// can still declare a cleanup run, and stop hands the task to it: the

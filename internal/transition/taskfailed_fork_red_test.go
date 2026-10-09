@@ -47,7 +47,7 @@ const redPick = flowv1alpha1.Phase("red-pick")
 // Catches a fork's silence stopping at the old Escalated (#217).
 func TestAForkWithoutAnAnswerEndsAtTaskFailed(t *testing.T) {
 	got := Fork(Input{Bindings: redForkBindings(), Phase: redPick, NoAnswer: redSilentWhy,
-		Runs: redRuns(redPick), MaxRuns: 3})
+		Runs: ranOnce(redPick), MaxRuns: 3})
 	if got.Next != redTerminal || got.Outcome != OutcomeNoAnswer {
 		t.Fatalf("got %q/%q, want TaskFailed/NoAnswer", got.Next, got.Outcome)
 	}
@@ -55,7 +55,7 @@ func TestAForkWithoutAnAnswerEndsAtTaskFailed(t *testing.T) {
 
 // Catches a forked branch at its limit stopping at the old Escalated (#217).
 func TestAForkedBranchAtItsLimitEndsAtTaskFailed(t *testing.T) {
-	runs := redRuns(redPick)
+	runs := ranOnce(redPick)
 	runs[redPickBranchA] = 2
 	got := Fork(Input{Bindings: redForkBindings(), Phase: redPick, Directory: "a",
 		Runs: runs, MaxRuns: 2})
@@ -68,7 +68,7 @@ func TestAForkedBranchAtItsLimitEndsAtTaskFailed(t *testing.T) {
 func TestABrokenForkEndsAtTaskFailed(t *testing.T) {
 	b := redForkBindings()
 	delete(b, "red-sort")
-	got := Fork(Input{Bindings: b, Phase: redPick, Directory: "a", Runs: redRuns(redPick), MaxRuns: 2})
+	got := Fork(Input{Bindings: b, Phase: redPick, Directory: "a", Runs: ranOnce(redPick), MaxRuns: 2})
 	if got.Next != redTerminal || got.Outcome != OutcomeStructural {
 		t.Fatalf("got %q/%q, want TaskFailed/Structural", got.Next, got.Outcome)
 	}
@@ -77,7 +77,7 @@ func TestABrokenForkEndsAtTaskFailed(t *testing.T) {
 // Catches a fork's declared refusal reading as an ordinary edge (#217).
 func TestAForkDeclaredRefusalIsDeclined(t *testing.T) {
 	got := Fork(Input{Bindings: redForkBindings(), Phase: redPick, Directory: redRefuseDir,
-		Runs: redRuns(redPick), MaxRuns: 3})
+		Runs: ranOnce(redPick), MaxRuns: 3})
 	if got.Next != redTerminal || got.Outcome != OutcomeDeclined {
 		t.Fatalf("got %q/%q, want TaskFailed/Declined", got.Next, got.Outcome)
 	}

@@ -226,7 +226,7 @@ var _ = Describe("starting a task", func() {
 		reconcileOnce()
 
 		Expect(get().Status.Phase).To(Equal(phaseReport),
-			"a phase with no binding and nothing in flight already finished — it must not become Failed")
+			"a phase with no binding and nothing in flight already finished — it must not become TaskFailed")
 
 		var jobs batchv1.JobList
 		Expect(k8sClient.List(ctx, &jobs, client.InNamespace(resourceNamespace),
@@ -286,7 +286,7 @@ var _ = Describe("starting a task", func() {
 	// terminal on arrival — begin and Advance never set CurrentRun without
 	// first confirming a binding, so losing it here can only mean the
 	// definition moved out from under a run, which §5 "実行時の矛盾は修復せず
-	// Failed" says is a structural fault, not a quiet finish.
+	// TaskFailed" says is a structural fault, not a quiet finish.
 	//
 	// A task with a copy is not under the live flow at all (#181).
 	losesBinding := func(flow *flowv1alpha1.TaskFlow) {

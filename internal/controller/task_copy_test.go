@@ -104,7 +104,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		Expect(fx.get().Status.Phase).To(Equal(phaseReport), "ok leads where the copy says, not where the live flow now says")
 	})
 
-	// 変異: flow が無ければ Failed にする（コピーを見ない）。
+	// 変異: flow が無ければ TaskFailed にする（コピーを見ない）。
 	It("keeps running when the live flow is deleted", func() {
 		flow := awaitingAnswer()
 		Expect(k8sClient.Delete(fx.ctx, flow)).To(Succeed())

@@ -37,7 +37,7 @@
 この「前の attempt が残したもの」は**通常は存在しない**。再試行の条件は
 `failure != "" && !collect.Ran(pods)` で、`Ran` は init container の終了も見る。prepare が走って
 `work/<runID>` を作っていたなら `Ran` は true になり、その run は再試行されず
-「handler の沈黙」として Escalated へ行く（`collect.Ran` の doc がそう言っている）。
+「handler の沈黙」として TaskFailed へ行く（`collect.Ran` の doc がそう言っている）。
 番号を消費する根拠として書かれているものが、ほぼ空振りしていた。
 
 残る到達経路は **Pod オブジェクトごと消えた場合**（eviction / node drain）だけで、そこでだけ
@@ -57,7 +57,7 @@ ADR-0002 決定5 の「最大番号 = 直前の封印済み run」は「番号 =
 
 ただし排他として働くのは**同じノード**のケースだけ。別ノードのゾンビならサーバが素直に unlink して
 削除は成功し、ゾンビは次の I/O で ESTALE を食って死ぬ。どちらでも新しい attempt のディレクトリは
-汚れないが、「必ず Escalated で見える」とは言えない。
+汚れないが、「必ず TaskFailed で見える」とは言えない。
 
 **決定5 が要るのは、番号を据え置くと生まれる 1 つの穴のため**。Pod オブジェクトは消えたが
 プロセスは生きている publish（kubelet との断絶、force delete）は、いずれ自分の SIGTERM を受けて
@@ -79,7 +79,7 @@ ADR-0002 決定5 の「最大番号 = 直前の封印済み run」は「番号 =
 - **照合と rename の間の窓は許容**。ゾンビの照合が通った直後に次の attempt の `MakeRun` が
   ディレクトリを消して作り直し、そこへゾンビの rename が走る幅は残る。その場合は生きている
   attempt の作りかけが棚へ載り、その attempt の publish が自分の照合でマークを見つけられず失敗を
-  報告して Escalated になる — 嘘の verdict は出ない。現実的な競合はこれではなく「ゾンビが
+  報告して TaskFailed になる — 嘘の verdict は出ない。現実的な競合はこれではなく「ゾンビが
   grace period のあいだ SIGTERM を待つ数十秒〜数分のうちに次の attempt が始まる」で、
   そちらは照合で確実に止まる。窓を閉じるには照合と rename を 1 つの原子操作にする必要があり、
   POSIX にその道具は無い
@@ -87,7 +87,7 @@ ADR-0002 決定5 の「最大番号 = 直前の封印済み run」は「番号 =
 **孤児の窓（ADR-0002 決定5）とは衝突しない**。封印して rename は済んだが termination message を
 書く前に publish が死んだ run は、publish が終了しているので `Ran` が true、つまり再試行されない。
 `results/<runID>` が既にある状態で同じ番号の再試行が来ることは、Pod ごと消えた場合を除いて
-起こらない。その 1 ケースでは `Move` が既存の棚を上書きせず拒否し、run は Escalated で人間に回る
+起こらない。その 1 ケースでは `Move` が既存の棚を上書きせず拒否し、run は TaskFailed で止まる
 — fail-closed で、嘘はつかない。
 
 **却下した案**:
@@ -112,7 +112,7 @@ run」は「番号 = 決着した run の順序」へ強まる。
 出るようになったとき。そのとき棚の 1 run 1 ディレクトリが崩れるので、番号の意味も一緒に決め直す。
 
 **未解決**: ゾンビが `work/<runID>` を掴んだ状態で `MakeRun` の削除が ENOTEMPTY で落ち、
-infra retry を経て Escalated まで届くか（ADR-0003 の未解決と同じ実測。番号を据え置いたことで
+infra retry を経て TaskFailed まで届くか（ADR-0003 の未解決と同じ実測。番号を据え置いたことで
 逃げ道が消え、掃除の成否がそのまま再試行の成否になったので、優先度が上がった）。
 削除が成功した場合に、同名で作り直したディレクトリへゾンビの書き込みが現れないこと
 （kubelet の subPath bind mount が inode に固定されているはず）も、まだ推論であって実測ではない。

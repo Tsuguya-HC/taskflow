@@ -23,9 +23,9 @@
    Task から導いた名前は毎回計算し直せて、見つけた物の owner を検査できる。Task の名前の下に、別の UID が
    controller として持つ revision があっても、それは読まない（写しが無いものとして扱う）
 4. **開始時の失敗。** 開始フェーズが未束縛、binding が名指す handler が無い、写しが 1 つの object に
-   収まらない — このどれでも Task は最初の run の前に `Failed` になる（Ready の reason は `FlowBroken`）。
+   収まらない — このどれでも Task は最初の run の前に `TaskFailed` になる（Ready の reason は `FlowBroken`）。
    収まるかどうかは apiserver の拒否に任せる。コントローラ独自の上限は持たない
-5. **開始後。** 止まっていない Task の写しが消えたら `DefinitionsLost` で `Failed` にする。cleanup の run は
+5. **開始後。** 止まっていない Task の写しが消えたら `DefinitionsLost` で `TaskFailed` にする。cleanup の run は
    走らせない — 固定した定義が無くなった Task に固定していない定義で片付けを走らせることを、この ADR は
    排するから。写しが作られる前に始まった Task で、止まっていないものは、その時点の定義から 1 度だけ
    写しを作る。**止まった Task** は写しが無くても移行も失敗もさせず、残っている負債（cleanup の run と
@@ -72,10 +72,10 @@ Job の template が run を固定するという指摘は正しいが、固定�
     瞬間から当てはまる
   - 「finally の handler が解決できない」: 「無い」の判定が開始時に移る。開始時に無ければ、後で作られても
     無いまま。開始後に消されても写しから走る
-  - 「flow が壊れて `Failed` に着いた。run は一度も決着していない」: 写しを持つ Task では、走行中の run の
+  - 「flow が壊れて `TaskFailed` に着いた。run は一度も決着していない」: 写しを持つ Task では、走行中の run の
     束縛が消えることは起こらなくなる。開始時の失敗と移行の失敗がこの行に加わり、cleanup は走る — 写しが
     無いので live の定義から
-  - 表への追加: **写しが消えて `DefinitionsLost` で `Failed` になった Task は、cleanup が走らない**
+  - 表への追加: **写しが消えて `DefinitionsLost` で `TaskFailed` になった Task は、cleanup が走らない**
 - [ADR-0011](0011-verdict-from-declared-state.md)「ADR-0007 との関係」: `State` の run の語彙は走行中に入れ
   替わらない。写しから読む。「覆すには」の外部依存の列挙（`batch/v1` + core/v1 だけ）: ControllerRevision は
   組み込みの API で、あの列挙が守ろうとしていた性質 — 組み込みの API だけを使い、サードパーティに依存しない —
