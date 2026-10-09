@@ -7,6 +7,7 @@
   生きている間だけで、別 Task で追いかける形では workspace に触れない。先行調査 2026-09-11
   （Tekton `finally` / Argo `onExit` / GitHub Actions `always()` / Concourse `ensure` /
   Kubernetes `metadata.finalizers` の一次資料。レポートと実測リストはリポジトリ外の調査記録）
+- **一部を覆された**: [ADR-0014](0014-pin-definitions-at-start.md)（決定 6 の「dispatch 時点の flow から読む」と、決定 7 の表の 3 行）
 
 **決定**:
 

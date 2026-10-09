@@ -6,6 +6,7 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 - 決定文 10〜20 行: status / 決定 / 覆したもの（あれば）/ 覆すには / ポインタ
 - 経緯・実測は issue / PR / design.md の該当節に置いて参照する
 - status は `accepted` / `superseded`。番号は連番、再利用しない
+- 一部だけ覆された ADR は `accepted` のまま、タイトル直下の箇条書きの最後に `一部を覆された` の行を置く。覆した側の ADR の「覆したもの」と対になる
 - 既存の判断（design.md §11 の却下表）は遡って起こさない。次に触ったものから
 
 | # | status | 決定 |
@@ -23,3 +24,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | [0011](0011-verdict-from-declared-state.md) | accepted | framework が起こさない run には、コントローラが run ごとの置き場を作る（`External` → `State`） |
 | [0012](0012-run-limit-per-phase.md) | accepted | 循環の上限はフェーズごとの実行回数（`maxRunsPerPhase`）。`reworkBudget` を置き換える |
 | [0013](0013-parallel-phases.md) | accepted | 並列フェーズは `join` で宣言し、分岐から合流までを閉じた領域にする。枝ごとに runID、読む口は `inputs` ビュー |
+| [0014](0014-pin-definitions-at-start.md) | accepted | Task は開始時に写した定義で最後まで走る。新しい定義は作り直した Task から |

@@ -6,6 +6,7 @@
   それは型が保証できないことを型の意味として書いていたことになる。#110 が自分で
   「その External が本当に人間かは保証しない」と書いているのがその自白で、
   `taskhandler_types.go` にも `// A human reviewer is this.` が残っていた
+- **一部を覆された**: [ADR-0014](0014-pin-definitions-at-start.md)（「ADR-0007 との関係」と、「覆すには」の外部依存の列挙）
 
 **決定**:
 

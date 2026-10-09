@@ -256,7 +256,15 @@ framework の外になる。独立した 2 本の Task になり親子関係が�
 決まらない。手元に先例があるので繰り返さない。
 
 以下の旧 `spec` フィールドは TaskFlow 側へ移動: `profile` / `bindings` / `reworkBudget`（後に `maxRunsPerPhase` へ置き換え、[ADR-0012](adr/0012-run-limit-per-phase.md)）。
-参照は毎 reconcile で解決し直す（走行中の flow をスナップショットしない — [ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。
+Task は開始時に、参照する flow と handler の定義を写し、最後までその写しで走る
+（[ADR-0014](adr/0014-pin-definitions-at-start.md)）。写すのは flow の spec、binding が名指すすべての
+handler の spec、開始の時点で在れば finally の handler で、status は写さない。**新しい定義も編集された定義も、
+届くのはその後に作られた Task だけ。** 走っている Task に取らせたいなら Task を作り直す。走行中の Task の
+写しを差し替える操作は無い。
+
+**固定しないもの。** handler が ConfigMap / Secret から取る値（`configMapKeyRef` / `envFrom` / volume）は
+Pod の起動ごとに kubelet が解決し、コントローラは読まない。タグで書いた image も書いたまま写すので、タグは
+run ごとに引き直される。Task の間ずっと同じであるべき値は handler の spec に書く（タグでなく digest）。
 
 ```yaml
 status:
@@ -264,8 +272,29 @@ status:
   runID: 3                    # 単調増加。パスと子リソース名に使う
   currentRuns: [{phase: Review, runID: 3, deadline: ..., jobName: ...}]  # 走行中の run。並列の枝ごとに 1 つ（ADR-0013）
   history: [...]              # 上限付きリングバッファ
-  conditions: [...]
+  conditions:
+    - {type: DefinitionsPinned, status: "True", reason: Copied}   # 写しを作った後に付き、消えない
+    # Ready=False は、人間が見る必要のある終端に着いたとき、または finally が失敗したときに付く（§5）
 ```
+
+status は写しの名前も参照も持たない。持つのは `DefinitionsPinned` だけで、写しは Task の名前と UID から
+毎回導いて探す。
+
+### Task は開始時に写した定義で最後まで走る
+
+写しは Task が持つ owned object で、Task の外から見えるのは次のとおり:
+
+| | |
+|---|---|
+| 置き場 | Task ごとに ControllerRevision（`apps/v1`）を 1 つ、Task の namespace に。Task が owner で、Task と一緒に回収される。ラベルは `managed-by` と `task-uid`（`run-id` は無い。Task 全体のもの） |
+| 名前 | Task の名前と UID から導く。同じ名前で作り直した Task は別の名前を見る。status には書かない |
+| 作る時 | 最初の run の前。`DefinitionsPinned=True`（reason `Copied`）は写しができた後に書き、消さない |
+| 書き換え | しない。作ったら読むだけ |
+| 読み方 | キャッシュを通さない。RBAC は `controllerrevisions` の `get` と `create` だけ |
+| 別の UID の revision | Task の名前の下に別の UID が controller として持つ revision があっても読まない。写しが無いものとして扱う（扱いは §5） |
+| 読めない写し | 読めるが復号できない写しは、エラーとして再試行する。live の定義には戻らない |
+
+実行時の失敗と移行は §5「実行時の矛盾は修復せず `Failed`」。
 
 ### TaskHandler（**namespaced**, GitOps）
 
@@ -358,7 +387,7 @@ handler が書くのは `runner: {type: State}` と `timeout` だけ。
 
 ワークフローエンジンを runner にすると、コントローラがそのエンジンの型を知り、リソースを作り、
 status を watch し、対象 namespace の RBAC を持つことになる。**そのエンジンが無い環境で動かないもの**
-になり、`batch/v1` + `core/v1` だけという性質（§14 の public 化の根拠でもある）が崩れる。
+になり、組み込みの Kubernetes API だけを使い、サードパーティの API に依存しないという性質（§14 の public 化の根拠でもある）が崩れる。
 
 将来どうしても必要になれば unstructured で書けば型の import は不要なので扉は閉じないが、**既定からは外す**。
 
@@ -430,10 +459,12 @@ test: {handler: test, next: {Review: done, Escalated: stuck}}
   `Failed`）に着いたら Task はそこで止まり、まだ走っている枝は `Cancelled` として記録して Job を消す
   （fail-fast）。history には「決着した他の枝 → `Cancelled` の枝 → 終端を決めた枝」の順に積む
 - Job の削除は status の書き込みの**後**に行う（先に書けば削除が失敗しても metric と Event は届く）。
-  削除そのものは history から読み直せる状態そのもの（`reapCancelledJobs`）にしてあり、その reconcile で
+  削除そのものは history から読み直せる状態そのものにしてあり、その reconcile で
   失敗しても、コントローラが再起動しても、後続の reconcile（cleanup run が始まる前も含む）が同じ
-  Cancelled 行を見つけて改めて消す。定義が壊れて `driveBranches` に入れないまま Task が Failed になる
-  経路（フェーズの binding 自体が消えた等）も同じ関数を通る
+  Cancelled 行を見つけて改めて消す。枝を回す経路に入れないまま Task が Failed になる経路 — 写しが
+  消された（`DefinitionsLost`）、写しの無い Task の移行が失敗した — も同じ削除を通り、そのとき分岐元に
+  いた Task は枝が `Cancelled` と記録され Job が止まる。走行中の run の binding が消えることは、写しを
+  持つ Task には起こらない
 - v1 の制限: 枝はフェーズ 1 つ、枝は Job runner だけ（State の枝は実行時に `Failed`）
 
 1 つの Pod の中に閉じる検査（下の合成規則）は今のまま:
@@ -573,7 +604,8 @@ P2 の分離が保たれる（prepare / publish はコントローラの側に�
 
 ### コントローラが作る物には決まったラベルを付ける
 
-Job・PVC・verdict の置き場のように、**中身まで framework が決めている物**には 3 つだけ付ける
+Job・PVC・verdict の置き場・定義の写し（ControllerRevision）のように、**中身まで framework が決めている物**には
+3 つだけ付ける。写しに付くのは `managed-by` と `task-uid` で、`run-id` は無い
 （[ADR-0011](adr/0011-verdict-from-declared-state.md) 決定 5）:
 
 | ラベル | 何を言うか |
@@ -666,7 +698,7 @@ framework が持つ名前は **2 つだけ**:
 | 名前 | いつ | 束縛できるか | `next` の行き先にできるか |
 |---|---|---|---|
 | `Escalated` | 答えが 1 つに定まらなかった（0 個 / 2 個以上 / 時間切れ / 宣言に無いディレクトリ） | ✗ | **✓** |
-| `Failed` | flow 自体が壊れている（束縛の無いフェーズ、同じディレクトリを指す 2 ステータス） | ✗ | ✗ |
+| `Failed` | Task が走る定義が読めない・壊れている（開始フェーズが未束縛、束縛の無いフェーズ、同じディレクトリを指す 2 ステータス、開始時に束縛が名指す handler が無い、写しが 1 object に収まらない、写しが消された） | ✗ | ✗ |
 
 **`Escalated` は行き先としてだけ宣言できる。**
 
@@ -688,7 +720,7 @@ next: {報告: ok, Escalated: escalate}
 CRD 化で「書かない」しか無くなっていた。**打ち切りで終わった run と、判定を降りた run が、
 どちらも「何も書かなかった」として history に同じ形で残ってしまう。**
 
-`Failed` は行き先にもできない。`Failed` は flow の破損であって handler の言い分ではなく、
+`Failed` は行き先にもできない。`Failed` は定義の側の破損であって handler の言い分ではなく、
 **定義が自分について「壊れている」と結論する**筋合いが無い。`next` が `Failed` を名乗ったら
 それ自体が破損なので、`Structural` で `Failed` に落とす（宣言された辺として通さない）。
 
@@ -715,7 +747,7 @@ terminals:
 | 出るもの | いつ | 詳細 |
 |---|---|---|
 | Kubernetes Event | `Failure` のときだけ | `Warning` / reason `HandlerFailed` / メッセージに handler の理由 |
-| 条件 | `Escalated` / `Failed` / `Failure`（人間が見に来る必要がある終端） | `Ready=False`。reason は `Failure` のとき `HandlerFailed`、他の 2 つは `res.Outcome`（`Failure` の outcome は **`Declared` のまま** — 宣言された辺を通っただけで、機構は何も壊れていない。人間が最初に見るべきは「結論が悪い」の方） |
+| 条件 | `Escalated` / `Failed` / `Failure`（人間が見に来る必要がある終端） | `Ready=False`。reason は `Failure` のとき `HandlerFailed`、`Failed` は破損の種類（定義が壊れている・開始時に読めない・写しが 1 object に収まらない `FlowBroken`、写しが消された `DefinitionsLost`）、`Escalated` は `res.Outcome`（`Failure` の outcome は **`Declared` のまま** — 宣言された辺を通っただけで、機構は何も壊れていない。人間が最初に見るべきは「結論が悪い」の方） |
 | TTL | 同じ 3 値で `ttl.failed`、残り（`Success` / `Undeclared`）は `ttl.succeeded`（§10） | |
 | metric | **`EndingRunning`（終端でない）以外は常に** — `Undeclared` も含む | `taskflow_task_outcomes_total{flow, phase, severity}` |
 
@@ -723,14 +755,15 @@ terminals:
 `Escalated` / `Failed`（framework 自身の 2 つ）、`Undeclared`（宣言が無い）。
 metric の `severity` は 5 値すべてを常に出すので、**「まだ宣言していない flow」がダッシュボードで見つかる**。
 `flow` ラベルは実在する TaskFlow の名前か、参照先が存在しなかったことを表す固定値 `<unresolved>` の
-どちらかを取る。
+どちらかを取る。`<unresolved>` は、参照先の flow が存在しなかった Task と、定義の写しを失った Task
+（`DefinitionsLost`。どの flow に属していたかを、固定した定義から言えない）の両方を数える。
 
 **宣言された終端は、起きる前から 0 として出る**（ADR-0010）。flow の終端は「どの `next` の行き先でもあり、
 束縛が無いもの」＋ 予約語 2 つで、`severity` は `terminals` の宣言でフェーズごとに一意に決まる
 （直積ではない）。0 を先に出すのは、counter の子系列が最初の `Inc()` で値 1 として生まれ、
 **一度しか起きない終端が `increase()` から見えない**ため — ここで一番取りこぼしたくないのは、
-その定義上めったに起きない `Failure` と `Escalated` の方になる。打つのは Task がその flow を
-解決したときで、TaskFlow を watch はしない。**走らせる者のいない flow の終端は出ない。**
+その定義上めったに起きない `Failure` と `Escalated` の方になる。打つのは Task が走る定義を
+得たとき（開始時に写したもの、または写しを持たない Task が読んだ live のもの）で、TaskFlow を watch はしない。**走らせる者のいない flow の終端は出ない。**
 
 これが無いと、エージェントが「この対象は壊れている」と**明示**しても framework は素通りする。
 Step 0 の試作は通知サイドカーが自前で判定していたが、それは利用側が毎回書き直す羽目になる。
@@ -774,12 +807,16 @@ finally:
   にだけ付く。`FLOW_PHASE` は他の run と同じく「この run が何か」= `Finally` を言う）。outcome は
   **終端を決めた run** の行から引く — 直列なら番号が 1 つ前の run、並列の途中で枝が止めたならその枝
   （ADR-0013 決定8。history の最後に積まれる）。run が一度も決着せずに `Failed` に着いた場合、outcome は
-  空で渡す（推測で埋めない）。**3 値は dispatch 時点の
-  flow から読む**（Job の template と同じ扱い）。封印されるのは既に書かれたものだけで、TTL の選択も
-  記録済みの `Ready` condition から決める（終端到達後の flow を読み直さない）
+  空で渡す（推測で埋めない）。**3 値は、Task が走っている定義（開始時の写し）から読む。** 写しを持たない
+  Task（開始時に失敗した、写しが作られる前に止まった）に限って live の flow から読む。封印されるのは
+  既に書かれたものだけで、TTL の選択も記録済みの `Ready` condition から決める（終端到達後の定義を読み直さない）
+- **finally の handler は、開始の時点で在ったときだけ写しに入る。** 無かったなら、後で作っても使われず、
+  cleanup の run は handler が無いものとして `FinallyFailed` を記録する。写しに入っていれば、live の
+  TaskHandler を削除・編集してもその Task には効かない
 - **走らない場面**は ADR-0009 の表が正。Task の削除では走らない（削除時の後始末は `metadata.finalizers` で
   なく §10 の sweep）、flow が読めずに `Failed` に着いたときも走らない、flow が壊れて `Failed` に着いた
-  ときは走る
+  ときは走る。**写しが消されて `DefinitionsLost` で `Failed` になったときも走らない**（固定した定義が
+  無く、固定していない定義で片付けを走らせないため。[ADR-0014](adr/0014-pin-definitions-at-start.md)）
 
 ### 遷移関数
 
@@ -883,7 +920,7 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 | `bindings` のキーが `Escalated` / `Failed` | 予約語。「答えが無い」が成功経路の 1 行隣にあってはならない | webhook |
 | `bindings` のキーが `Finally`、または `next` の行き先が `Finally` | 予約語。片付けの run 名を、束縛できるフェーズや遷移の行き先に使わせない | webhook（ADR-0009） |
 | フェーズ名が空（`bindings` のキー、`next` の行き先） | 名前の無いフェーズは終端として素通りする。`spec.start` は `MinLength=1` で弾けるが、map のキーはスキーマで縛れない | webhook |
-| handler の `spec.phase` と binding のキーが不一致 | 取り違え | **入れない**。TaskFlow の admission が別オブジェクトの存在に依存してはいけない — handler が後から届く適用順で詰む（ADR-0006 決定4）。実行時の `brokenFlow` → `Failed` のまま |
+| handler の `spec.phase` と binding のキーが不一致 | 取り違え | **入れない**。TaskFlow の admission が別オブジェクトの存在に依存してはいけない — handler が後から届く適用順で詰む（ADR-0006 決定4）。実行時の矛盾として `Failed`（下の「実行時の矛盾は修復せず `Failed`」）のまま |
 | フェーズ名（`bindings` のキー）がパス要素として不正 | 後続の run に答えを見せる `inputs/<フェーズ名>/` のディレクトリ名になる（[ADR-0013](adr/0013-parallel-phases.md) 決定6） | webhook（`contract.CheckDirectoryName`） |
 | `join` の形が閉じた領域にならない: 合流先が未束縛・自分自身、分岐元から合流先への直接の辺、選べる行き先が無い、`always` が行き先・合流先・予約語と重なる、枝が未束縛・再分岐・`start`・合流先と `Escalated` 以外へ出る・合流先へ着けない、外から枝へ入る辺、2 つの分岐元が枝を共有 | 待ち合わせる枝と合流先が実行前に決まらない（ADR-0013 決定2・3。v1 の枝はフェーズ 1 つ） | webhook |
 | 開始フェーズ（`spec.start`）から到達できないフェーズがある | 孤島。書き間違い以外にありえない | webhook |
@@ -894,8 +931,9 @@ P8 の「矛盾したら拒否」は構造的矛盾に対するものであっ�
 到達不能」が全部くっついてくるが、間違いは 1 個だからである。それ以外は**見つかったものを全部
 一度に返す**。拒否のコストが commit 1 回である以上、1 回の apply で言えることは 1 回で言う。
 
-**`Task.spec` は作成後 immutable**（CEL の `oldSelf` で拒否）。
-実行中にグラフが書き換わる race を丸ごと消す。変更したければ作り直す。
+**`Task.spec` は作成後 immutable**（CEL の `oldSelf` で拒否）。Task が走る定義（flow と handler）も、
+開始時に写したもので固定される（§4「Task は開始時に写した定義で最後まで走る」）。
+実行中にグラフが書き換わる race を丸ごと消す。変更したければ、spec も定義も、Task を作り直す。
 
 **証明書は配置側から与える。** taskflow が配る `ValidatingWebhookConfiguration` は `caBundle` が空で、
 コントローラは `--webhook-cert-path` の下のファイルを読むだけ（証明書を配る仕組みを知らない）。
@@ -911,14 +949,45 @@ TaskFlow の書き込みが rollout 中の数秒拒否されるより悪い（AD
 | 種類 | 例 | 結果 |
 |---|---|---|
 | エージェント起因 | verdict が無い / ディレクトリが 2 つ / 未知のトークン | 直接 **Escalated**（人間が見る） |
-| 構造起因 | handler が実行中に削除された / 束縛の無いフェーズを指した / 1 つのディレクトリが 2 ステータスを指す / 開始時に束縛が名指す handler が無い / 開始時の定義の写しが 1 object に収まらない | **Failed**（修復を試みない） |
+| 構造起因 | 束縛の無いフェーズを指した / 1 つのディレクトリが 2 ステータスを指す / 開始時に束縛が名指す handler が無い / 開始時の定義の写しが 1 object に収まらない / 写しの無い Task の移行が同じ理由で失敗した / **止まっていない Task の写しが消された** | **Failed**（修復を試みない） |
 
-**実行中の handler の「編集」は検出しない**（[ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。走行中の run は
-Job の `spec.template` が作成後 immutable であることに守られており、コントローラが run のために handler を読むのは
-Job を新規作成する時だけ（Task の開始時にも定義の写しを作るために読むが、その写しはまだ run に使わない）。編集が効くのは次の run からで、それは GitOps でロールアウトした定義が
-次から使われるという普通の挙動。**削除**の方は検出する（`handlerFor` → `brokenFlow` → `Failed`）。
+Failed の Ready の reason は、定義が読めない・壊れている場合（開始時の 3 つと移行の失敗）が `FlowBroken`、
+写しが消された場合が `DefinitionsLost`。
 
-flow の編集も同じく毎 reconcile で読み直す。矛盾は上の表のとおり、遷移の瞬間に構造として捕まえる。
+**定義の編集と削除は、開始した Task には届かない**（[ADR-0014](adr/0014-pin-definitions-at-start.md)）。
+走行中の run は Job の `spec.template` が作成後 immutable であることに守られ、run をまたぐ分は開始時の写しが
+守る。live の flow や handler を編集・削除しても、写しを持つ Task は何も見ない。編集が効くのは作り直した
+Task から。矛盾は上の表のとおり、遷移の瞬間に、写しに対して構造として捕まえる（ハッシュも live の定義との
+比較も持たない — [ADR-0007](adr/0007-no-resolved-spec-hashes.md)）。
+
+**開始時の失敗。** 開始フェーズが未束縛、束縛が名指す handler が無い、写しが 1 つの object に収まらない
+（収まるかは apiserver の拒否に任せ、コントローラ独自の上限は無い）、のどれでも Task は最初の run の前に
+`Failed` になる。TTL は live の flow から決め、flow が cleanup の run を宣言していればそれも走らせる。
+この Task には写しが無いので、cleanup の run は live の定義を読む。
+
+**開始後に定義が読めなくなったとき。** 開始した Task が**止まった**とは、次のどれかが成り立つこと:
+`expiresAt` がある、予約フェーズにいる、cleanup の run が走っている、走行中の run が無く flow が束縛しない
+フェーズにいる。
+
+- **写しがある。** 写しで走る。印（`DefinitionsPinned`）が無く、止まってもいなければ、印を足す
+- **印はあるが写しが無く、止まっていない。** 写しが消された。`DefinitionsLost` で `Failed` にする。
+  cleanup の run は走らせない（live の finally handler は Task が固定したものではない）。TTL もその時点では
+  書かない。metric の `flow` ラベルは `<unresolved>`。のちに予約フェーズの分岐が、同名の live の flow が
+  あればその TTL で `expiresAt` を埋める（§10）。分岐元にいた Task は、他の失敗と同じく枝を `Cancelled` と
+  記録して Job を止める。走行中の run がある Task は、live の flow を読まずに落とす。走行中の run が無い Task は
+  止まったかどうかの判定に live の flow が要り、それも無ければ何もしない
+- **印も写しも無く、止まっていない。** 写しが作られる前に始まった Task。その時点の live の定義から、
+  開始時と同じ規則で 1 度だけ写しを作り、そのあとで印を書く。束縛が名指す handler が無い、写しが収まらない
+  ときは開始時と同じく `FlowBroken` で落とす（TTL と cleanup は live の flow から。分岐元にいれば枝を
+  `Cancelled` にする）。live の flow が無ければ移行しない。走行中の run がある Task は「flow が存在しない」として
+  TTL なしで落ち、無い Task は何もしない
+- **止まっていて写しが無い**（写しが作られる前に止まった、開始時に失敗した、止まった後に写しが消された）。
+  そのままにする。残っている負債（cleanup の run と `expiresAt`）のために live の flow と TaskHandler を
+  読む。写しを消しても、終わった Task が `Failed` に変わることは無い
+- **別の UID の revision。** Task の名前の下に別の UID が controller として持つ revision は読まず、写しが
+  無いものとして扱う。移行はその名前に写しを作れないのでエラーを返して再試行し、回収が名前を空けるまで
+  Task は進みも落ちもしない。開始時も同じ。印があれば `DefinitionsLost` になる
+- **復号できない写し**はエラーで、再試行する。live の定義には戻らない
 
 ### 循環に必要なもの
 
@@ -1036,7 +1105,7 @@ pod の中身が全部ユーザー定義になるため、**コントローラ�
 - termination message が無い / 読めない / 語彙外 → 直接 Escalated
 - store への publish はユーザーのサイドカーの仕事であり、コントローラの関心事ではない
 
-これで**コントローラの外部依存は `batch/v1` と core/v1 だけ**になる。
+これで**コントローラが使うのは組み込みの Kubernetes API だけで、サードパーティの API への依存は無い**まま保たれる（定義の写しの ControllerRevision も組み込み）。
 
 **この判断は実物で裏を取っている。** 既存のワークフロー定義が
 workflow レベルの `emptyDir` で判定を渡そうとしていたが、emptyDir は Pod スコープなので
@@ -1592,7 +1661,7 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 
 | 層 | 手段 |
 |---|---|
-| K8s 内（Workflow / PVC / ConfigMap） | **ownerReferences** で Task 所有 → カスケード |
+| K8s 内（PVC / ConfigMap / 定義の写し（ControllerRevision）） | **ownerReferences** で Task 所有 → カスケード（写しは Task と一緒に消える。数は Task と同じで、TTL が抑える） |
 | 並列の枝（`Cancelled`）の Job | **`reapCancelledJobs`**（history の `Cancelled` の行を根拠に、Task の TTL を待たずに消す。終わった Job は残す。ADR-0013 決定4） |
 | Task 自身 | **TTL**（succeeded 1h / failed 168h）※ etcd 保護のため必須 |
 | K8s の外（S3 prefix / git ブランチ / レジストリのタグ） | **`task-uid` + 定期 sweep**（1 本に統合） |
@@ -1621,7 +1690,10 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
   フレームワークが決める
 - 期限を Task 自身に持つので、**Escalated 後に flow が編集・削除されても消える時刻は変わらない**（予約フェーズが
   flow 無しで終端なのと同じ理由）。flow が存在せず `Failed` になった Task は読む TTL が無い間は残る。これは意図した
-  仕様で、**同名の flow が後から現れれば次の reconcile で backfill され、その TTL で消える**（下記）
+  仕様で、**同名の flow が後から現れれば次の reconcile で backfill され、その TTL で消える**（下記）。
+  backfill が読む live の flow は、**定義の写しを持たない Task** のためのもの — flow が無くて失敗した Task、
+  写しが消された Task（`DefinitionsLost`）、写しが作られる前に止まった Task。写しを持つ Task の TTL は
+  写しの flow から決まり、live の flow の編集は届かない
 - `ttl` は CRD default（`succeeded: 1h` / `failed: 168h`）で埋まる。「必須」は validation ではなく default で満たす
 - コントローラは `expiresAt` を過ぎた Task を UID 前提条件付きで delete する。Job は ownerReference で追従する。
   `Cancelled` と記録された枝の Job だけは待たない — `finally` を持たない flow は終端に着いた同じ書き込みで
@@ -1679,6 +1751,10 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
 | 終端後の片付けを `metadata.finalizers` で削除時に走らせる | 起動条件が DELETE だけで完了では走らず、期限も順序も無く、結果を書く先のオブジェクトごと消える。先行者は期限と opt-out を自前の CRD に足して固着を避けている。片付けは終端の後の run（`finally`）として持ち、削除時の後始末は sweep（ADR-0009） |
 | `finally` の失敗で終端の意味を変える（`Failed` に落とす、severity を上書き） | 結果を 1 値に畳んだ先行者は全員「本体の失敗と片付けの失敗を区別できない」で困っている。ここは書く場所を別に持っているので畳まない。声だけ出す（`Ready=False` / Event / `ttl.failed`） |
 | `finally` に条件を付ける、複数持つ | 条件は `when` であり P9。複数は順序・相互参照・集約の問題を持ち込む。終端を `next` で分けて finally の中で読み分ければ足りる |
+| Task が走る定義を status に持つ | status は遷移のたびに書き直される場所で、P5 の対象になる。写しは作ったら書かないものなので、書き直される場所に置く理由が無い。別の object に置き、status は印（`DefinitionsPinned`）だけにする（ADR-0014） |
+| 定義の写しをハッシュ名で Task 間に共有する（StatefulSet 式） | 共有された object には 1 つの owner が無く、回収に ownerReference の更新とそのための RBAC が要る。Task ごとの写しは作るだけで、唯一の owner が回収する（ADR-0014） |
+| 走行中の Task の写しを差し替える操作 | 「この run はどの版で判定されるのか」という、写しが消した曖昧さがそのまま戻る。新しい定義が要る仕事は Task を作り直す（ADR-0014） |
+| ConfigMap と Secret の値を写しに固定する | Pod の spec の意味を解き、Secret を読むことをコントローラに求めることになる。§2 と P2 が利用側に置いたもの。固定したい値は handler の spec に書く（ADR-0014） |
 
 ---
 
