@@ -120,7 +120,7 @@ func Fork(in Input) ForkResult {
 	}
 
 	var chosen []flowv1alpha1.Phase
-	escalating := false
+	declining := false
 	for dir := range strings.SplitSeq(in.Directory, contract.DirectorySeparator) {
 		var dests []flowv1alpha1.Phase
 		for dest, d := range binding.Next {
@@ -138,7 +138,7 @@ func Fork(in Input) ForkResult {
 		}
 		switch dest := dests[0]; dest {
 		case flowv1alpha1.PhaseTaskFailed:
-			escalating = true
+			declining = true
 		case binding.Join.Phase:
 			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 				Detail: "directory " + dir + " leads straight to where the branches meet, which a fork may not do yet"}
@@ -146,7 +146,7 @@ func Fork(in Input) ForkResult {
 			chosen = append(chosen, dest)
 		}
 	}
-	if escalating {
+	if declining {
 		if len(chosen) == 0 {
 			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeDeclined,
 				Detail: "declined on purpose, by writing into " + in.Directory}

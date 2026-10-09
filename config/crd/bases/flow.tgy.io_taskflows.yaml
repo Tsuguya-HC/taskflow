@@ -104,9 +104,9 @@ spec:
                               flow: this framework does not know what the work is, so it has no business
                               naming its stages. "調査" and "Planning" are equally valid.
 
-                              One name is the framework's rather than the author's. It is an answer it
-                              decides — see ReservedPhases — and PhaseFinally, which is not an answer
-                              at all but the name a cleanup run is recorded under.
+                              One name is the framework's rather than the author's: TaskFailed, the
+                              answer it decides — see ReservedPhases. PhaseFinally is not an answer at
+                              all but the name a cleanup run is recorded under.
                             type: string
                           type: array
                           x-kubernetes-list-type: set
@@ -495,8 +495,8 @@ spec:
               rule: '!has(self.terminals) || self.terminals.all(p, !(p in self.bindings))'
             - message: TaskFailed is the framework's own ending and its meaning is
                 not the flow's to declare (Escalated and Failed are its old names)
-              rule: '!has(self.terminals) || ((''TaskFailed'' in self.terminals) ==
-                false && !(''Escalated'' in self.terminals) && !(''Failed'' in self.terminals))'
+              rule: '!has(self.terminals) || (!(''TaskFailed'' in self.terminals)
+                && !(''Escalated'' in self.terminals) && !(''Failed'' in self.terminals))'
           status:
             description: |-
               TaskFlowStatus reports whether the flow was accepted. Nothing reconciles a

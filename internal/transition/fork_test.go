@@ -100,8 +100,8 @@ func TestAForkThatStops(t *testing.T) {
 	}{
 		"nothing written":              {dir: "", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
 		"a word nothing declares":      {dir: "maybe", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
-		"escalating on purpose":        {dir: dirStuck, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeDeclined},
-		"escalating beside a branch":   {dir: dirSecurity + "/" + dirStuck, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
+		"declining on purpose":         {dir: dirStuck, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeDeclined},
+		"declining beside a branch":    {dir: dirSecurity + "/" + dirStuck, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeNoAnswer},
 		"a branch at its run limit":    {dir: dirLogic, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeRunLimitReached},
 		"one word, two statuses":       {dir: dirDup, next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeStructural},
 		"an edge straight to the join": {dir: "none", next: flowv1alpha1.PhaseTaskFailed, outcome: OutcomeStructural},

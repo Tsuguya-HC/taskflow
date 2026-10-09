@@ -160,7 +160,7 @@ func InFinally(status *flowv1alpha1.TaskStatus) bool {
 }
 
 // needsAHuman reports whether an ending is one somebody has to come and look
-// at. Three of the five are: the framework's own two, and the endings a flow
+// at. Two are: the framework's own one, and the endings a flow
 // declared to be Failure. It is one predicate rather than two because the
 // two things it decides — whether Ready goes false, and which of the two ttls
 // dates the cleanup — are the same question asked twice, and a task whose
@@ -307,14 +307,14 @@ func record(
 func move(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec, res transition.Result, now metav1.Time) {
 	status.Phase = res.Next
 
-	// Three endings need a human: the framework's own two, and an ending the
-	// flow declared to be Failure. The first two mean nothing moves forward
-	// until somebody looks; the third means the task finished and the news
+	// Two endings need a human: the framework's own one, and an ending the
+	// flow declared to be Failure. The first means nothing moves forward
+	// until somebody looks; the second means the task finished and the news
 	// is bad. The history entry says so too, but a condition is where
 	// kubectl and anything watching for stuck tasks look first.
 	ending := transition.EndingOf(flow, res.Next)
 	if needsAHuman(ending) {
-		// For the reserved two, res.Outcome is exactly the distinction worth
+		// For the reserved one, res.Outcome is exactly the distinction worth
 		// surfacing — NoAnswer from a run that said nothing, Declined from
 		// one that said it would not decide.
 		reason := string(res.Outcome)
@@ -425,8 +425,8 @@ func FinishFinally(
 //
 // Which of the two durations applies follows one rule: an ending somebody
 // has to come and look at keeps the task around for ttl.failed, and every
-// other ending takes ttl.succeeded. That covers the framework's own two
-// however they were reached — including a TaskFailed edge the flow declared
+// other ending takes ttl.succeeded. That covers the framework's own one
+// however it was reached — including a TaskFailed edge the flow declared
 // with next — and an ending the flow itself marked Failure, which is a task
 // that finished with bad news and would otherwise be swept away in an hour
 // while nobody was looking. A nil flow, a nil ttl or a nil duration leaves

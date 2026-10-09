@@ -53,7 +53,8 @@ const (
 // like a quiet run of successes.
 //
 // outcome is the framework's account of the move that stopped the task —
-// Declared for one that followed an edge the flow wrote down, NoAnswer for
+// Declared for one that followed an edge the flow wrote down, Declined for
+// one that followed a declared edge to TaskFailed, NoAnswer for
 // one whose run gave no single answer, RunLimitReached for one stopped at
 // the run limit, Structural for one whose definition was broken. It is what
 // separates the two cases sharing the TaskFailed phase: work that never

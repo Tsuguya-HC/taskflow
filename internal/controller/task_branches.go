@@ -99,11 +99,9 @@ func (r *TaskReconciler) driveBranches(
 
 	if transition.IsTerminal(flow.Spec.Bindings, task.Status.Phase) {
 		detail := ""
-		if n := len(task.Status.History); n > 0 {
-			detail = task.Status.History[n-1].Reason
-		}
 		outcome := string(transition.OutcomeStructural)
 		if n := len(task.Status.History); n > 0 {
+			detail = task.Status.History[n-1].Reason
 			outcome = task.Status.History[n-1].Outcome
 		}
 		r.announce(task, &flow.Spec, task.Status.Phase, detail, outcome)

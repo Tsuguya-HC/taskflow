@@ -48,8 +48,9 @@ const (
 	TerminalSuccess TerminalSeverity = "Success"
 	// TerminalFailure is an ending somebody has to see. The run finished and
 	// the handler concluded; what it concluded is that something is wrong.
-	// This is not TaskFailed — nothing about the work failed to conclude here —
-	// which is a finding about the flow rather than a finding about the work.
+	// It marks an ending the flow declared for work that finished with bad
+	// news, not the framework's TaskFailed, which also covers work that never
+	// concluded and definitions that were broken.
 	TerminalFailure TerminalSeverity = "Failure"
 )
 
@@ -191,7 +192,7 @@ type FinallySpec struct {
 // created, and not re-derived per task.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.terminals) || self.terminals.all(p, !(p in self.bindings))",message="terminals may only name a phase with no binding of its own, since a phase something binds is not where the flow ends"
-// +kubebuilder:validation:XValidation:rule="!has(self.terminals) || (('TaskFailed' in self.terminals) == false && !('Escalated' in self.terminals) && !('Failed' in self.terminals))",message="TaskFailed is the framework's own ending and its meaning is not the flow's to declare (Escalated and Failed are its old names)"
+// +kubebuilder:validation:XValidation:rule="!has(self.terminals) || (!('TaskFailed' in self.terminals) && !('Escalated' in self.terminals) && !('Failed' in self.terminals))",message="TaskFailed is the framework's own ending and its meaning is not the flow's to declare (Escalated and Failed are its old names)"
 type TaskFlowSpec struct {
 	Profile Profile `json:"profile"`
 

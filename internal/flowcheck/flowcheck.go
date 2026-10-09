@@ -350,8 +350,8 @@ func checkFinally(finally *flowv1alpha1.FinallySpec, path *field.Path) field.Err
 
 // walk follows the flow's edges out of start, and reports which bound phases
 // it got to and whether any path leaves the graph at a phase the flow itself
-// declares an ending — one it does not bind, and not one of the framework's
-// two, which are where a task stops without the flow having finished.
+// declares an ending — one it does not bind, and not the framework's own
+// one, which is where a task stops without the flow having finished.
 func walk(spec *flowv1alpha1.TaskFlowSpec) (reached map[flowv1alpha1.Phase]bool, endings bool) {
 	reached = map[flowv1alpha1.Phase]bool{spec.Start: true}
 	queue := []flowv1alpha1.Phase{spec.Start}

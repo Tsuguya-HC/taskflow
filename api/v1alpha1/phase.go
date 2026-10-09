@@ -22,9 +22,9 @@ import "slices"
 // flow: this framework does not know what the work is, so it has no business
 // naming its stages. "調査" and "Planning" are equally valid.
 //
-// One name is the framework's rather than the author's. It is an answer it
-// decides — see ReservedPhases — and PhaseFinally, which is not an answer
-// at all but the name a cleanup run is recorded under.
+// One name is the framework's rather than the author's: TaskFailed, the
+// answer it decides — see ReservedPhases. PhaseFinally is not an answer at
+// all but the name a cleanup run is recorded under.
 type Phase string
 
 const (
