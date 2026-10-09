@@ -37,14 +37,15 @@ const (
 )
 
 const (
-	dirOK       = "ok"
-	dirMore     = "more"
-	dirSent     = "sent"
-	dirEscalate = "escalate"
+	wantTaskFailed = "TaskFailed"
+	dirOK          = "ok"
+	dirMore        = "more"
+	dirSent        = "sent"
+	dirRefuse      = "refuse"
 )
 
 // What the broken flows below are made of: a handler nobody wrote, a
-// directory declared to reach Failed, and a name that is a path rather than
+// directory declared to reach a name a flow may not send work to, and a name that is a path rather than
 // a path element. handlerCleanup is the one a flow names for the run that
 // follows the ending, which is a handler like any other.
 const (
@@ -115,14 +116,14 @@ func TestAcceptsAFlowThatNeverReturnsToItsStart(t *testing.T) {
 	}
 }
 
-// A flow may send work to Escalated on purpose — that is a conclusion, not
+// A flow may send work to TaskFailed on purpose — that is a conclusion, not
 // silence (transition.OutcomeDeclined) — as long as it also has a way to
 // finish.
-func TestAcceptsADeclaredEdgeToEscalated(t *testing.T) {
+func TestAcceptsADeclaredEdgeToTaskFailed(t *testing.T) {
 	spec := sampleFlow()
-	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = dirEscalate
+	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseTaskFailed] = dirRefuse
 	if got := check(spec); len(got) != 0 {
-		t.Fatalf("a declared escalation was refused: %v", got)
+		t.Fatalf("a declared edge to TaskFailed was refused: %v", got)
 	}
 }
 
@@ -172,26 +173,37 @@ func TestRefuses(t *testing.T) {
 			mention: "must be one this flow binds",
 		},
 		{
+			name: "TaskFailed bound to a handler",
+			break_: func(s *flowv1alpha1.TaskFlowSpec) {
+				s.Bindings[flowv1alpha1.PhaseTaskFailed] = flowv1alpha1.PhaseBinding{
+					Handler: handlerNobody,
+					Next:    map[flowv1alpha1.Phase]string{phaseDone: dirOK},
+				}
+			},
+			field:   `spec.bindings[TaskFailed]`,
+			mention: "framework's own answer",
+		},
+		{
 			name: "Escalated bound to a handler",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
-				s.Bindings[flowv1alpha1.PhaseEscalated] = flowv1alpha1.PhaseBinding{
-					Handler: "human",
-					Next:    map[flowv1alpha1.Phase]string{phaseDone: "handled"},
+				s.Bindings["Escalated"] = flowv1alpha1.PhaseBinding{
+					Handler: handlerNobody,
+					Next:    map[flowv1alpha1.Phase]string{phaseDone: dirOK},
 				}
 			},
 			field:   `spec.bindings[Escalated]`,
-			mention: "framework's own answers",
+			mention: wantTaskFailed,
 		},
 		{
 			name: "Failed bound to a handler",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
-				s.Bindings[flowv1alpha1.PhaseFailed] = flowv1alpha1.PhaseBinding{
-					Handler: "human",
-					Next:    map[flowv1alpha1.Phase]string{phaseDone: "handled"},
+				s.Bindings["Failed"] = flowv1alpha1.PhaseBinding{
+					Handler: handlerNobody,
+					Next:    map[flowv1alpha1.Phase]string{phaseDone: dirOK},
 				}
 			},
 			field:   `spec.bindings[Failed]`,
-			mention: "framework's own answers",
+			mention: wantTaskFailed,
 		},
 		{
 			name: "Finally bound to a handler",
@@ -242,10 +254,10 @@ func TestRefuses(t *testing.T) {
 		{
 			name: "an edge to Failed",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
-				s.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
+				s.Bindings[phaseInvestigate].Next["Failed"] = dirBroken
 			},
 			field:   `spec.bindings[調査].next[Failed]`,
-			mention: "not something a run gets to conclude",
+			mention: wantTaskFailed,
 		},
 		{
 			name: "an edge leading nowhere named",
@@ -317,13 +329,13 @@ func TestRefuses(t *testing.T) {
 			mention: "no task of this flow can finish",
 		},
 		{
-			name: "a flow whose only way out is escalation",
+			name: "a flow whose only way out is TaskFailed",
 			break_: func(s *flowv1alpha1.TaskFlowSpec) {
 				delete(s.Bindings[phaseReport].Next, phaseDone)
-				s.Bindings[phaseReport].Next[flowv1alpha1.PhaseEscalated] = dirEscalate
+				s.Bindings[phaseReport].Next[flowv1alpha1.PhaseTaskFailed] = dirRefuse
 			},
 			field:   "spec.bindings",
-			mention: "Escalated does not count",
+			mention: "TaskFailed does not count",
 		},
 	}
 
@@ -357,8 +369,11 @@ func TestAnUnboundStartIsReportedOnce(t *testing.T) {
 // the author is told everything at once rather than one apply at a time.
 func TestReportsEveryMistakeAtOnce(t *testing.T) {
 	spec := sampleFlow()
-	spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
 	spec.Bindings[phaseReport].Next[phaseDone] = dirNested
+	spec.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
+		Handler: handlerNobody,
+		Next:    map[flowv1alpha1.Phase]string{phaseDone: dirShelved},
+	}
 	if got := check(spec); len(got) != 2 {
 		t.Fatalf("wanted both mistakes, got %v", got)
 	}
@@ -371,7 +386,6 @@ func TestTheReportIsStable(t *testing.T) {
 	first := ""
 	for i := range 32 {
 		spec := sampleFlow()
-		spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = dirBroken
 		spec.Bindings[phaseReport].Next[phaseDone] = dirNested
 		spec.Bindings["棚上げ"] = flowv1alpha1.PhaseBinding{
 			Handler: handlerNobody,

@@ -160,7 +160,7 @@ func InFinally(status *flowv1alpha1.TaskStatus) bool {
 }
 
 // needsAHuman reports whether an ending is one somebody has to come and look
-// at. Three of the five are: the framework's own two, and the endings a flow
+// at. Two are: the framework's own one, and the endings a flow
 // declared to be Failure. It is one predicate rather than two because the
 // two things it decides — whether Ready goes false, and which of the two ttls
 // dates the cleanup — are the same question asked twice, and a task whose
@@ -168,7 +168,7 @@ func InFinally(status *flowv1alpha1.TaskStatus) bool {
 // would be answering it both ways.
 func needsAHuman(e transition.Ending) bool {
 	switch e {
-	case transition.EndingEscalated, transition.EndingFailed, transition.EndingFailure:
+	case transition.EndingTaskFailed, transition.EndingFailure:
 		return true
 	default:
 		return false
@@ -307,14 +307,14 @@ func record(
 func move(status *flowv1alpha1.TaskStatus, flow *flowv1alpha1.TaskFlowSpec, res transition.Result, now metav1.Time) {
 	status.Phase = res.Next
 
-	// Three endings need a human: the framework's own two, and an ending the
-	// flow declared to be Failure. The first two mean nothing moves forward
-	// until somebody looks; the third means the task finished and the news
+	// Two endings need a human: the framework's own one, and an ending the
+	// flow declared to be Failure. The first means nothing moves forward
+	// until somebody looks; the second means the task finished and the news
 	// is bad. The history entry says so too, but a condition is where
 	// kubectl and anything watching for stuck tasks look first.
 	ending := transition.EndingOf(flow, res.Next)
 	if needsAHuman(ending) {
-		// For the reserved two, res.Outcome is exactly the distinction worth
+		// For the reserved one, res.Outcome is exactly the distinction worth
 		// surfacing — NoAnswer from a run that said nothing, Declined from
 		// one that said it would not decide.
 		reason := string(res.Outcome)
@@ -415,8 +415,8 @@ func FinishFinally(
 		})
 	}
 	// The ending's own answer to "does somebody have to come and look" is still
-	// true — a task that escalated is no less escalated for having been tidied
-	// up after — so both reasons for the longer ttl are taken together.
+	// true — a task that stopped at TaskFailed is no less stopped for having been
+	// tidied up after — so both reasons for the longer ttl are taken together.
 	stamp(status, flow, !done || endingNeededAHuman, now)
 }
 
@@ -425,8 +425,8 @@ func FinishFinally(
 //
 // Which of the two durations applies follows one rule: an ending somebody
 // has to come and look at keeps the task around for ttl.failed, and every
-// other ending takes ttl.succeeded. That covers the framework's own two
-// however they were reached — including an Escalated edge the flow declared
+// other ending takes ttl.succeeded. That covers the framework's own one
+// however it was reached — including a TaskFailed edge the flow declared
 // with next — and an ending the flow itself marked Failure, which is a task
 // that finished with bad news and would otherwise be swept away in an hour
 // while nobody was looking. A nil flow, a nil ttl or a nil duration leaves
@@ -498,15 +498,14 @@ func Fail(status *flowv1alpha1.TaskStatus, reason string, flow *flowv1alpha1.Tas
 
 // FailAs is Fail with the reason Ready carries.
 func FailAs(status *flowv1alpha1.TaskStatus, readyReason, message string, flow *flowv1alpha1.TaskFlowSpec, now metav1.Time) {
-	status.Phase = flowv1alpha1.PhaseFailed
+	status.Phase = flowv1alpha1.PhaseTaskFailed
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    ConditionReady,
 		Status:  metav1.ConditionFalse,
 		Reason:  readyReason,
 		Message: message,
 	})
-	// Failed is reserved, so it is terminal and needs a human on its own
-	// say-so; Expire reaches that without consulting the flow's bindings or
+	// TaskFailed is reserved, so it is terminal on its own say-so; Expire reaches that without consulting the flow's bindings or
 	// terminals, which is what makes a nil flow here mean only "no ttl to
 	// read" rather than "cannot tell what this ending was". A flow this broken
 	// can still declare a cleanup run, and stop hands the task to it: the
@@ -555,9 +554,9 @@ func RetryInfra(status *flowv1alpha1.TaskStatus) {
 }
 
 // InfraRetriesExhausted reports whether another infrastructure retry is
-// allowed. When it is not, the task escalates rather than failing: something
-// outside the handler kept it from running, and that is for a human to look
-// at.
+// allowed. When it is not, the task stops at TaskFailed rather than failing outright:
+// something outside the handler kept it from running, and that is for a human
+// to look at.
 func InfraRetriesExhausted(status *flowv1alpha1.TaskStatus, max int32) bool {
 	run := Current(status)
 	if run == nil {

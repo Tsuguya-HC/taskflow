@@ -77,6 +77,7 @@ func valueOf(t *testing.T, c prometheus.Collector, want prometheus.Labels) (floa
 func TestPrimingSaysAnEndingExistsWithoutCountingIt(t *testing.T) {
 	labels := prometheus.Labels{
 		LabelFlow: "flow-primed", LabelPhase: "調査", LabelSeverity: "Success",
+		LabelOutcome: "Declared",
 	}
 	// TaskOutcomes is a package-global vec, so the child this test primes
 	// would otherwise outlive it and fail the next run's "does not exist yet"
@@ -88,7 +89,7 @@ func TestPrimingSaysAnEndingExistsWithoutCountingIt(t *testing.T) {
 		t.Fatalf("%v exists before anything primed it", labels)
 	}
 
-	PrimeOutcome("flow-primed", "調査", "Success")
+	PrimeOutcome("flow-primed", "調査", "Success", "Declared")
 	v, found := valueOf(t, TaskOutcomes, labels)
 	if !found {
 		t.Fatalf("%v does not exist after priming", labels)
@@ -98,7 +99,7 @@ func TestPrimingSaysAnEndingExistsWithoutCountingIt(t *testing.T) {
 	}
 
 	TaskOutcomes.With(labels).Inc()
-	PrimeOutcome("flow-primed", "調査", "Success")
+	PrimeOutcome("flow-primed", "調査", "Success", "Declared")
 	if v, _ := valueOf(t, TaskOutcomes, labels); v != 1 {
 		t.Fatalf("priming again over a counted ending left %v, want 1", v)
 	}

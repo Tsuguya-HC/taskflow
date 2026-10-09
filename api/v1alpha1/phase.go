@@ -22,23 +22,24 @@ import "slices"
 // flow: this framework does not know what the work is, so it has no business
 // naming its stages. "調査" and "Planning" are equally valid.
 //
-// Three names are the framework's rather than the author's. Two of them are
-// answers it decides — see ReservedPhases — and the third is PhaseFinally,
-// which is not an answer at all but the name a cleanup run is recorded under.
+// One name is the framework's rather than the author's: TaskFailed, the
+// answer it decides — see ReservedPhases. PhaseFinally is not an answer at
+// all but the name a cleanup run is recorded under.
 type Phase string
 
 const (
-	// PhaseEscalated is where a task goes when no single answer came back:
-	// nothing was written, several things were, the run timed out, or the flow
-	// no longer explains what did arrive. A flow may also send work here on
-	// purpose, by naming it in a phase's next. A human takes it from here
-	// either way; the outcome recorded says which of the two happened.
-	PhaseEscalated Phase = "Escalated"
-
-	// PhaseFailed is where a task goes when the flow itself is broken —
-	// a phase with no binding, an ambiguous mapping. Nothing is repaired,
-	// because the fault is in the definition rather than in the work.
-	PhaseFailed Phase = "Failed"
+	// PhaseTaskFailed is where a task goes when the work did not conclude:
+	// nothing was written, several things were, the run timed out, the run
+	// limit was reached, or the flow no longer explains what did arrive —
+	// and where it goes when the flow itself is broken, a phase with no
+	// binding or an ambiguous mapping. Nothing is repaired in the latter
+	// case, because the fault is in the definition rather than in the work;
+	// what separates the two cases is the outcome recorded, not the name.
+	// A flow may also send work here on purpose, by naming it in a phase's
+	// next. It is spelled out so it greps as one word: Failed already means
+	// a Job's failure, a handler that could not run, and a cleanup that did
+	// not happen, and none of those is this.
+	PhaseTaskFailed Phase = "TaskFailed"
 
 	// PhaseFinally is the name the run declared by spec.finally is recorded
 	// under: currentRuns names it while that run is in flight, and history
@@ -55,22 +56,26 @@ const (
 	PhaseFinally Phase = "Finally"
 )
 
-// ReservedPhases may not be used as a binding key. They are the two outcomes
-// the framework owns, and a flow that could bind them could route "no answer"
+// ReservedPhases may not be used as a binding key. It is the one answer
+// the framework owns, and a flow that could bind it could route "no answer"
 // onto its own success path — which is the one thing this design will not
 // allow to be one line away.
 //
-// As destinations the two part company. A phase's next may name Escalated,
-// and doing so is what gives the run a directory for "I will not decide
+// As a destination it may be named: a phase's next naming TaskFailed is
+// what gives the run a directory for "I will not decide
 // this" — a conclusion, reached and reported, rather than the silence of a
-// run that died. Failed may not be named: it says the definition is broken,
-// and a definition does not get to conclude that about itself. Both rules
-// live in transition.Next.
+// run that died.
 //
 // The CEL rule on TaskHandlerSpec.Phase (taskhandler_types.go) re-encodes
-// these two names as a literal, since CEL cannot reference a Go const —
+// this name as a literal, since CEL cannot reference a Go const —
 // update it too if this changes.
-var ReservedPhases = []Phase{PhaseEscalated, PhaseFailed}
+//
+// Escalated and Failed are not reserved anymore, but they are still refused
+// wherever a name is declared — binding keys, next destinations, terminals
+// and handler phases — with a pointer to TaskFailed. Left merely unreserved,
+// a flow written for the old names would read as an unbound declared ending
+// and pass silently, succeeding a task nobody decided.
+var ReservedPhases = []Phase{PhaseTaskFailed}
 
 // IsReserved reports whether p is one of the framework's own outcomes.
 func (p Phase) IsReserved() bool {

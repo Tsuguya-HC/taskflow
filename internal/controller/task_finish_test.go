@@ -121,7 +121,7 @@ var _ = Describe("finishing a run", func() {
 		fx.makeHandler()
 		fx.makeTask()
 
-		ending := outcome{fx.name, string(phaseReport), string(transition.EndingSuccess)}
+		ending := outcome{fx.name, string(phaseReport), string(transition.EndingSuccess), string(transition.OutcomeDeclared)}
 		job := start()
 		Expect(collectedOutcomes()).To(HaveKeyWithValue(ending, float64(0)),
 			"the ending has to be reported before it happens, or nothing can see it rise")
@@ -161,39 +161,39 @@ var _ = Describe("finishing a run", func() {
 		// records has to say so rather than guessing at Success — that silence
 		// is the whole point of Undeclared existing as a value of its own.
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
-			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport), metrics.LabelSeverity: string(transition.EndingUndeclared),
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport), metrics.LabelSeverity: string(transition.EndingUndeclared), metrics.LabelOutcome: string(transition.OutcomeDeclared),
 		}))).To(BeNumerically("==", 1), "a flow that has not declared its endings must still show up in the metric")
 	})
 
 	// The one reserved name a flow may send work to. Declaring it is what
-	// puts an escalate directory in front of the run, so "I will not decide
+	// puts a refusal directory in front of the run, so "I will not decide
 	// this" becomes something the handler writes and explains rather than
 	// something inferred from its silence. Running it against a real
-	// apiserver also shows that nothing in the CRD refuses Escalated as a
+	// apiserver also shows that nothing in the CRD refuses TaskFailed as a
 	// key of next — the reservation is on binding it, not on reaching it.
-	It("records a declared escalation as the handler's own conclusion", func() {
+	It("records a declared refusal as the handler's own conclusion", func() {
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
-			f.Spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = "escalate"
+			f.Spec.Bindings[phaseInvestigate].Next[flowv1alpha1.PhaseTaskFailed] = "refuse"
 		})
 		fx.makeHandler()
 		fx.makeTask()
 		job := start()
 
-		Expect(directoriesOf(job)).To(ConsistOf("escalate", "ok"),
+		Expect(directoriesOf(job)).To(ConsistOf("refuse", "ok"),
 			"the run cannot write into a directory the flow never declared")
 
-		podOf(job, "", terminated(agentName, "escalate\nthe policy is ambiguous; a human should decide"))
+		podOf(job, "", terminated(agentName, "refuse\nthe policy is ambiguous; a human should decide"))
 		finish(job, "")
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(taskstate.Current(&tk.Status)).To(BeNil())
 		Expect(tk.Status.History).To(HaveLen(1))
 		h := tk.Status.History[0]
-		Expect(h.Directory).To(Equal("escalate"))
+		Expect(h.Directory).To(Equal("refuse"))
 		Expect(h.Outcome).To(Equal(string(transition.OutcomeDeclined)),
-			"a run that chose to escalate is not the same event as one that said nothing")
+			"a run that chose to decline is not the same event as one that said nothing")
 		Expect(h.Reason).To(ContainSubstring("a human should decide"))
 
 		ready := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
@@ -202,7 +202,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(ready.Reason).To(Equal(string(transition.OutcomeDeclined)))
 
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
-			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseEscalated), metrics.LabelSeverity: string(transition.EndingEscalated),
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseTaskFailed), metrics.LabelSeverity: string(transition.EndingTaskFailed), metrics.LabelOutcome: string(transition.OutcomeDeclined),
 		}))).To(BeNumerically("==", 1), "the framework's own ending must be counted too, not only a flow's declared ones")
 	})
 
@@ -247,7 +247,7 @@ var _ = Describe("finishing a run", func() {
 		// Each spec gets its own flow name, so this counter starts at zero
 		// and one ending is the whole of what it should have seen.
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
-			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseBroken), metrics.LabelSeverity: string(transition.EndingFailure),
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseBroken), metrics.LabelSeverity: string(transition.EndingFailure), metrics.LabelOutcome: string(transition.OutcomeDeclared),
 		}))).To(BeNumerically("==", 1), "an alert rule has nothing else to fire on")
 	})
 
@@ -276,7 +276,7 @@ var _ = Describe("finishing a run", func() {
 		// Counted all the same: the metric is how many tasks ended and how,
 		// not how many went wrong.
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
-			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport), metrics.LabelSeverity: string(transition.EndingSuccess),
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(phaseReport), metrics.LabelSeverity: string(transition.EndingSuccess), metrics.LabelOutcome: string(transition.OutcomeDeclared),
 		}))).To(BeNumerically("==", 1))
 	})
 
@@ -307,7 +307,7 @@ var _ = Describe("finishing a run", func() {
 			"1200 runes truncated to Sanitize's 1024, not silently cut at 1024 bytes (341 runes) or rejected by the CRD")
 	})
 
-	It("escalates a Job that succeeded without any container answering", func() {
+	It("stops at TaskFailed a Job that succeeded without any container answering", func() {
 		fx.makeFlow()
 		fx.makeHandler()
 		fx.makeTask()
@@ -318,7 +318,7 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated), "exit 0 is not a verdict")
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed), "exit 0 is not a verdict")
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 		Expect(tk.Status.History[0].Directory).To(BeEmpty())
@@ -328,7 +328,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(cond.Reason).To(Equal(string(transition.OutcomeNoAnswer)))
 	})
 
-	It("escalates a Job whose pod is already gone", func() {
+	It("stops at TaskFailed a Job whose pod is already gone", func() {
 		fx.makeFlow()
 		fx.makeHandler()
 		fx.makeTask()
@@ -337,7 +337,7 @@ var _ = Describe("finishing a run", func() {
 		finish(job, "") // Complete, but nothing to read it from
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 	})
 
 	It("reads the answer out of a Job that failed, if the handler ran", func() {
@@ -358,7 +358,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(fx.get().Status.Phase).To(Equal(phaseReport))
 	})
 
-	It("escalates a timed-out run even if a directory was written on the way out", func() {
+	It("stops at TaskFailed a timed-out run even if a directory was written on the way out", func() {
 		fx.makeFlow()
 		fx.makeHandler()
 		fx.makeTask()
@@ -369,7 +369,7 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("timed out"))
 	})
 
@@ -400,7 +400,7 @@ var _ = Describe("finishing a run", func() {
 		Expect(second.Annotations["flow.tgy.io/prev-run-id"]).To(Equal("1"))
 	})
 
-	It("escalates a move to a phase that has run as often as the flow allows", func() {
+	It("stops at TaskFailed a move to a phase that has run as often as the flow allows", func() {
 		fx.makeFlow(func(f *flowv1alpha1.TaskFlow) {
 			f.Spec.MaxRunsPerPhase = 1
 			f.Spec.Bindings[phaseInvestigate] = flowv1alpha1.PhaseBinding{
@@ -417,7 +417,7 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeRunLimitReached)))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("1 of 1"))
@@ -449,7 +449,7 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk = fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History).To(HaveLen(1))
 		Expect(tk.Status.History[0].RunID).To(BeEquivalentTo(1))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("never started"))
@@ -502,21 +502,21 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		cond := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Message).To(ContainSubstring("which does not exist"))
 
-		// This Failed came from r.fail(), not from settle() reading the flow's
+		// This TaskFailed came from r.fail(), not from settle() reading the flow's
 		// own table — the one path that used to leave the metric silent about a
 		// flow broken badly enough to lose a handler mid-run.
 		Expect(testutil.ToFloat64(metrics.TaskOutcomes.With(prometheus.Labels{
-			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseFailed), metrics.LabelSeverity: string(transition.EndingFailed),
-		}))).To(BeNumerically("==", 1), "a Failed reached through r.fail() must be counted, not only one reached through settle()")
+			metrics.LabelFlow: fx.name, metrics.LabelPhase: string(flowv1alpha1.PhaseTaskFailed), metrics.LabelSeverity: string(transition.EndingTaskFailed), metrics.LabelOutcome: string(transition.OutcomeStructural),
+		}))).To(BeNumerically("==", 1), "a TaskFailed reached through r.fail() must be counted, not only one reached through settle()")
 	})
 
-	It("escalates straight away when the handler allows no infrastructure retries", func() {
+	It("stops at TaskFailed straight away when the handler allows no infrastructure retries", func() {
 		fx.makeFlow()
 		fx.makeHandler() // maxInfraRetries defaults to 0
 		fx.makeTask()
@@ -525,7 +525,7 @@ var _ = Describe("finishing a run", func() {
 		finish(job, batchv1.JobReasonBackoffLimitExceeded)
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 	})
 
 	// Two statuses now share the directory the run is about to name.
@@ -549,7 +549,7 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeStructural)))
 		cond := meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady)
 		Expect(cond).NotTo(BeNil())
@@ -602,7 +602,7 @@ var _ = Describe("finishing a run", func() {
 			Expect(res.RequeueAfter).To(BeNumerically("<=", timeout+deadlineGrace))
 		})
 
-		It("escalates a run still in flight past its deadline", func() {
+		It("stops at TaskFailed a run still in flight past its deadline", func() {
 			job := start()
 			fx.reconciler.Now = func() time.Time {
 				return job.CreationTimestamp.Add(timeout + deadlineGrace + time.Second)
@@ -613,7 +613,7 @@ var _ = Describe("finishing a run", func() {
 			fx.reconcile()
 
 			tk := fx.get()
-			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+			Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 			Expect(taskstate.Current(&tk.Status)).To(BeNil())
 			Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 			Expect(tk.Status.History[0].Reason).To(ContainSubstring("timed out"))
@@ -646,7 +646,7 @@ var _ = Describe("finishing a run", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring(fmt.Sprintf("%s-a", job.Name)))
 	})
 })

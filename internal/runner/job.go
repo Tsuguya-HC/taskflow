@@ -213,7 +213,7 @@ type Input struct {
 // ShelfEntry is one run that decided its way through without a pod: its
 // number, and the single directory it answered with. Empty is not a case —
 // not because a run that answered nothing never reaches a next run to lay it
-// (a flow with a finally still runs a cleanup run after the Escalated ending
+// (a flow with a finally still runs a cleanup run after the TaskFailed ending
 // that reaches), but because what such a run was even offered is not in
 // history to rebuild: only what it decided is (ADR-0008), and reconstructing
 // the declared directories from the flow as it reads now would have the run

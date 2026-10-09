@@ -344,7 +344,7 @@ var _ = Describe("a flow with a workspace", func() {
 		fx.reconcile() // settles the starting phase
 		fx.reconcile() // tries the claim, finds the definition broken
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 			"a template the cluster rejects is the flow's fault, and retrying it would meet the same rejection forever")
 	})
 })

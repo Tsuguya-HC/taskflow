@@ -1,7 +1,7 @@
 # ADR-0009 終端の後に 1 回だけ走る `finally`。終端は変えない
 
 - **status**: accepted（2026-09-11、人間の承認）
-- **根拠**: 終端の後に何かを走らせる経路が無い。`Escalated` / `Failed` は framework の終端で
+- **根拠**: 終端の後に何かを走らせる経路が無い。`TaskFailed` は framework の終端で
   handler を束縛できず、時間切れや NoAnswer で止まった Task の後に片付けも報告も走らない。
   Task の外で作った物（PR のコメント、ブランチ、投稿）を消せるのは task-uid と workspace が
   生きている間だけで、別 Task で追いかける形では workspace に触れない。先行調査 2026-09-11
@@ -46,7 +46,7 @@
    なく、「終端は確定していて、片付けが走っている」状態である。Reconcile は「finally 中」を
    **`currentRun.phase == Finally` で見分ける**（束縛の有無や `status.phase` では見分けない）。
    束縛の無い phase なのに currentRun が `Finally` 以外を指していれば、従来どおり構造破損として
-   `Failed` に落とす。finally の handler は `bindings` からではなく `spec.finally` から解決する
+   `TaskFailed` に落とす。finally の handler は `bindings` からではなく `spec.finally` から解決する
 
    `taskstate` パッケージ doc が (2) の一致を根拠に挙げる「`transition.Next` の "phase has no
    binding" ガードが本番で到達しない理由」は、finally の run が遷移表を通らない（次の段落）ので、
@@ -68,10 +68,10 @@
    どちらの経路でも）には**焼かず**、finally の run が決着した瞬間に焼く。走っている finally の
    足元から Task を消さない。この機能より前に終端へ着いた Task の backfill は、従来どおり終端到達で
    焼き、finally は走らせない（決定 7 の表と同じ）
-6. **finally が受け取るもの**は、終端の意味（`Success` / `Failure` / `Escalated` / `Failed` /
+6. **finally が受け取るもの**は、終端の意味（`Success` / `Failure` / `TaskFailed` /
    `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome。他の run と同じ経路（環境変数
    `FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME`、finally の run にだけ付く）で
-   値として差し込む。分岐は書かせない（P9）。**run が一度も決着せずに `Failed` に着いた場合**
+   値として差し込む。分岐は書かせない（P9）。**run が一度も決着せずに `TaskFailed` に着いた場合**
    （flow の破損が run の開始前・開始不能で判明した場合）、outcome は**空で渡す**。無い値を推測で
    埋めない（P8）。outcome は history の末尾ではなく **finally の runID − 1 の行**から引く — 決着
    しなかった経路では末尾が無関係な前の run の verdict になっており、それは「この終端の outcome」
@@ -86,15 +86,15 @@
 
    | 場面 | 扱い |
    |---|---|
-   | `Escalated` に着いた（NoAnswer / Declined / RunLimitReached / インフラ再試行の使い切り、`next` で宣言された辺のどれでも） | **走る**。終端の意味 5 値のうち finally の一番の動機 |
+   | `TaskFailed` に着いた（NoAnswer / Declined / RunLimitReached / Structural / インフラ再試行の使い切り、`next` で宣言された辺のどれでも） | **走る**。終端の意味 4 値のうち finally の一番の動機 |
    | flow 宣言終端（`terminals` の `Success` / `Failure` / `Undeclared`）に着いた | **走る**。終端の意味は変えない（決定 2） |
    | Task が削除された（TTL 前の手動削除、走行中の削除） | 走らない。ownerReference で Job も消える。外に残った物は sweep の仕事（§10） |
-   | flow が読めずに `Failed` に着いた | 走らない。finally を読む先が無い |
+   | flow が読めずに `TaskFailed` に着いた | 走らない。finally を読む先が無い |
    | 終端に着いた後で flow に `finally` が足された | 走らない。着き済みの Task は flow の編集を受けない（`expiresAt` の backfill と同じ） |
-   | finally の handler が解決できない（不在、template が壊れている） | 走れない。決定 4 の失敗として記録。`status.phase` は `Failed` に**しない** |
+   | finally の handler が解決できない（不在、template が壊れている） | 走れない。決定 4 の失敗として記録。`status.phase` は `TaskFailed` に**しない** |
    | finally の handler の timeout | NoAnswer として決定 4 |
-   | flow 自体が壊れて `Failed` に着いた。run は決着していた（`Structural`） | **走る**。flow は読めるので finally は解決できる。outcome は決着した run のもの |
-   | flow 自体が壊れて `Failed` に着いた。run は一度も決着していない（`fail()` 経由 — start 未束縛、走行中の run の束縛消失、`ensureJob` / `ensureWorkspacePVC` の brokenFlow） | **走る**。flow は読めるので finally は解決できる。outcome は空で渡す（決定 6） |
+   | flow 自体が壊れて `TaskFailed` に着いた。run は決着していた（`Structural`） | **走る**。flow は読めるので finally は解決できる。outcome は決着した run のもの |
+   | flow 自体が壊れて `TaskFailed` に着いた。run は一度も決着していない（`fail()` 経由 — start 未束縛、走行中の run の束縛消失、`ensureJob` / `ensureWorkspacePVC` の brokenFlow） | **走る**。flow は読めるので finally は解決できる。outcome は空で渡す（決定 6） |
 
 8. **削除フックは採らない。** `metadata.finalizers` は「消す前に許可を待つ鍵」で、起動条件が DELETE
    だけ、期限も順序も無く、結果を書く先のオブジェクトごと消える。§10 の「finalizer は best-effort +
@@ -106,9 +106,9 @@
 **終端を封印するのは、先行者全員が「区別できない」ことで困っているから。** Tekton / Argo / GitHub
 Actions / Concourse は全員 finally の失敗を全体の失敗に畳む。理由は結果が 1 値（reason / phase /
 conclusion）しか無いからで、畳んだ結果、DAG 成功 + finally 失敗と DAG 失敗 + finally 失敗が同じ
-`Failed` になり（Tekton）、main が失敗すると finally の結果が phase からも message からも消え
+`TaskFailed` になり（Tekton）、main が失敗すると finally の結果が phase からも message からも消え
 （Argo）、`outcome` と `conclusion` の 2 層を後から分ける羽目になった（GitHub Actions）。
-この framework は終端の意味 5 値と `history[]` と Conditions を別々に持っているので、畳む必要が無い。
+この framework は終端の意味 4 値と `history[]` と Conditions を別々に持っているので、畳む必要が無い。
 畳まないが隠しもしない — 決定 4 は「声を出す」側だけ最悪値に寄せる。cleanup の失敗を 1h で消すと
 誰も気づかない
 
@@ -131,7 +131,7 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
 `TestCurrentRunNamesTheCurrentPhase` が固定）と「止まった Task は currentRun を持たない」。
 `internal/taskstate` パッケージ doc が後者を根拠に挙げる「`transition.Next` の "phase has no binding"
 ガードが本番で到達しない理由」は、finally の run が遷移表を通らない（決定 3）ので引き続き成り立つ。
-§5 の「framework が持つ名前は 2 つだけ」は、`status.phase` に現れる名前としては 2 つのまま。
+§5 の「framework が持つ名前は 1 つだけ」は、`status.phase` に現れる名前としては 1 つのまま。
 `Finally` は `history[]` と `currentRun` にだけ現れる記録用の予約名
 
 **覆すには**: finally の失敗が仕事の結論を変えるべきだと実測で示されたとき（決定 2）。
@@ -144,7 +144,7 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
   finalizer に期限と opt-out を自前で足して固着を避けている。ここでは削除時の後始末を持たず、sweep に任せる
 - **finally を複数**。順序・finally 間の参照・集約の問題が全部消える
 - **finally に `when`**。P9
-- **finally 失敗で `status.phase` を `Failed` に**。`Failed` は flow の破損であって片付けの失敗ではない
+- **finally 失敗で `status.phase` を `TaskFailed` に**。`TaskFailed` が flow の破損を表す場合もあるが、片付けの失敗ではない
 
 **実装で決めたこと**（2026-09-11、この ADR の未解決を閉じた分）:
 
@@ -155,7 +155,7 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
 - **finally の verdict も他の run と同じ規則で棚に入る**（`results/<runID>/`）。専用の分岐は置かない
   — サイドカーは `run.Phase` を見ないし、見せる理由がない（決定 3）。ただし**読む後続 run は無い**ので、
   棚に残るのは検死のための記録であって引き渡しではない
-- **`Finally` は `ReservedPhases` に入れない。** あの 2 つは「framework が決める答え」で
+- **`Finally` は `ReservedPhases` に入れない。** あれは「framework が決める答え」で
   `IsReserved()` は終端判定に使われている。`Finally` は `status.phase` に現れないので、入れると
   「Finally は終端」という読めない命題が増える。flowcheck が `bindings` のキーと `next` の行き先で
   個別に拒否する（理由が違うのでメッセージも別）。**TaskHandler の `spec.phase` は `Finally` を許す** —

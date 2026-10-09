@@ -38,7 +38,7 @@ const (
 )
 
 func forkFlow() *flowv1alpha1.TaskFlowSpec {
-	toSort := map[flowv1alpha1.Phase]string{phaseSort: "done", flowv1alpha1.PhaseEscalated: "stuck"}
+	toSort := map[flowv1alpha1.Phase]string{phaseSort: "done", flowv1alpha1.PhaseTaskFailed: "stuck"}
 	return &flowv1alpha1.TaskFlowSpec{Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 		phasePick: {
 			Handler: "pick",
@@ -114,8 +114,8 @@ func atJoin() transition.Result {
 	return transition.Result{Next: phaseSort, Outcome: transition.OutcomeDeclared}
 }
 
-func escalated(detail string) transition.Result {
-	return transition.Result{Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeDeclined, Detail: detail}
+func stopped(detail string) transition.Result {
+	return transition.Result{Next: flowv1alpha1.PhaseTaskFailed, Outcome: transition.OutcomeDeclined, Detail: detail}
 }
 
 // Branches settle a few at a time; only once every one of them has reached
@@ -171,23 +171,23 @@ func TestAllBranchesSettlingAtOnceStartTheJoin(t *testing.T) {
 	}
 }
 
-// A branch that escalates while another is still running stops the task: the
+// A branch that stops while another is still running stops the task: the
 // still-running one is cancelled, and the branch that decided the ending is
 // the last line in history — after any other branch that settled alongside
 // it without deciding anything.
-func TestABranchThatEscalatesStopsTheForkWhileAnotherStillRuns(t *testing.T) {
+func TestABranchThatStopsStopsTheForkWhileAnotherStillRuns(t *testing.T) {
 	s := afterFork(phaseLogic, phaseSecurity, phaseStyle)
 	flow := forkFlow()
 	flow.TTL = ttl(time.Hour, 168*time.Hour)
 
-	// logic reached the join, security escalates, style is still running and
+	// logic reached the join, security stops, style is still running and
 	// is not named in settled at all.
 	SettleBranches(s, flow, []SettledBranch{
-		{Run: *Run(s, phaseSecurity), Directory: dirStuck, Result: escalated("gave up")},
+		{Run: *Run(s, phaseSecurity), Directory: dirStuck, Result: stopped("gave up")},
 		{Run: *Run(s, phaseLogic), Directory: dirDone, Result: atJoin()},
 	}, at)
 
-	if s.Phase != flowv1alpha1.PhaseEscalated || s.CurrentRuns != nil || s.ExpiresAt == nil {
+	if s.Phase != flowv1alpha1.PhaseTaskFailed || s.CurrentRuns != nil || s.ExpiresAt == nil {
 		t.Fatalf("phase = %q, runs = %+v, expiresAt = %v; want a stopped task", s.Phase, s.CurrentRuns, s.ExpiresAt)
 	}
 	want := []flowv1alpha1.Phase{phasePick, phaseLogic, phaseStyle, phaseSecurity}
@@ -201,21 +201,21 @@ func TestABranchThatEscalatesStopsTheForkWhileAnotherStillRuns(t *testing.T) {
 		t.Fatalf("last line = %+v, want the branch that decided the ending, with its own outcome", last)
 	}
 	if !meta.IsStatusConditionFalse(s.Conditions, ConditionReady) {
-		t.Fatal("an escalated fork needs a human, and says so")
+		t.Fatal("a stopped fork needs a human, and says so")
 	}
 }
 
-// Two branches escalate in the same reconcile: the one that sorts first by
+// Two branches stop in the same reconcile: the one that sorts first by
 // phase name is the one taken to have decided the ending, and is recorded
 // last; the other is recorded under its own outcome, not Cancelled, since it
 // too settled this reconcile rather than being cut short.
-func TestTwoBranchesEscalateInTheSameReconcile(t *testing.T) {
+func TestTwoBranchesStopInTheSameReconcile(t *testing.T) {
 	s := afterFork(phaseLogic, phaseSecurity)
 	flow := forkFlow()
 
 	SettleBranches(s, flow, []SettledBranch{
-		{Run: *Run(s, phaseSecurity), Directory: "stuck-security", Result: escalated("security gave up")},
-		{Run: *Run(s, phaseLogic), Directory: "stuck-logic", Result: escalated("logic gave up")},
+		{Run: *Run(s, phaseSecurity), Directory: "stuck-security", Result: stopped("security gave up")},
+		{Run: *Run(s, phaseLogic), Directory: "stuck-logic", Result: stopped("logic gave up")},
 	}, at)
 
 	want := []flowv1alpha1.Phase{phasePick, phaseSecurity, phaseLogic}
@@ -237,7 +237,7 @@ func TestDecidingBranchIsRecordedLastEvenWhenItsNameSortsFirst(t *testing.T) {
 	flow := forkFlow()
 
 	SettleBranches(s, flow, []SettledBranch{
-		{Run: *Run(s, phaseLogic), Directory: dirStuck, Result: escalated("gave up")},
+		{Run: *Run(s, phaseLogic), Directory: dirStuck, Result: stopped("gave up")},
 		{Run: *Run(s, phaseSecurity), Directory: "d1", Result: atJoin()},
 		{Run: *Run(s, phaseStyle), Directory: "d2", Result: atJoin()},
 	}, at)
@@ -246,8 +246,8 @@ func TestDecidingBranchIsRecordedLastEvenWhenItsNameSortsFirst(t *testing.T) {
 	if !slices.Equal(historyPhases(s), want) {
 		t.Fatalf("history = %v, want %v: logic sorts first but is still the last line", historyPhases(s), want)
 	}
-	if s.Phase != flowv1alpha1.PhaseEscalated {
-		t.Fatalf("phase = %q, want Escalated", s.Phase)
+	if s.Phase != flowv1alpha1.PhaseTaskFailed {
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 }
 
@@ -259,10 +259,10 @@ func TestLastBranchNotReachingTheJoinStopsTheFork(t *testing.T) {
 	flow := forkFlow()
 
 	SettleBranches(s, flow, []SettledBranch{
-		{Run: *Run(s, phaseLogic), Directory: dirStuck, Result: escalated("gave up")},
+		{Run: *Run(s, phaseLogic), Directory: dirStuck, Result: stopped("gave up")},
 	}, at)
 
-	if s.Phase != flowv1alpha1.PhaseEscalated || s.CurrentRuns != nil {
+	if s.Phase != flowv1alpha1.PhaseTaskFailed || s.CurrentRuns != nil {
 		t.Fatalf("phase = %q, runs = %+v; want the task stopped, not standing at the fork with nothing in flight", s.Phase, s.CurrentRuns)
 	}
 }
@@ -395,10 +395,10 @@ func TestSettleBranchesRecordsTheRunStatusHoldsNotTheCallersCopy(t *testing.T) {
 func TestAForkThatStopsStartsNothing(t *testing.T) {
 	s := atFork()
 	SettleFork(s, forkFlow(), "", transition.ForkResult{
-		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer, Detail: "silence",
+		Next: flowv1alpha1.PhaseTaskFailed, Outcome: transition.OutcomeNoAnswer, Detail: "silence",
 	}, at)
-	if s.Phase != flowv1alpha1.PhaseEscalated || s.CurrentRuns != nil || s.RunID != 1 {
-		t.Fatalf("phase = %q, runs = %+v, runID = %d; want Escalated with nothing started", s.Phase, s.CurrentRuns, s.RunID)
+	if s.Phase != flowv1alpha1.PhaseTaskFailed || s.CurrentRuns != nil || s.RunID != 1 {
+		t.Fatalf("phase = %q, runs = %+v, runID = %d; want TaskFailed with nothing started", s.Phase, s.CurrentRuns, s.RunID)
 	}
 }
 
@@ -451,7 +451,7 @@ func TestBranchingIsTheForksBranchesInFlight(t *testing.T) {
 	if Branching(&flowv1alpha1.TaskStatus{Phase: phasePick}) {
 		t.Fatal("nothing in flight is not branching")
 	}
-	cleanup := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated,
+	cleanup := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed,
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 4}}}
 	if Branching(cleanup) {
 		t.Fatal("the cleanup run is not a branch")

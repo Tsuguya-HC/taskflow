@@ -26,7 +26,7 @@ import (
 )
 
 // OutcomeCancelled is a branch stopped before it answered, because another
-// branch of the same fork had already sent the task to Escalated (ADR-0013
+// branch of the same fork had already sent the task to TaskFailed (ADR-0013
 // 決定4). Nothing the stopped branch could have said would have changed that,
 // so it is not waited for; the line says it was started and why it was not
 // heard from.
@@ -34,8 +34,8 @@ const OutcomeCancelled Outcome = "Cancelled"
 
 // StopsAFork reports whether outcome means the line it is on decided a
 // fork's ending rather than merely finishing its own turn. A branch's only
-// destinations are its join or Escalated (or Failed, on a broken definition):
-// Declared and Rework mean it reached the join, and Cancelled means it was
+// destinations are its join or TaskFailed: Declared and Rework mean it
+// reached the join, and Cancelled means it was
 // stopped before it could answer at all, so none of those three decided
 // anything — everything else did.
 func (o Outcome) StopsAFork() bool {
@@ -47,7 +47,7 @@ func (o Outcome) StopsAFork() bool {
 }
 
 // Branches is every phase fork may start, in name order: the destinations its
-// run can choose, and those its join starts regardless. Escalated is where a
+// run can choose, and those its join starts regardless. TaskFailed is where a
 // run goes instead of choosing, and the join is where branches meet rather
 // than one of them, so neither is a branch. An always entry that could not be
 // one — reserved, the fork itself, its own join — is left out rather than
@@ -78,7 +78,7 @@ func Branches(bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding, fork fl
 type ForkResult struct {
 	// Branches to start, in name order, and empty when the task stops.
 	Branches []flowv1alpha1.Phase
-	// Next is Escalated or Failed when the task stops at the fork, and empty
+	// Next is TaskFailed when the task stops at the fork, and empty
 	// when the branches start: the task stays at the fork while they run.
 	Next flowv1alpha1.Phase
 	// Outcome explains the move, as Result.Outcome does.
@@ -92,19 +92,19 @@ type ForkResult struct {
 // always list is started beside them. The rules that stop a fork instead are
 // the ones that stop any run, applied to the whole answer:
 //
-//	no answer, or a word outside the words      -> Escalated (NoAnswer)
-//	only the declared escalate directory         -> Escalated (Declined)
-//	escalate beside a branch                     -> Escalated (NoAnswer): not one answer
-//	a branch at its run limit                    -> Escalated (RunLimitReached)
-//	two statuses on one directory, Failed named,
-//	a branch or the join nobody binds, an edge
-//	straight to the join, a limit below one      -> Failed    (Structural)
+//	no answer, or a word outside the words      -> TaskFailed (NoAnswer)
+//	only the declared refusal directory         -> TaskFailed (Declined)
+//	refusal beside a branch                     -> TaskFailed (NoAnswer): not one answer
+//	a branch at its run limit                    -> TaskFailed (RunLimitReached)
+//	two statuses on one directory, a branch
+//	or the join nobody binds, an edge
+//	straight to the join, a limit below one      -> TaskFailed (Structural)
 //
 // Nothing is started unless every branch can be: a fork is one decision.
 func Fork(in Input) ForkResult {
 	binding, bound := in.Bindings[in.Phase]
 	if !bound || binding.Join == nil {
-		return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
+		return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 			Detail: "phase " + string(in.Phase) + " is not a fork in this flow"}
 	}
 	if in.Directory == "" {
@@ -112,15 +112,15 @@ func Fork(in Input) ForkResult {
 		if detail == "" {
 			detail = "the run produced no answer"
 		}
-		return ForkResult{Next: flowv1alpha1.PhaseEscalated, Outcome: OutcomeNoAnswer, Detail: detail}
+		return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeNoAnswer, Detail: detail}
 	}
 	if in.MaxRuns < 1 {
-		return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
+		return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 			Detail: fmt.Sprintf("maxRunsPerPhase is %d, which lets no phase run", in.MaxRuns)}
 	}
 
 	var chosen []flowv1alpha1.Phase
-	escalating := false
+	declining := false
 	for dir := range strings.SplitSeq(in.Directory, contract.DirectorySeparator) {
 		var dests []flowv1alpha1.Phase
 		for dest, d := range binding.Next {
@@ -130,36 +130,33 @@ func Fork(in Input) ForkResult {
 		}
 		switch {
 		case len(dests) > 1:
-			return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
+			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 				Detail: "directory " + dir + " selects more than one status"}
 		case len(dests) == 0:
-			return ForkResult{Next: flowv1alpha1.PhaseEscalated, Outcome: OutcomeNoAnswer,
+			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeNoAnswer,
 				Detail: "no status is declared for directory " + dir}
 		}
 		switch dest := dests[0]; dest {
-		case flowv1alpha1.PhaseEscalated:
-			escalating = true
-		case flowv1alpha1.PhaseFailed:
-			return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
-				Detail: "directory " + dir + " is declared to reach Failed, which is the framework's own"}
+		case flowv1alpha1.PhaseTaskFailed:
+			declining = true
 		case binding.Join.Phase:
-			return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
+			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 				Detail: "directory " + dir + " leads straight to where the branches meet, which a fork may not do yet"}
 		default:
 			chosen = append(chosen, dest)
 		}
 	}
-	if escalating {
+	if declining {
 		if len(chosen) == 0 {
-			return ForkResult{Next: flowv1alpha1.PhaseEscalated, Outcome: OutcomeDeclined,
-				Detail: "escalated on purpose, by writing into " + in.Directory}
+			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeDeclined,
+				Detail: "declined on purpose, by writing into " + in.Directory}
 		}
-		return ForkResult{Next: flowv1alpha1.PhaseEscalated, Outcome: OutcomeNoAnswer,
-			Detail: "wrote " + in.Directory + ": escalating and choosing branches are not one answer"}
+		return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeNoAnswer,
+			Detail: "wrote " + in.Directory + ": declining and choosing branches are not one answer"}
 	}
 
 	if _, bound := in.Bindings[binding.Join.Phase]; !bound {
-		return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
+		return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 			Detail: "the branches of " + string(in.Phase) + " meet at " + string(binding.Join.Phase) + ", which nothing binds"}
 	}
 	branches := slices.Clone(chosen)
@@ -173,12 +170,12 @@ func Fork(in Input) ForkResult {
 	rework := false
 	for _, b := range branches {
 		if _, bound := in.Bindings[b]; !bound {
-			return ForkResult{Next: flowv1alpha1.PhaseFailed, Outcome: OutcomeStructural,
+			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeStructural,
 				Detail: "branch " + string(b) + " has no binding in this flow"}
 		}
 		n := in.Runs[b]
 		if n >= in.MaxRuns {
-			return ForkResult{Next: flowv1alpha1.PhaseEscalated, Outcome: OutcomeRunLimitReached,
+			return ForkResult{Next: flowv1alpha1.PhaseTaskFailed, Outcome: OutcomeRunLimitReached,
 				Detail: fmt.Sprintf("branch %s has already run %d of %d times", b, n, in.MaxRuns)}
 		}
 		rework = rework || n > 0

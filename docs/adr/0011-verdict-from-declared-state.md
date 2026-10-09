@@ -31,7 +31,7 @@
 
    答えは `data.verdict` に宣言されたディレクトリ名そのものを書く。照合は
    `collect.FromPods` と同じ `slices.Contains(declared, value)` で、照合表もパーサも新設しない。
-   語彙外の値は termination message が語彙外だったときと同じく直接 `Escalated`。
+   語彙外の値は termination message が語彙外だったときと同じく直接 `TaskFailed`。
    `data.reason` があれば termination message の 2 行目と同じ扱い（history / 条件 / Event）。
    キーが 1 本なので、ディレクトリ側で必要だった「非空がちょうど 1 つ」に当たる判定が要らない。
 
@@ -45,7 +45,7 @@
    Task ごとに名前を分ける手段は、結局コントローラが名前を決めることに帰着する
 
 3. **先回りは `Create` が弾く。** 既に同じ名前の ConfigMap があれば `AlreadyExists` で、それは
-   **run が始まる前に誰かが置き場を作っていた**ということなので受理せず `Failed`（P8）。
+   **run が始まる前に誰かが置き場を作っていた**ということなので受理せず `TaskFailed`（P8）。
    run 番号は数えれば分かるので、「番号を宛先に焼く」だけでは先回りを防げない — 先行者の言葉で
    言えば fencing には**古い / 先走った書き込みを能動的に拒否する側**が要り（下の先行調査 6）、
    ここではその拒否が**作成の一意性**という K8s が元から持っている性質に落ちる。
@@ -90,7 +90,7 @@
 
 6. **`State` では `timeout` を必須にする**（CEL で create 時に拒否）。期限の無い待ちは沈黙と
    区別が付かず、終端に着かない Task は TTL にも metric にも現れない。超過の扱いは既存のまま
-   （`NoAnswer` → `Escalated`）。Job の `activeDeadlineSeconds` に乗せられないので、
+   （`NoAnswer` → `TaskFailed`）。Job の `activeDeadlineSeconds` に乗せられないので、
    期限はコントローラ側の requeue が持つ（TTL で既に使っている経路）
 
 7. **棚は次の run の prepare が `results/<runID>/<value>/` を空で敷く。**
@@ -136,11 +136,11 @@
   何時間も進まない」、#705「まだ判断中と失敗を区別できない」、Rollouts は duration 無しで無期限）。
   決定 4（`State` では `timeout` 必須）の裏書き
 - **期限超過をどちらへ倒すかは割れている。** Argo Workflows は `Succeeded`（fail-open）、
-  Tekton は reject（fail-closed）。P6 を持つ側として後者に寄せる（`NoAnswer` → `Escalated`）
+  Tekton は reject（fail-closed）。P6 を持つ側として後者に寄せる（`NoAnswer` → `TaskFailed`）
 - **世代を宛先に焼くだけでは fencing にならない。** Zeebe の `leaseToken` は
   "a command carrying a stale token is rejected" と明記し、Temporal は closed な run への signal を
   `ErrWorkflowCompleted` で拒否する。**能動的な拒否がある**のが要点で、キー名を分けただけの
-  Camunda 7 の `workerId`（自称文字列）は弱い側の例。決定 2 の「開始時に既に在れば `Failed`」は
+  Camunda 7 の `workerId`（自称文字列）は弱い側の例。決定 2 の「開始時に既に在れば `TaskFailed`」は
   この拒否にあたる
 - **同じ原型を、最も成熟した先行者が inbox 型より優先して採った記録がある。** Argo Workflows の
   #16731（semaphore の limit 0 を承認ゲートに）は、メンテナがまず built-in の suspend を勧めたのに対し、
@@ -176,7 +176,7 @@
   Cluster API は注釈を選んでいるが、それは対象（Machine）がもともと管理者の持ち物だから成立している
 - **「計画された人間の判断」を framework の語彙として持つ案**（#109 / #110 の前提）。
   P7 の下で見分けられない。#110 の実行時検査「gate のフェーズの handler が `External` でなければ
-  `Failed`」は、見分けられるふりをしていた半分なので落とす。残すのは admission のグラフ検査
+  `TaskFailed`」は、見分けられるふりをしていた半分なので落とす。残すのは admission のグラフ検査
   （untrusted な始点から `Success` への全経路が、宣言された gate フェーズを通る）だけ
 - **[ADR-0002](0002-per-task-workspace-pvc.md) 決定5の「publish は flow-workspace モードでは
   唯一 volume の root を書き込み可でマウントする」。** 決定7の実装で `prepare` も
@@ -220,7 +220,7 @@
   切り詰め規則を 2 つ持たないため。**名前は `status.currentRun.verdictBox` にも出る** —
   答える側は命名規則を知らずに宛先を引ける。UID のハッシュは Job 名には無いセグメントで、
   `WorkspacePVCName` と同じ理由（同名 Task の別世代が残した置き場との衝突を避ける）で足した
-  — こちらは衝突が `AlreadyExists` を経て恒久 `Failed` に倒れるので、Job 側の理屈は通らない
+  — こちらは衝突が `AlreadyExists` を経て恒久 `TaskFailed` に倒れるので、Job 側の理屈は通らない
 - **`maxInfraRetries` は CEL で拒否**（`jobTemplate` / `workspace` も同じ理由で一緒に）。
   読まれないのに受理されるフィールドは「設定は書いてあるが効いていない」の形そのもので、
   無視する側に倒すと後から検出手段が無い
@@ -244,8 +244,8 @@
   返さないので、`directory` を持つ history 行は必ず棚を持っている）
 - **`prepare` は既にある棚に触らない**。これは上の理由と、同じ run の 2 回目の試行が無害であることの
   両方を満たす。マーク（`.prepared-by`）は書かない — 用意した Pod が無いのだから、無いことが正しい
-- **答えが無かった run（`Escalated` へ落ちた run）は棚を敷かない。** `finally` を持つ flow では
-  `Escalated` の先に cleanup run が続くので、「その先を読む run が無いから」は理由にならない。
+- **答えが無かった run（`TaskFailed` へ落ちた run）は棚を敷かない。** `finally` を持つ flow では
+  `TaskFailed` の先に cleanup run が続くので、「その先を読む run が無いから」は理由にならない。
   本当の理由は、その run が何を提示されていたか（宣言ディレクトリの集合）が history に無いこと
   — 今の flow から引き直すのは、その run が言ってもいないことを言わせることになる。**Job の run は
   publish の `Move` が無条件に走るので、答えが無くても宣言ディレクトリが空のまま棚に載る**。

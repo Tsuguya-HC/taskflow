@@ -51,18 +51,18 @@ func sampleFlow() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 
 // The directories the example flow declares.
 const (
-	dirOK       = "ok"
-	dirMore     = "more"
-	dirSent     = "sent"
-	dirEscalate = "escalate"
+	dirOK     = "ok"
+	dirMore   = "more"
+	dirSent   = "sent"
+	dirRefuse = "refuse"
 )
 
-// withEscalate is the same flow with an escalate directory on 調査: somewhere
+// withRefusal is the same flow with a refusal directory on 調査: somewhere
 // for a run that will not conclude to say so, rather than only being able to
 // write nothing.
-func withEscalate() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
+func withRefusal() map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding {
 	b := sampleFlow()
-	b[phaseInvestigate].Next[flowv1alpha1.PhaseEscalated] = dirEscalate
+	b[phaseInvestigate].Next[flowv1alpha1.PhaseTaskFailed] = dirRefuse
 	return b
 }
 
@@ -113,12 +113,12 @@ func TestDirectoriesComeFromTheDeclaration(t *testing.T) {
 	}
 }
 
-func TestNoSingleAnswerEscalates(t *testing.T) {
+func TestNoSingleAnswerEndsAtTaskFailed(t *testing.T) {
 	for _, why := range []string{"nothing was written", "two directories were written", "the run timed out"} {
 		t.Run(why, func(t *testing.T) {
 			got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, NoAnswer: why, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
-			if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
-				t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
+			if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeNoAnswer {
+				t.Fatalf("got %q/%q, want TaskFailed/NoAnswer", got.Next, got.Outcome)
 			}
 			if got.Detail != why {
 				t.Fatalf("detail = %q, want the reason carried through", got.Detail)
@@ -131,8 +131,8 @@ func TestNoSingleAnswerEscalates(t *testing.T) {
 // bother to say why — an empty NoAnswer must not become an empty Detail.
 func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
 	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
-	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
-		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
+	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeNoAnswer {
+		t.Fatalf("got %q/%q, want TaskFailed/NoAnswer", got.Next, got.Outcome)
 	}
 	if got.Detail != "the run produced no single answer" {
 		t.Fatalf("detail = %q, want the default message", got.Detail)
@@ -141,61 +141,61 @@ func TestNoSingleAnswerWithoutReasonGetsADefaultMessage(t *testing.T) {
 
 // The handler cannot invent this — the directory would not exist — but a flow
 // edited under a running task can leave one behind.
-func TestUndeclaredDirectoryEscalates(t *testing.T) {
+func TestUndeclaredDirectoryEndsAtTaskFailed(t *testing.T) {
 	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: "looks-fine", Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
-	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeNoAnswer {
-		t.Fatalf("got %q/%q, want Escalated/NoAnswer", got.Next, got.Outcome)
+	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeNoAnswer {
+		t.Fatalf("got %q/%q, want TaskFailed/NoAnswer", got.Next, got.Outcome)
 	}
 }
 
-// Writing into the declared escalate directory and writing nothing at all
-// both stop the task at Escalated, and that is the point of separating them:
+// Writing into the declared refusal directory and writing nothing at all
+// both stop the task at TaskFailed, and that is the point of separating them:
 // the outcome is what tells a human whether there is a report to read or a
-// run that died. Run 1 of the first real task escalated on max-turns and was
+// run that died. Run 1 of the first real task stopped on max-turns and was
 // indistinguishable in the history from a deliberate hand-off.
-func TestDeclaredEscalationIsNotSilence(t *testing.T) {
-	got := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, Directory: dirEscalate,
+func TestDeclaredRefusalIsNotSilence(t *testing.T) {
+	got := Next(Input{Bindings: withRefusal(), Phase: phaseInvestigate, Directory: dirRefuse,
 		Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
-	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeDeclined {
-		t.Fatalf("got %q/%q, want Escalated/Declined (%s)", got.Next, got.Outcome, got.Detail)
+	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeDeclined {
+		t.Fatalf("got %q/%q, want TaskFailed/Declined (%s)", got.Next, got.Outcome, got.Detail)
 	}
-	if !strings.Contains(got.Detail, dirEscalate) {
+	if !strings.Contains(got.Detail, dirRefuse) {
 		t.Fatalf("detail = %q, want the directory named in it", got.Detail)
 	}
 
-	silent := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, NoAnswer: "the run ran out of turns",
+	silent := Next(Input{Bindings: withRefusal(), Phase: phaseInvestigate, NoAnswer: "the run ran out of turns",
 		Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
 	if silent.Next != got.Next {
-		t.Fatalf("silence went to %q and a declared escalation to %q; both stop the task", silent.Next, got.Next)
+		t.Fatalf("silence went to %q and a declared refusal to %q; both stop the task", silent.Next, got.Next)
 	}
 	if silent.Outcome == got.Outcome {
 		t.Fatalf("both outcomes are %q; the history cannot tell a report from a run that died", got.Outcome)
 	}
 }
 
-// A phase at its limit is what turns a move into an escalation, and a
-// declared escalation must not be mistaken for one: it is where the flow says
+// A phase at its limit is what turns a move into a stop at TaskFailed, and a
+// declared refusal must not be mistaken for one: it is where the flow says
 // to go, not the last resort after the flow ran out of room.
-func TestDeclaredEscalationDoesNotConsultTheRunLimit(t *testing.T) {
-	got := Next(Input{Bindings: withEscalate(), Phase: phaseInvestigate, Directory: dirEscalate,
-		Runs: ranOnce(phaseInvestigate, flowv1alpha1.PhaseEscalated), MaxRuns: 1})
+func TestDeclaredRefusalDoesNotConsultTheRunLimit(t *testing.T) {
+	got := Next(Input{Bindings: withRefusal(), Phase: phaseInvestigate, Directory: dirRefuse,
+		Runs: ranOnce(phaseInvestigate, flowv1alpha1.PhaseTaskFailed), MaxRuns: 1})
 	if got.Outcome != OutcomeDeclined {
-		t.Fatalf("outcome = %q, want Declined even with Escalated counted at the limit", got.Outcome)
+		t.Fatalf("outcome = %q, want Declined even with TaskFailed counted at the limit", got.Outcome)
 	}
 }
 
 // The declaration is also what gets created on disk, so declaring the edge is
 // the whole of what gives the run somewhere to write.
-func TestTheEscalateDirectoryIsCreated(t *testing.T) {
-	dirs := Directories(withEscalate(), phaseInvestigate)
+func TestTheRefusalDirectoryIsCreated(t *testing.T) {
+	dirs := Directories(withRefusal(), phaseInvestigate)
 	slices.Sort(dirs)
-	if !slices.Equal(dirs, []string{dirEscalate, dirMore, dirOK}) {
-		t.Fatalf("directories = %v, want the escalate directory among them", dirs)
+	if !slices.Equal(dirs, []string{dirMore, dirOK, dirRefuse}) {
+		t.Fatalf("directories = %v, want the refusal directory among them", dirs)
 	}
 }
 
 // What a task's stopping place means is the flow's to say, and the framework
-// asks rather than assumes. The two reserved names answer for themselves.
+// asks rather than assumes. The reserved name answers for itself.
 func TestEndingOfReportsWhatStoppingThereMeans(t *testing.T) {
 	flow := &flowv1alpha1.TaskFlowSpec{
 		Bindings: sampleFlow(),
@@ -212,8 +212,7 @@ func TestEndingOfReportsWhatStoppingThereMeans(t *testing.T) {
 		{"a phase still bound to a handler", phaseInvestigate, EndingRunning},
 		{"an ending declared a success", phaseDone, EndingSuccess},
 		{"an ending declared a failure", phaseGave, EndingFailure},
-		{"the framework's own escalation", flowv1alpha1.PhaseEscalated, EndingEscalated},
-		{"the framework's own failure", flowv1alpha1.PhaseFailed, EndingFailed},
+		{"the framework's own answer", flowv1alpha1.PhaseTaskFailed, EndingTaskFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := EndingOf(flow, tc.phase); got != tc.want {
@@ -239,22 +238,19 @@ func TestAnUndeclaredEndingIsNotASuccess(t *testing.T) {
 	}
 }
 
-// Escalated answers for itself before the bindings are consulted, which is
+// TaskFailed answers for itself before the bindings are consulted, which is
 // what lets a task that reached it still be reported after its flow is gone.
-func TestTheReservedEndingsNeedNoFlow(t *testing.T) {
-	if got := EndingOf(nil, flowv1alpha1.PhaseEscalated); got != EndingEscalated {
-		t.Fatalf("ending = %q, want Escalated with no flow to read", got)
-	}
-	if got := EndingOf(nil, flowv1alpha1.PhaseFailed); got != EndingFailed {
-		t.Fatalf("ending = %q, want Failed with no flow to read", got)
+func TestTheReservedEndingNeedsNoFlow(t *testing.T) {
+	if got := EndingOf(nil, flowv1alpha1.PhaseTaskFailed); got != EndingTaskFailed {
+		t.Fatalf("ending = %q, want TaskFailed with no flow to read", got)
 	}
 }
 
 func TestBrokenFlowFails(t *testing.T) {
 	t.Run("a phase with no binding", func(t *testing.T) {
 		got := Next(Input{Bindings: sampleFlow(), Phase: "存在しない", Directory: dirOK, MaxRuns: 3})
-		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
-			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
+		if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeStructural {
+			t.Fatalf("got %q/%q, want TaskFailed/Structural", got.Next, got.Outcome)
 		}
 	})
 
@@ -264,23 +260,11 @@ func TestBrokenFlowFails(t *testing.T) {
 		b := sampleFlow()
 		b[phaseInvestigate].Next["中止"] = dirOK
 		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: dirOK, Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
-		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
-			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
+		if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeStructural {
+			t.Fatalf("got %q/%q, want TaskFailed/Structural", got.Next, got.Outcome)
 		}
 	})
 
-	// Escalated may be declared as a destination; Failed may not. It says the
-	// definition is broken, and a definition does not get to conclude that
-	// about itself — so naming it is the break, and the outcome says so
-	// rather than reading like an edge the flow was entitled to declare.
-	t.Run("Failed declared as a destination", func(t *testing.T) {
-		b := sampleFlow()
-		b[phaseInvestigate].Next[flowv1alpha1.PhaseFailed] = "broken"
-		got := Next(Input{Bindings: b, Phase: phaseInvestigate, Directory: "broken", Runs: ranOnce(phaseInvestigate), MaxRuns: 3})
-		if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
-			t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
-		}
-	})
 }
 
 // Going back is recorded as such, but costs nothing of its own: the limit is
@@ -292,11 +276,11 @@ func TestReworkIsRecordedAgainstTheLimit(t *testing.T) {
 	}
 }
 
-func TestAPhaseAtItsLimitEscalates(t *testing.T) {
+func TestAPhaseAtItsLimitEndsAtTaskFailed(t *testing.T) {
 	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirMore,
 		Runs: map[flowv1alpha1.Phase]int32{phaseInvestigate: 3}, MaxRuns: 3})
-	if got.Next != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeRunLimitReached {
-		t.Fatalf("got %q/%q, want Escalated/RunLimitReached", got.Next, got.Outcome)
+	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeRunLimitReached {
+		t.Fatalf("got %q/%q, want TaskFailed/RunLimitReached", got.Next, got.Outcome)
 	}
 	if !strings.Contains(got.Detail, string(phaseInvestigate)) {
 		t.Fatalf("detail = %q, want the phase that hit its limit named", got.Detail)
@@ -327,8 +311,8 @@ func TestTheLimitNeverStopsAnEnding(t *testing.T) {
 // that ran out of rounds.
 func TestALimitBelowOneIsABrokenFlow(t *testing.T) {
 	got := Next(Input{Bindings: sampleFlow(), Phase: phaseInvestigate, Directory: dirOK, Runs: ranOnce(phaseInvestigate)})
-	if got.Next != flowv1alpha1.PhaseFailed || got.Outcome != OutcomeStructural {
-		t.Fatalf("got %q/%q, want Failed/Structural", got.Next, got.Outcome)
+	if got.Next != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeStructural {
+		t.Fatalf("got %q/%q, want TaskFailed/Structural", got.Next, got.Outcome)
 	}
 }
 
@@ -355,8 +339,8 @@ func TestALoopRunsEachPhaseExactlyTheLimit(t *testing.T) {
 			got := Next(Input{Bindings: flow, Phase: phase, Directory: answer[phase], Runs: runs, MaxRuns: limit})
 			phase = got.Next
 			if IsTerminal(flow, phase) {
-				if phase != flowv1alpha1.PhaseEscalated || got.Outcome != OutcomeRunLimitReached {
-					t.Fatalf("limit %d: stopped at %q/%q, want Escalated/RunLimitReached", limit, phase, got.Outcome)
+				if phase != flowv1alpha1.PhaseTaskFailed || got.Outcome != OutcomeRunLimitReached {
+					t.Fatalf("limit %d: stopped at %q/%q, want TaskFailed/RunLimitReached", limit, phase, got.Outcome)
 				}
 				break
 			}
@@ -377,8 +361,7 @@ func TestDeclaredEndingsAreTheStoppingPlaces(t *testing.T) {
 		Terminals: map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{phaseDone: flowv1alpha1.TerminalSuccess},
 	}
 	want := []PhaseEnding{
-		{Phase: flowv1alpha1.PhaseEscalated, Ending: EndingEscalated},
-		{Phase: flowv1alpha1.PhaseFailed, Ending: EndingFailed},
+		{Phase: flowv1alpha1.PhaseTaskFailed, Ending: EndingTaskFailed},
 		{Phase: phaseDone, Ending: EndingSuccess},
 	}
 	if got := DeclaredEndings(flow); !slices.Equal(got, want) {
@@ -399,17 +382,16 @@ func TestDeclaredEndingsLeaveOutBoundPhases(t *testing.T) {
 	}
 }
 
-// The framework's own two can happen to any flow — Escalated whenever an
-// answer cannot be read, Failed whenever the flow turns out to be broken — so
-// they are reported whether or not the flow names them, and naming one does
-// not report it twice.
-func TestDeclaredEndingsAlwaysIncludeTheReservedTwo(t *testing.T) {
+// The framework's own TaskFailed can happen to any flow, so it is
+// reported whether or not the flow names it, and naming it does not
+// report it twice.
+func TestDeclaredEndingsAlwaysIncludeTheReservedOne(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		bindings map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding
 	}{
-		{"a flow that never mentions them", sampleFlow()},
-		{"a flow that declares an escalate directory", withEscalate()},
+		{"a flow that never mentions it", sampleFlow()},
+		{"a flow that declares a refusal directory", withRefusal()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: tc.bindings})
@@ -442,9 +424,9 @@ func TestDeclaredEndingsKeepUndeclaredUndeclared(t *testing.T) {
 // series are the same either way, but a test that reads the list must not
 // depend on which run it is.
 func TestDeclaredEndingsAreOrderedTheSameEveryTime(t *testing.T) {
-	first := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: withEscalate()})
+	first := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: withRefusal()})
 	for range 20 {
-		if got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: withEscalate()}); !slices.Equal(got, first) {
+		if got := DeclaredEndings(&flowv1alpha1.TaskFlowSpec{Bindings: withRefusal()}); !slices.Equal(got, first) {
 			t.Fatalf("endings = %v, want the same order as %v", got, first)
 		}
 	}
@@ -453,7 +435,7 @@ func TestDeclaredEndingsAreOrderedTheSameEveryTime(t *testing.T) {
 	}
 }
 
-// fail() reaches Failed with no flow at all, and asking a nil spec what it
+// fail() reaches TaskFailed with no flow at all, and asking a nil spec what it
 // declares must not panic on the way there.
 func TestDeclaredEndingsOfNothing(t *testing.T) {
 	if got := DeclaredEndings(nil); got != nil {

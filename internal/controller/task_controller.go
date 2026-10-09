@@ -50,7 +50,7 @@ import (
 // brokenFlow says the fault is structural rather than the work's: a definition
 // that contradicts itself, or a place the framework has to own that something
 // else got to first. It is carried as an error so that every path out of the
-// reconcile goes through one place that writes Failed, instead of each caller
+// reconcile goes through one place that writes TaskFailed, instead of each caller
 // remembering to.
 type brokenFlow struct{ reason string }
 
@@ -132,13 +132,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// The framework's own terminal phases are terminal on their own say-so —
 	// unlike a phase the flow declared terminal, they need no binding table to
 	// tell. Checking that before the flow is resolved means a Task already at
-	// Escalated never depends on the flow's binding table to be recognised.
+	// TaskFailed never depends on the flow's binding table to be recognised.
 	// A stopped task is never migrated and never failed for a missing copy:
 	// what it still owes the flow — its cleanup run and its expiresAt — is
 	// read from the copy if it has one and from the live TaskFlow if not, and
 	// a flow that GitOps has since deleted or renamed leaves it nothing to read.
 	if task.Status.Phase.IsReserved() {
-		// A Task that reached Escalated or Failed before expiresAt existed
+		// A Task that reached TaskFailed before expiresAt existed
 		// has none, and never will on its own: nothing above sees it again,
 		// so without this it would sit forever. Backfilling means resolving
 		// the flow this once, ahead of where it is normally resolved. A task
@@ -187,7 +187,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// them apart: begin and Advance never set it to a phase without first
 	// confirming a binding, so a ref naming anything but the cleanup run means
 	// a run was in flight and the flow was edited out from under it. That is a
-	// structural fault (§5 "実行時の矛盾は修復せず Failed"), not a quiet finish,
+	// structural fault (§5 "実行時の矛盾は修復せず TaskFailed"), not a quiet finish,
 	// so it must not be indistinguishable from success. A ref naming the
 	// cleanup run is the one legitimate way a stopped task still has one
 	// (ADR-0009), and no ref at all means the task was terminal on arrival.
@@ -405,7 +405,9 @@ func (r *TaskReconciler) failStartedAs(
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
-	r.announce(task, flow, flowv1alpha1.PhaseFailed, message)
+	logf.FromContext(ctx).Info("task failed without a run to settle",
+		"phase", task.Status.Phase, "outcome", transition.OutcomeStructural, "reason", readyReason)
+	r.announce(task, flow, flowv1alpha1.PhaseTaskFailed, message, string(transition.OutcomeStructural))
 	return nil
 }
 
@@ -772,7 +774,7 @@ func (r *TaskReconciler) ensureVerdictBox(
 			// on its own once GC has caught up. A box is not retried — it is
 			// where the run's answer is read from, and an answer read out of
 			// something this task does not control cannot be trusted at any
-			// distance, so this goes through brokenFlow to Failed the same
+			// distance, so this goes through brokenFlow to TaskFailed the same
 			// direction ADR-0011 決定3 already fails closed in.
 			if !metav1.IsControlledBy(&box, task) {
 				return nil, brokenFlow{notOwnedError("verdict box", run.VerdictBox, task, box.OwnerReferences).Error()}
@@ -953,7 +955,7 @@ func (r *TaskReconciler) settleRun(
 
 // brokeDuringRun is what a broken definition does to the run that found it.
 //
-// For a phase's run the task is Failed: the fault is in the flow, no verdict
+// For a phase's run the task is TaskFailed: the fault is in the flow, no verdict
 // from it can be trusted, and nothing is repaired (§5). For the cleanup run it
 // is not, because the ending is already decided and a decided ending does not
 // move (ADR-0009 決定2) — the same fault is recorded as a cleanup that did not
@@ -1053,7 +1055,7 @@ func (r *TaskReconciler) settle(
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
-	r.announce(task, &flow.Spec, res.Next, res.Detail)
+	r.announce(task, &flow.Spec, res.Next, res.Detail, string(res.Outcome))
 	return nil
 }
 
@@ -1080,12 +1082,12 @@ func (r *TaskReconciler) settleFork(
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
-	r.announce(task, &flow.Spec, task.Status.Phase, res.Detail)
+	r.announce(task, &flow.Spec, task.Status.Phase, res.Detail, string(res.Outcome))
 	return nil
 }
 
 // The one ending no flow can prime: a task naming a flow that does not exist
-// never resolves one to read endings from. fail() always lands on Failed, so
+// never resolves one to read endings from. fail() always lands on TaskFailed, so
 // that is the only pairing this case can produce, and it is fixed by the code
 // rather than by anything in git — which is why it belongs here and not in
 // primeFlowMetrics (ADR-0010).
@@ -1094,7 +1096,7 @@ func (r *TaskReconciler) settleFork(
 // that the series is there for the first scrape either way, and so that it is
 // not a claim only a running manager makes.
 func init() {
-	metrics.PrimeOutcome(metrics.FlowUnresolved, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed))
+	metrics.PrimeOutcome(metrics.FlowUnresolved, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed), string(transition.OutcomeStructural))
 }
 
 // primeFlowMetrics reports every ending this flow declares at zero, so that
@@ -1120,7 +1122,9 @@ func init() {
 // cannot happen.
 func primeFlowMetrics(flow *flowv1alpha1.TaskFlow) {
 	for _, ending := range transition.DeclaredEndings(&flow.Spec) {
-		metrics.PrimeOutcome(flow.Name, string(ending.Phase), string(ending.Ending))
+		for _, outcome := range transition.PrimeOutcomes(ending) {
+			metrics.PrimeOutcome(flow.Name, string(ending.Phase), string(ending.Ending), string(outcome))
+		}
 	}
 	if flow.Spec.Finally != nil {
 		metrics.PrimeFinallyOutcome(flow.Name, string(transition.OutcomeDeclared))
@@ -1145,7 +1149,7 @@ func primeFlowMetrics(flow *flowv1alpha1.TaskFlow) {
 // closed — status is the record of truth, and Event/metric are signals, not
 // a second copy of it.
 //
-// flow may be nil: fail() reaches Failed with no flow to read at all when the
+// flow may be nil: fail() reaches TaskFailed with no flow to read at all when the
 // flow was deleted or never existed, and that is exactly the case a metric
 // meant to surface a broken flow must not drop.
 //
@@ -1159,7 +1163,7 @@ func primeFlowMetrics(flow *flowv1alpha1.TaskFlow) {
 // the metric only has to say how many tasks ended on a broken reference, not
 // which one.
 //
-// Only a Failure ending gets an event. The framework's own two already show
+// Only a Failure ending gets an event. The framework's own already shows
 // up as Ready=False with an outcome to read, and a Success or Undeclared
 // ending is not news; a Failure is the one case where a task that finished
 // perfectly normally is carrying bad news that nothing else would say out
@@ -1169,6 +1173,7 @@ func (r *TaskReconciler) announce(
 	flow *flowv1alpha1.TaskFlowSpec,
 	phase flowv1alpha1.Phase,
 	detail string,
+	outcome string,
 ) {
 	ending := transition.EndingOf(flow, phase)
 	if ending == transition.EndingRunning {
@@ -1180,6 +1185,7 @@ func (r *TaskReconciler) announce(
 	}
 	metrics.TaskOutcomes.With(prometheus.Labels{
 		metrics.LabelFlow: flowLabel, metrics.LabelPhase: string(phase), metrics.LabelSeverity: string(ending),
+		metrics.LabelOutcome: outcome,
 	}).Inc()
 
 	if ending != transition.EndingFailure || r.Recorder == nil {
@@ -1252,7 +1258,7 @@ func (r *TaskReconciler) announceCleanup(task *flowv1alpha1.Task, outcome transi
 		task.Status.Phase, task.Spec.Flow, detail)
 }
 
-// retryInfra re-runs a phase the handler never got to run, or escalates when
+// retryInfra re-runs a phase the handler never got to run, or stops at TaskFailed when
 // the handler's retry allowance is spent. The handler is looked up here rather
 // than carried from ensureJob because only this path needs it; for a task
 // without a copy its disappearing in between is the same broken-flow fault it
@@ -1367,8 +1373,8 @@ func (r *TaskReconciler) begin(ctx context.Context, task *flowv1alpha1.Task, flo
 func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, reason string) error {
 	// A dispatched task with nothing in flight has already reached a terminal
 	// phase: Advance clears the run in flight exactly when it lands one there, whether
-	// that phase is Failed, Escalated, or one the flow itself declared
-	// terminal. Leaving it alone here, not just for Failed specifically, is
+	// that phase is TaskFailed, or one the flow itself declared
+	// terminal. Leaving it alone here, not just for TaskFailed specifically, is
 	// what keeps a deleted or renamed flow from overwriting a finished task's
 	// audit trail. A task waiting on its cleanup run has stopped just as
 	// surely — the ending is already decided — so it is left alone too, and a
@@ -1381,7 +1387,9 @@ func (r *TaskReconciler) fail(ctx context.Context, task *flowv1alpha1.Task, flow
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
-	r.announce(task, flow, flowv1alpha1.PhaseFailed, reason)
+	logf.FromContext(ctx).Info("task failed without a run to settle",
+		"phase", task.Status.Phase, "outcome", transition.OutcomeStructural, "reason", reason)
+	r.announce(task, flow, flowv1alpha1.PhaseTaskFailed, reason, string(transition.OutcomeStructural))
 	return nil
 }
 
@@ -1459,7 +1467,7 @@ func (r *TaskReconciler) ensureJob(
 
 	// Reconcile only ever calls this with a phase it already confirmed is
 	// bound — an unbound current phase is either a quiet finish or, with a
-	// run in flight, a Failed of its own, and neither reaches here — or with
+	// run in flight, a TaskFailed of its own, and neither reaches here — or with
 	// the cleanup run, which terminal reaches only for a task whose status
 	// says one is owed. For a task without a copy, either declaration can
 	// still have been edited away between that check and this lookup, which is
@@ -1536,7 +1544,7 @@ func (r *TaskReconciler) ensureJob(
 // RBAC, not this check.
 //
 // An Invalid on create is the flow's volumeClaimTemplate being unusable as
-// written — a definition problem, so it goes through brokenFlow to Failed
+// written — a definition problem, so it goes through brokenFlow to TaskFailed
 // rather than being retried into the same rejection forever. StatefulSet
 // left that surfacing to the moment the claim is made too, but with nothing
 // watching, an apply that passed turned into pods that never came; here the
@@ -1601,7 +1609,7 @@ func (r *TaskReconciler) ensureWorkspacePVC(
 //
 // A run that answered nothing is not here — not because no later run could
 // read past it (a flow with a finally still runs a cleanup run after the
-// Escalated ending that answering nothing reaches, so the claim that nothing
+// TaskFailed ending that answering nothing reaches, so the claim that nothing
 // follows would be false), but because what that run was even offered is not
 // in history. History records what a run decided, never the declared
 // directories it chose among (ADR-0008), and rebuilding that set from the

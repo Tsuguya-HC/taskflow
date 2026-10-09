@@ -175,7 +175,7 @@ var _ = Describe("a run nothing starts", func() {
 			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
 		}
 
-		// 変異: 写しを持つ Task でも live の handler が無ければ Failed にする。
+		// 変異: 写しを持つ Task でも live の handler が無ければ TaskFailed にする。
 		It("dates a run of a task with a copy by the copy's handler", func() {
 			placed()
 			nameBox()
@@ -207,7 +207,7 @@ var _ = Describe("a run nothing starts", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
 			To(ContainSubstring("declares no timeout"))
 	})
@@ -226,7 +226,7 @@ var _ = Describe("a run nothing starts", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
 			To(ContainSubstring("Bogus"))
 		Expect(jobsOf(fx)).To(BeEmpty())
@@ -247,14 +247,14 @@ var _ = Describe("a run nothing starts", func() {
 			"the line beside the answer is what a human gets about this run")
 	})
 
-	It("escalates a word that is not one of the choices", func() {
+	It("stops at TaskFailed a word that is not one of the choices", func() {
 		start()
 		fx.answer("approved", "")
 
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeNoAnswer)))
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring("approved"))
 	})
@@ -268,14 +268,14 @@ var _ = Describe("a run nothing starts", func() {
 			"an empty word is no word: no declared directory can be spelled that way")
 	})
 
-	It("escalates a run nobody answered in time", func() {
+	It("stops at TaskFailed a run nobody answered in time", func() {
 		start()
 		fx.reconciler.Now = func() time.Time { return time.Now().Add(timeout + time.Minute) }
 
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(tk.Status.History[0].Outcome).To(Equal(string(transition.OutcomeNoAnswer)),
 			"silence is not an approval (P6)")
 		Expect(tk.Status.History[0].Reason).To(ContainSubstring(
@@ -306,7 +306,7 @@ var _ = Describe("a run nothing starts", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 			"the place was taken before the run began, and the pre-written answer is not read")
 		Expect(tk.Status.History).To(BeEmpty(), "nothing was decided")
 		Expect(meta.FindStatusCondition(tk.Status.Conditions, taskstate.ConditionReady).Message).
@@ -370,7 +370,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 			"a run the framework can no longer be answered about is not a run still being considered")
 	})
 
@@ -383,7 +383,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 	})
 
 	// A forged ownerReference passes IsControlledBy — it is free-form
@@ -417,7 +417,7 @@ var _ = Describe("a run nothing starts", func() {
 
 		fx.reconcile()
 
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed),
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed),
 			"the name and a forged ownerReference are not the object this run's own create made")
 	})
 
@@ -456,7 +456,7 @@ var _ = Describe("a run nothing starts", func() {
 	})
 
 	// A run whose vocabulary is edited away has nothing left to judge an
-	// answer against. For the cleanup run that is not a Failed — the ending
+	// answer against. For the cleanup run that is not a TaskFailed — the ending
 	// is already decided and does not move (ADR-0009 決定2) — it is a cleanup
 	// that did not happen. A task with a copy keeps the declaration it began
 	// with; keepCopy false drops the copy once the ending is reached, so the

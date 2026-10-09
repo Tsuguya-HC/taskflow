@@ -104,7 +104,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		Expect(fx.get().Status.Phase).To(Equal(phaseReport), "ok leads where the copy says, not where the live flow now says")
 	})
 
-	// 変異: flow が無ければ Failed にする（コピーを見ない）。
+	// 変異: flow が無ければ TaskFailed にする（コピーを見ない）。
 	It("keeps running when the live flow is deleted", func() {
 		flow := awaitingAnswer()
 		Expect(k8sClient.Delete(fx.ctx, flow)).To(Succeed())
@@ -128,7 +128,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		// A task that stopped before expiresAt existed to date it, the shape
 		// the reserved-phase branch backfills.
 		stopped := fx.get()
-		stopped.Status.Phase = flowv1alpha1.PhaseEscalated
+		stopped.Status.Phase = flowv1alpha1.PhaseTaskFailed
 		stopped.Status.CurrentRuns = nil
 		Expect(k8sClient.Status().Update(fx.ctx, stopped)).To(Succeed())
 		Expect(k8sClient.Delete(fx.ctx, flow)).To(Succeed())
@@ -137,7 +137,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 
 		got := fx.get()
 		Expect(got.UID).To(Equal(tk.UID))
-		Expect(got.Status.Phase).To(Equal(flowv1alpha1.PhaseEscalated))
+		Expect(got.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 		Expect(got.Status.ExpiresAt).NotTo(BeNil(), "nothing but the copy is left to read a ttl from")
 		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
 	})
@@ -163,7 +163,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		fx.reconcile()
 
 		tk := fx.get()
-		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed), "the copy has no binding for the phase in flight")
+		Expect(tk.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed), "the copy has no binding for the phase in flight")
 		Expect(tk.Status.Conditions).To(ContainElement(HaveField("Message",
 			ContainSubstring(fmt.Sprintf("lost its binding in flow %q while", tk.Spec.Flow)))))
 	})
@@ -193,7 +193,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		})
 
 		Expect(err).NotTo(HaveOccurred(), "a copy with a start is a flow, not an unreadable one")
-		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseFailed))
+		Expect(fx.get().Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed))
 	})
 
 	// A task is driven through the copy only when the copy can be read, and
@@ -304,7 +304,7 @@ var _ = Describe("a task running from its copy of the flow", func() {
 			fx.reconcile()
 
 			got := fx.get()
-			Expect(got.Status.Phase).To(Equal(flowv1alpha1.PhaseFailed), "that revision is no copy of this task's")
+			Expect(got.Status.Phase).To(Equal(flowv1alpha1.PhaseTaskFailed), "that revision is no copy of this task's")
 			Expect(meta.FindStatusCondition(got.Status.Conditions, taskstate.ConditionReady).Reason).To(Equal(reasonLost))
 			var now appsv1.ControllerRevision
 			Expect(k8sClient.Get(fx.ctx, client.ObjectKeyFromObject(other), &now)).To(Succeed())

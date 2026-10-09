@@ -133,10 +133,10 @@ type WorkspaceSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.runner) || self.runner.type != 'State' || (!has(self.jobTemplate) && !has(self.workspace) && !has(self.maxInfraRetries))",message="a State runner starts nothing, so jobTemplate, workspace and maxInfraRetries have no run to apply to"
 type TaskHandlerSpec struct {
 	// Phase this handler can fill — a status name from the flow's own
-	// vocabulary. The framework owns only two names and refuses those; every
+	// vocabulary. The framework owns only one name and refuses it; every
 	// other string is the author's to choose.
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:XValidation:rule="self != 'Escalated' && self != 'Failed'",message="Escalated and Failed are decided by the controller; a handler cannot fill them"
+	// +kubebuilder:validation:XValidation:rule="self != 'TaskFailed' && self != 'Escalated' && self != 'Failed'",message="TaskFailed is decided by the controller; a handler cannot fill it (Escalated and Failed are its old names)"
 	Phase Phase `json:"phase"` // CEL above must stay in sync with ReservedPhases (phase.go)
 
 	// +kubebuilder:default={type: Job}

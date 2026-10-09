@@ -339,7 +339,7 @@ func runIsSealed(run, name string) (bool, error) {
 // A fork's run (many) answers with every directory it wrote into, one or more,
 // joined by contract.JoinDirectories: each one is a branch it chose to start
 // (ADR-0013). Nothing written is still no answer. Whether the ones written
-// make sense together — Escalated beside a branch does not — is the
+// make sense together — refusal beside a branch does not — is the
 // controller's to judge, the same as which edge a single answer follows.
 func Seal(run string, declared []string, many bool) Answer {
 	if _, err := os.Stat(run); err != nil {

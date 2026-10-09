@@ -99,10 +99,12 @@ func (r *TaskReconciler) driveBranches(
 
 	if transition.IsTerminal(flow.Spec.Bindings, task.Status.Phase) {
 		detail := ""
+		outcome := string(transition.OutcomeStructural)
 		if n := len(task.Status.History); n > 0 {
 			detail = task.Status.History[n-1].Reason
+			outcome = task.Status.History[n-1].Outcome
 		}
-		r.announce(task, &flow.Spec, task.Status.Phase, detail)
+		r.announce(task, &flow.Spec, task.Status.Phase, detail, outcome)
 		// The task stopped on a branch's say-so. The branches that were still
 		// running are recorded as cancelled; their Jobs are stopped now that
 		// the record says so, because nothing they could answer would change
@@ -302,7 +304,9 @@ func (r *TaskReconciler) failBranchesAs(
 	if err := r.Status().Update(ctx, task); err != nil {
 		return err
 	}
-	r.announce(task, flow, flowv1alpha1.PhaseFailed, message)
+	logf.FromContext(ctx).Info("task failed without a run to settle",
+		"phase", task.Status.Phase, "outcome", transition.OutcomeStructural, "reason", readyReason)
+	r.announce(task, flow, flowv1alpha1.PhaseTaskFailed, message, string(transition.OutcomeStructural))
 	// Announced before this runs, so a delete that fails here — and the
 	// requeue that follows — never costs the task its metric or its Event.
 	return r.reapCancelledJobs(ctx, task)

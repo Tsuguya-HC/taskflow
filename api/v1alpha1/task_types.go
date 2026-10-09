@@ -248,7 +248,7 @@ type TaskStatus struct {
 
 	// ExpiresAt is when the controller deletes this task, set once it stops.
 	// The moment is fixed here rather than derived from the flow's ttl each
-	// time, so a task at Escalated keeps its date even after the flow that
+	// time, so a task at TaskFailed keeps its date even after the flow that
 	// set it is edited or gone — the same reason the reserved phases need no
 	// flow to be terminal.
 	// +optional

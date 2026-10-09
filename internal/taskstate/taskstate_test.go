@@ -94,9 +94,9 @@ func TestRunsIgnoresWhereItStopped(t *testing.T) {
 	if Runs(s, flow())[phaseDone] != 0 {
 		t.Fatal("nothing runs at a status with no binding")
 	}
-	esc := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseEscalated}
-	if Runs(esc, flow())[flowv1alpha1.PhaseEscalated] != 0 {
-		t.Fatal("nothing runs at Escalated either")
+	esc := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed}
+	if Runs(esc, flow())[flowv1alpha1.PhaseTaskFailed] != 0 {
+		t.Fatal("nothing runs at TaskFailed either")
 	}
 }
 
@@ -106,12 +106,12 @@ func TestRunsIgnoresWhereItStopped(t *testing.T) {
 // counted through CurrentRuns, by the loop above, not through this fallback.
 func TestRunsDuringFinallyCountsNeitherTheEndingNorFinally(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:       flowv1alpha1.PhaseEscalated,
+		Phase:       flowv1alpha1.PhaseTaskFailed,
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 1}},
 	}
 	got := Runs(s, flow())
-	if got[flowv1alpha1.PhaseEscalated] != 0 {
-		t.Fatalf("Escalated ran %d times, want 0: it is where the task stopped, not a phase about to run", got[flowv1alpha1.PhaseEscalated])
+	if got[flowv1alpha1.PhaseTaskFailed] != 0 {
+		t.Fatalf("TaskFailed ran %d times, want 0: it is where the task stopped, not a phase about to run", got[flowv1alpha1.PhaseTaskFailed])
 	}
 	if got[flowv1alpha1.PhaseFinally] != 0 {
 		t.Fatalf("Finally ran %d times, want 0: the cleanup run in flight is skipped by name", got[flowv1alpha1.PhaseFinally])
@@ -222,14 +222,14 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 	}
 	res := transition.Result{
-		Next:    flowv1alpha1.PhaseFailed,
+		Next:    flowv1alpha1.PhaseTaskFailed,
 		Outcome: transition.OutcomeStructural,
 		Detail:  "directory ok selects more than one status",
 	}
 	Advance(s, spec(), dirOK, res, at)
 
-	if s.Phase != flowv1alpha1.PhaseFailed {
-		t.Fatalf("phase = %q, want Failed", s.Phase)
+	if s.Phase != flowv1alpha1.PhaseTaskFailed {
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 	cond := meta.FindStatusCondition(s.Conditions, ConditionReady)
 	if cond == nil {
@@ -246,13 +246,13 @@ func TestAdvanceToFailedSetsReadyCondition(t *testing.T) {
 	}
 }
 
-// An Escalated edge the flow itself declared with next is still a status a
+// A TaskFailed edge the flow itself declared with next is still a status a
 // human has to look at: TTL must land on ttl.failed, not ttl.succeeded.
 // What decides the TTL is whether a human needs to look, not who declared
 // the edge.
-func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
+func TestAdvanceToDeclaredTaskFailedTakesFailedTTL(t *testing.T) {
 	bindings := map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
-		phaseReport: {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseEscalated: dirSent}},
+		phaseReport: {Handler: handlerNotify, Next: map[flowv1alpha1.Phase]string{flowv1alpha1.PhaseTaskFailed: dirSent}},
 	}
 	s := &flowv1alpha1.TaskStatus{
 		Phase:       phaseReport,
@@ -260,11 +260,11 @@ func TestAdvanceToDeclaredEscalatedTakesFailedTTL(t *testing.T) {
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 1}},
 	}
 	now := metav1.NewTime(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
-	res := transition.Result{Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeDeclined, Detail: "handler declined"}
+	res := transition.Result{Next: flowv1alpha1.PhaseTaskFailed, Outcome: transition.OutcomeDeclined, Detail: "handler declined"}
 	Advance(s, specOf(bindings, nil, ttl(time.Hour, 168*time.Hour)), dirSent, res, now)
 
 	if Current(s) != nil {
-		t.Fatal("a task that landed on Escalated has nothing in flight")
+		t.Fatal("a task that landed on TaskFailed has nothing in flight")
 	}
 	if len(s.History) != 1 || s.History[0].Outcome != string(transition.OutcomeDeclined) {
 		t.Fatalf("history = %+v, want one entry recording Declined", s.History)
@@ -364,8 +364,8 @@ func TestFailStopsATaskAndRecordsWhy(t *testing.T) {
 	}
 	Fail(s, "flow \"sample-flow\" does not exist in this namespace", nil, at)
 
-	if s.Phase != flowv1alpha1.PhaseFailed {
-		t.Fatalf("phase = %q, want Failed", s.Phase)
+	if s.Phase != flowv1alpha1.PhaseTaskFailed {
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 	if Current(s) != nil {
 		t.Fatal("a failed task has nothing in flight")
@@ -473,8 +473,8 @@ func TestHistoryBoundsACycle(t *testing.T) {
 		})
 		Advance(s, spec(), dir, res, at)
 		if transition.IsTerminal(flow(), s.Phase) {
-			if s.Phase != flowv1alpha1.PhaseEscalated {
-				t.Fatalf("ended at %q, want Escalated once 調査 reached its limit", s.Phase)
+			if s.Phase != flowv1alpha1.PhaseTaskFailed {
+				t.Fatalf("ended at %q, want TaskFailed once 調査 reached its limit", s.Phase)
 			}
 			if n := Runs(s, flow())[phaseInvestigate]; n != limit {
 				t.Fatalf("調査 ran %d times, want exactly the limit of %d", n, limit)
@@ -555,7 +555,7 @@ func TestExpireWithoutATTLKeepsTheTask(t *testing.T) {
 		"nil ttl":      nil,
 		"nil duration": {},
 	} {
-		status := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseFailed}
+		status := &flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed}
 
 		Expire(status, specOf(flow(), nil, unusable), at)
 
@@ -621,13 +621,13 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 		t.Fatalf("a task that stopped still has currentRun %+v", Current(&stopped))
 	}
 
-	escalated := *s
-	Advance(&escalated, spec(), dirMore, transition.Result{
-		Next: flowv1alpha1.PhaseEscalated, Outcome: transition.OutcomeNoAnswer,
+	stopped2 := *s
+	Advance(&stopped2, spec(), dirMore, transition.Result{
+		Next: flowv1alpha1.PhaseTaskFailed, Outcome: transition.OutcomeNoAnswer,
 	}, at)
-	agrees(t, "Advance to Escalated", &escalated)
-	if Current(&escalated) != nil {
-		t.Fatalf("a task that stopped still has currentRun %+v", Current(&escalated))
+	agrees(t, "Advance to TaskFailed", &stopped2)
+	if Current(&stopped2) != nil {
+		t.Fatalf("a task that stopped still has currentRun %+v", Current(&stopped2))
 	}
 
 	failed := *s
@@ -716,8 +716,8 @@ func TestFailStartsTheCleanupRunToo(t *testing.T) {
 	}
 	Fail(s, "the flow lost the binding it was running", specWithCleanup(ttl(time.Hour, 168*time.Hour)), at)
 
-	if s.Phase != flowv1alpha1.PhaseFailed {
-		t.Fatalf("phase = %q, want Failed", s.Phase)
+	if s.Phase != flowv1alpha1.PhaseTaskFailed {
+		t.Fatalf("phase = %q, want TaskFailed", s.Phase)
 	}
 	if !InFinally(s) || Current(s).RunID != 2 {
 		t.Fatalf("currentRun = %+v, want the cleanup run as run 2", Current(s))
@@ -854,15 +854,15 @@ func TestFinishFinallyReportsACleanupThatDidNot(t *testing.T) {
 	}
 }
 
-// The two reasons for the longer ttl are independent: a task that escalated is
-// no less escalated for having been tidied up after, so a cleanup that
+// The two reasons for the longer ttl are independent: a task that stopped at
+// TaskFailed is no less stopped for having been tidied up after, so a cleanup that
 // succeeded must not shorten the wait its ending earned.
 func TestFinishFinallyKeepsTheTTLTheEndingEarned(t *testing.T) {
 	s := &flowv1alpha1.TaskStatus{
-		Phase:       flowv1alpha1.PhaseEscalated,
+		Phase:       flowv1alpha1.PhaseTaskFailed,
 		RunID:       2,
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 2}},
-		// Advance sets this the moment the task lands on Escalated, before the
+		// Advance sets this the moment the task lands on TaskFailed, before the
 		// cleanup run is ever dispatched. FinishFinally reads it rather than
 		// re-deriving it, so it has to be here for the test to describe what
 		// Advance would actually have handed it.
@@ -871,7 +871,7 @@ func TestFinishFinallyKeepsTheTTLTheEndingEarned(t *testing.T) {
 	FinishFinally(s, specWithCleanup(ttl(time.Hour, 168*time.Hour)), dirDone, transition.OutcomeDeclared, "", at)
 
 	if s.ExpiresAt == nil || !s.ExpiresAt.Equal(&metav1.Time{Time: at.Add(168 * time.Hour)}) {
-		t.Fatalf("expiresAt = %v, want now+168h — somebody still has to come and look at an escalation", s.ExpiresAt)
+		t.Fatalf("expiresAt = %v, want now+168h — somebody still has to come and look at a TaskFailed ending", s.ExpiresAt)
 	}
 }
 

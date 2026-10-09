@@ -94,7 +94,8 @@ var _ = BeforeSuite(func() {
 	// rather than only the ones that happen to run this spec before
 	// task_ttl_test.go's own read of the same series (ADR-0010).
 	Expect(collectedOutcomes()).To(HaveKey(outcome{
-		metrics.FlowUnresolved, string(flowv1alpha1.PhaseFailed), string(transition.EndingFailed),
+		metrics.FlowUnresolved, string(flowv1alpha1.PhaseTaskFailed), string(transition.EndingTaskFailed),
+		string(transition.OutcomeStructural),
 	}), "the unresolved ending must be primed as the package loads, before any Task is reconciled")
 })
 
