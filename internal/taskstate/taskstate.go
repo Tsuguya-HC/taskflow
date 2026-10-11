@@ -53,6 +53,8 @@ limitations under the License.
 package taskstate
 
 import (
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -542,17 +544,25 @@ func FailAs(status *flowv1alpha1.TaskStatus, readyReason, message string, flow *
 // For every run but one they are the same name; the cleanup run is the
 // exception, and reading status.phase there would restart it as the ending the
 // task stopped at.
-func RetryInfra(status *flowv1alpha1.TaskStatus) {
-	phase, retries := status.Phase, int32(0)
-	if run := Current(status); run != nil {
-		phase = run.Phase
-		retries = run.InfraRetries + 1
+//
+// It refuses, and leaves status as it was, when Current names no run. A fork's
+// branches in flight would be collapsed into the one run rebuilt here; RetryRun
+// retries a branch. With nothing in flight there is no attempt to count: a
+// retry numbered 0 is the first attempt again, whose Job may be the very one
+// that failed, and guessing any other number is repairing a status that
+// contradicts the caller.
+func RetryInfra(status *flowv1alpha1.TaskStatus) error {
+	run := Current(status)
+	if run == nil {
+		return fmt.Errorf("taskstate: an infrastructure retry needs exactly one run in flight, not %d",
+			len(status.CurrentRuns))
 	}
 	SetCurrent(status, &flowv1alpha1.RunRef{
-		Phase:        phase,
+		Phase:        run.Phase,
 		RunID:        status.RunID,
-		InfraRetries: retries,
+		InfraRetries: run.InfraRetries + 1,
 	})
+	return nil
 }
 
 // InfraRetriesExhausted reports whether another infrastructure retry is
