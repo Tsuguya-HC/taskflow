@@ -17,6 +17,7 @@ limitations under the License.
 package flowcheck
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,5 +59,30 @@ func TestRefusesOldTerminalsInTerminals(t *testing.T) {
 			}
 			t.Fatalf("wanted %s refused with TaskFailed named, got %v", old, got)
 		})
+	}
+}
+
+// Catches the terminals loop ranging the map unsorted or in reverse: two old
+// names must come back in name order on every run, not in hash-seed order.
+func TestOldTerminalsInTerminalsAreReportedInNameOrder(t *testing.T) {
+	want := []flowv1alpha1.Phase{redEscalated, redFailed}
+	for range 32 {
+		spec := sampleFlow()
+		spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+			phaseDone:    flowv1alpha1.TerminalSuccess,
+			redFailed:    flowv1alpha1.TerminalSuccess,
+			redEscalated: flowv1alpha1.TerminalSuccess,
+		}
+		var got []flowv1alpha1.Phase
+		for _, line := range check(spec) {
+			for _, old := range want {
+				if strings.Contains(line, "terminals["+string(old)+"]:") {
+					got = append(got, old)
+				}
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("wanted old terminals refused in order %v, got %v from %v", want, got, check(spec))
+		}
 	}
 }
