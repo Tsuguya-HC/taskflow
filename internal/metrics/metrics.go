@@ -69,10 +69,12 @@ const (
 // author declared in git and the framework's own account of the move, so the
 // cardinality of this metric is the number of flows times the number of
 // phases they declare times the outcomes that can stop them, plus exactly one
-// row for FlowUnresolved — a flow fails to resolve only through fail(), which
-// always lands on TaskFailed, so the phase, severity and outcome paired with
-// it never vary — bounded by what is in git and by the code, not by anything
-// a task can do at runtime.
+// row for FlowUnresolved — a task is counted without a flow only when the
+// framework fails it itself, either because its flow does not resolve or
+// because the copy of the definitions a started task ran on was deleted, and
+// both always land on TaskFailed as a Structural outcome, so the phase,
+// severity and outcome paired with it never vary — bounded by what is in git
+// and by the code, not by anything a task can do at runtime.
 var TaskOutcomes = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "taskflow_task_outcomes_total",
