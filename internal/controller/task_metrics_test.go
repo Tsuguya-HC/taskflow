@@ -368,7 +368,7 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		tk := fx.makeBareTask(false)
 
 		copied := *live.Spec.DeepCopy()
-		copied.Bindings[phaseInvestigate].Next[phaseBroken] = "broken"
+		copied.Bindings[phaseInvestigate].Next[phaseBroken] = "abandoned"
 		copied.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
 			phaseReport: flowv1alpha1.TerminalSuccess,
 			phaseBroken: flowv1alpha1.TerminalFailure,
