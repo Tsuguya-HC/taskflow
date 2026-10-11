@@ -249,6 +249,28 @@ func TestSealSummarizesManyEntries(t *testing.T) {
 	}
 }
 
+// Catches summarize cutting at maxListed itself, which names every entry and
+// then adds "and 0 more".
+func TestSealNamesEveryEntryUpToMaxListed(t *testing.T) {
+	out := prepared(t)
+	for i := range maxListed {
+		write(t, out, "ok", fmt.Sprintf("f%d", i))
+	}
+
+	got := Seal(out, declared, false)
+	if got.Directory != "ok" {
+		t.Fatalf("directory = %q (%s)", got.Directory, got.Reason)
+	}
+	for i := range maxListed {
+		if !strings.Contains(got.Reason, fmt.Sprintf("f%d", i)) {
+			t.Fatalf("reason = %q; want it to name f%d", got.Reason, i)
+		}
+	}
+	if strings.Contains(got.Reason, "more") {
+		t.Fatalf("reason = %q; nothing was left out, so nothing should say so", got.Reason)
+	}
+}
+
 func TestSealOfAMissingDeclaredDirectoryIsNoAnswer(t *testing.T) {
 	out := prepared(t)
 	write(t, out, "ok", "a")
