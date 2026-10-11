@@ -1220,6 +1220,53 @@ func TestVerdictBoxNameStaysWithinTheLimit(t *testing.T) {
 	}
 }
 
+// Catches a cut that starts one character early, leaving a name that fits
+// hashed anyway, and a cut that leaves the name a character short of the
+// limit.
+func TestChildNamesCutAtTheLimit(t *testing.T) {
+	for _, fn := range []struct {
+		name string
+		of   func(taskName string) string
+	}{
+		{"job", func(taskName string) string { return JobName(taskName, phaseInvestigate, 12, 3) }},
+		{"verdict box", func(taskName string) string { return VerdictBoxName(taskName, taskUID, phaseInvestigate, 12) }},
+	} {
+		suffix := strings.TrimPrefix(fn.of("t"), "t")
+		fits := maxNameLength - len(suffix)
+		for _, tc := range []struct {
+			name       string
+			nameLength int
+		}{
+			{"exactly at the limit", fits},
+			{"one past the limit", fits + 1},
+			{"far past the limit", 200},
+		} {
+			t.Run(fn.name+"/"+tc.name, func(t *testing.T) {
+				taskName := strings.Repeat("x", tc.nameLength)
+				got := fn.of(taskName)
+
+				if tc.nameLength <= fits {
+					if want := taskName + suffix; got != want {
+						t.Fatalf("got %q; want the name that fits, uncut: %q", got, want)
+					}
+					return
+				}
+				if len(got) != maxNameLength {
+					t.Fatalf("len(%q) = %d; want the cut name to use the whole %d", got, len(got), maxNameLength)
+				}
+				kept := maxNameLength - len(suffix) - taskHashLength - 1
+				if !strings.HasPrefix(got, taskName[:kept]+"-") || !strings.HasSuffix(got, suffix) {
+					t.Fatalf("%q does not keep the first %d characters of the task name and the suffix %q", got, kept, suffix)
+				}
+				hash := got[kept+1 : len(got)-len(suffix)]
+				if len(hash) != taskHashLength || strings.Trim(hash, "0123456789abcdef") != "" {
+					t.Fatalf("hash %q is not %d hex digits", hash, taskHashLength)
+				}
+			})
+		}
+	}
+}
+
 // What the box carries is the declaration, put where whoever answers will see
 // it. It carries nothing else: the answer is theirs to write.
 func TestVerdictBoxCarriesTheDeclaration(t *testing.T) {
