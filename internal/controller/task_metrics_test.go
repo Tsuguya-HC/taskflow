@@ -17,13 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"encoding/json"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/metrics"
@@ -342,6 +346,81 @@ var _ = Describe("What a flow's endings say before they happen", func() {
 		} {
 			value, ok := got[want]
 			Expect(ok).To(BeTrue(), "%v was never reported for a task that holds a copy", want)
+			Expect(value).To(BeZero(), "%v counted something before any cleanup run settled", want)
+		}
+	})
+
+	// A task migrated onto a copy goes on with the flow read back from that
+	// copy, not with the live one it was made from. They part when the task's
+	// own copy is written between the look for it and the make: the make
+	// finds it already there and adopts it, and it holds the definitions as
+	// they were when it was written. Here that copy declares a failure ending
+	// and finally the live flow no longer has, so only priming the flow read
+	// back from the copy reports them (#212).
+	//
+	// 変異: 移行の後に写しから読み直した flow を prime しない。
+	It("primes the endings of the copy a migrated task goes on with, when it differs from the live flow", func() {
+		fx := newFixture()
+		live := fx.makeFlow()
+		fx.makeHandler()
+		var handler flowv1alpha1.TaskHandler
+		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &handler)).To(Succeed())
+		tk := fx.makeBareTask(false)
+
+		copied := *live.Spec.DeepCopy()
+		copied.Bindings[phaseInvestigate].Next[phaseBroken] = "broken"
+		copied.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
+			phaseReport: flowv1alpha1.TerminalSuccess,
+			phaseBroken: flowv1alpha1.TerminalFailure,
+		}
+		copied.Finally = &flowv1alpha1.FinallySpec{Handler: fx.name + "-cleanup", Done: answerDone}
+		cleanup := *handler.Spec.DeepCopy()
+		cleanup.Phase = flowv1alpha1.PhaseFinally
+		data, err := json.Marshal(snapshot{
+			Flow:     copied,
+			Handlers: map[string]flowv1alpha1.TaskHandlerSpec{fx.name: handler.Spec, fx.name + "-cleanup": cleanup},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		earlier := runner.BuildSnapshotRevision(tk, data)
+		DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, earlier) })
+
+		watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		raced := false
+		fx.reconciler.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*appsv1.ControllerRevision); ok && !raced {
+					raced = true
+					Expect(c.Create(ctx, earlier)).To(Succeed())
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		})
+
+		fx.reconcile()
+
+		Expect(raced).To(BeTrue(), "the migration never made a copy, so it never met the earlier one")
+		Expect(pinnedOf(fx.get())).NotTo(BeNil(), "the task should have been migrated onto the earlier copy")
+		revs := fx.revisions()
+		Expect(revs).To(HaveLen(1))
+		Expect(revs[0].Data.Raw).To(MatchJSON(data), "the copy the task goes on with is the earlier one, not one made from the live flow")
+
+		got := collectedOutcomes()
+		for _, want := range []outcome{
+			{fx.name, string(phaseBroken), string(transition.EndingFailure), string(transition.OutcomeDeclared)},
+			{fx.name, string(phaseBroken), string(transition.EndingFailure), string(transition.OutcomeRework)},
+		} {
+			value, ok := got[want]
+			Expect(ok).To(BeTrue(), "%v was never reported for the copy the migrated task goes on with", want)
+			Expect(value).To(BeZero(), "%v counted something before the task reached any ending", want)
+		}
+		gotFinally := collectedFinallyOutcomes()
+		for _, want := range []finallyOutcome{
+			{fx.name, string(transition.OutcomeDeclared)},
+			{fx.name, string(transition.OutcomeNoAnswer)},
+		} {
+			value, ok := gotFinally[want]
+			Expect(ok).To(BeTrue(), "%v was never reported for the copy the migrated task goes on with", want)
 			Expect(value).To(BeZero(), "%v counted something before any cleanup run settled", want)
 		}
 	})
