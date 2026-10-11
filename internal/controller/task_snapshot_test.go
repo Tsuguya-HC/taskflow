@@ -165,8 +165,9 @@ var _ = Describe("the revision a task starts from", func() {
 	})
 
 	// 1 object に収まらない写しは、最初の run の前に落とす。拒否は大きさで形が
-	// 違う: 保存側の 500 と、apiserver の 413。handler 1 つは載る大きさにして、
-	// 束ねた写しだけが載らないようにする。変異は拒否の形の判定を 1 つ落とす。
+	// 違う: 保存側の 500、保存側へ送る手前の 500、apiserver の 413。handler 1 つは
+	// 載る大きさにして、束ねた写しだけが載らないようにする。変異は拒否の形の判定を
+	// 1 つ落とす。
 	DescribeTable("fails before the first run when the copy does not fit in one object",
 		func(big int) {
 			fx.makeBulky(big)
@@ -180,6 +181,7 @@ var _ = Describe("the revision a task starts from", func() {
 			Expect(pinnedOf(fx.get())).To(BeNil(), "no copy was made, so nothing is marked")
 		},
 		Entry("refused by the storage under the apiserver", 2),
+		Entry("refused on the way to the storage", 3),
 		Entry("refused by the apiserver's body limit", 4),
 	)
 
