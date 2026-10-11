@@ -103,15 +103,16 @@ func TestRefusesTheOldTerminalsAsDestinations(t *testing.T) {
 		t.Run(string(old), func(t *testing.T) {
 			spec := sampleFlow()
 			spec.Bindings[phaseInvestigate].Next[old] = "legacy"
+			want := "spec.bindings[" + string(phaseInvestigate) + "].next[" + string(old) + "]"
 			got := check(spec)
 			hit := false
 			for _, line := range got {
-				if strings.Contains(line, "TaskFailed") {
+				if strings.HasPrefix(line, want+":") && strings.Contains(line, "TaskFailed") {
 					hit = true
 				}
 			}
 			if !hit {
-				t.Fatalf("wanted %s refused with TaskFailed named, got %v", old, got)
+				t.Fatalf("wanted %s refused at %s with TaskFailed named, got %v", old, want, got)
 			}
 		})
 	}
