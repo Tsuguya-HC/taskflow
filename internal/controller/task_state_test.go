@@ -426,10 +426,7 @@ var _ = Describe("a run nothing starts", func() {
 	// answered rather than started.
 	It("keeps driving a State run whose handler has since become a Job", func() {
 		start()
-		var handler flowv1alpha1.TaskHandler
-		Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &handler)).To(Succeed())
-		jobRunner()(&handler)
-		Expect(k8sClient.Update(fx.ctx, &handler)).To(Succeed())
+		fx.editHandler(jobRunner())
 
 		fx.answer("ok", "")
 		fx.reconcile()

@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -142,23 +141,13 @@ var _ = Describe("a task running from its copy of the flow", func() {
 		Expect(got.Status.ExpiresAt.Time).To(BeTemporally("==", clock.Add(failedTTL)))
 	})
 
-	// swapCopy replaces the copy begin wrote with one holding spec: a revision's
-	// data cannot be updated, so the task's own is deleted and made again.
-	swapCopy := func(spec flowv1alpha1.TaskFlowSpec) {
-		tk := fx.get()
-		old := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
-			Name: runner.SnapshotRevisionName(tk.Name, tk.UID), Namespace: tk.Namespace,
-		}}
-		Expect(k8sClient.Delete(fx.ctx, old)).To(Succeed())
-		data, err := json.Marshal(snapshot{Flow: spec, Handlers: map[string]flowv1alpha1.TaskHandlerSpec{}})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Create(fx.ctx, runner.BuildSnapshotRevision(tk, data))).To(Succeed())
-	}
-
 	// 変異: 写しから作る flow の Name を task.Spec.Flow 以外（revision 名や空）にする。
 	It("names the flow in its messages for the flow the task asked for", func() {
 		awaitingAnswer()
-		swapCopy(flowv1alpha1.TaskFlowSpec{Start: phaseInvestigate})
+		fx.rewriteCopy(func(snap *snapshot) {
+			snap.Flow = flowv1alpha1.TaskFlowSpec{Start: phaseInvestigate}
+			snap.Handlers = map[string]flowv1alpha1.TaskHandlerSpec{}
+		})
 
 		fx.reconcile()
 
@@ -171,10 +160,13 @@ var _ = Describe("a task running from its copy of the flow", func() {
 	// 変異: start と bindings の「どちらかが空」で読めない写しとして扱う。
 	It("reads a copy that has bindings but no start", func() {
 		flow := awaitingAnswer()
-		swapCopy(flowv1alpha1.TaskFlowSpec{
-			Profile:         flow.Spec.Profile,
-			Bindings:        flow.Spec.Bindings,
-			MaxRunsPerPhase: flow.Spec.MaxRunsPerPhase,
+		fx.rewriteCopy(func(snap *snapshot) {
+			snap.Flow = flowv1alpha1.TaskFlowSpec{
+				Profile:         flow.Spec.Profile,
+				Bindings:        flow.Spec.Bindings,
+				MaxRunsPerPhase: flow.Spec.MaxRunsPerPhase,
+			}
+			snap.Handlers = map[string]flowv1alpha1.TaskHandlerSpec{}
 		})
 
 		fx.answer("ok", "")
@@ -186,7 +178,10 @@ var _ = Describe("a task running from its copy of the flow", func() {
 	// 変異: start と bindings の「どちらかが空」で読めない写しとして扱う。
 	It("reads a copy that has a start but no bindings", func() {
 		awaitingAnswer()
-		swapCopy(flowv1alpha1.TaskFlowSpec{Start: phaseInvestigate})
+		fx.rewriteCopy(func(snap *snapshot) {
+			snap.Flow = flowv1alpha1.TaskFlowSpec{Start: phaseInvestigate}
+			snap.Handlers = map[string]flowv1alpha1.TaskHandlerSpec{}
+		})
 
 		_, err := fx.reconciler.Reconcile(fx.ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: fx.name, Namespace: resourceNamespace},
