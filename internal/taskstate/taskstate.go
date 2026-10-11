@@ -73,8 +73,10 @@ const ConditionDefinitionsPinned = "DefinitionsPinned"
 const ReasonCopied = "Copied"
 
 // ReasonFlowBroken is why Ready goes false for a task whose definitions are
-// broken: a handler a binding names that does not exist, a copy too big for
-// one object, a flow that lost the binding of a phase while it ran.
+// broken: a starting phase nothing binds, a handler a binding names that does
+// not exist, a copy too big for one object. A task that runs from its copy
+// cannot lose a phase's binding while it runs; one that started before copies
+// were made still can, and fails with this reason too.
 const ReasonFlowBroken = "FlowBroken"
 
 // ReasonDefinitionsLost is why Ready goes false for a task whose copy of its
