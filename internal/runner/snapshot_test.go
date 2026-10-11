@@ -25,3 +25,39 @@ func TestSnapshotRevisionNameFitsAndKeepsTheUID(t *testing.T) {
 		t.Fatalf("a short name is cut anyway: %q", short)
 	}
 }
+
+func TestSnapshotRevisionNameCutsAtTheLimit(t *testing.T) {
+	uid := types.UID("uid-a")
+	suffixLength := len("-snapshot-") + taskHashLength
+	fits := maxNameLength - suffixLength
+
+	for _, tc := range []struct {
+		name       string
+		nameLength int
+		wantPrefix int
+	}{
+		{"exactly at the limit", fits, fits},
+		{"one past the limit", fits + 1, fits},
+		{"far past the limit", 80, fits},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			taskName := strings.Repeat("x", tc.nameLength)
+			got := SnapshotRevisionName(taskName, uid)
+
+			wantLength := min(tc.nameLength+suffixLength, maxNameLength)
+			if len(got) != wantLength {
+				t.Fatalf("len(%q) = %d; want %d", got, len(got), wantLength)
+			}
+			if prefix := taskName[:tc.wantPrefix] + "-snapshot-"; !strings.HasPrefix(got, prefix) {
+				t.Fatalf("%q does not start with the first %d characters of the task name", got, tc.wantPrefix)
+			}
+			hash := got[tc.wantPrefix+len("-snapshot-"):]
+			if len(hash) != taskHashLength || strings.Trim(hash, "0123456789abcdef") != "" {
+				t.Fatalf("hash %q is not %d hex digits", hash, taskHashLength)
+			}
+			if !strings.HasSuffix(SnapshotRevisionName("t", uid), hash) {
+				t.Fatalf("hash %q differs from the one the same UID gets under a short name", hash)
+			}
+		})
+	}
+}
