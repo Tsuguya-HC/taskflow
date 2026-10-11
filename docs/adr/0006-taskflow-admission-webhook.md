@@ -16,7 +16,7 @@
    最大 N 個」を課したうえ、式の正しさが実行するまで分からなくなる（P9 が宣言側に禁じたものを
    検証側で自分がやる形になる）
 3. **証明書は配置側が与える。** taskflow は `--webhook-cert-path` の下のファイルを読むだけで、
-   証明書を配る仕組みを知らない（`cmd/main.go` は scaffold の時点で既にこの形）。
+   証明書を配る仕組みを知らない（コントローラの起動処理は scaffold の時点で既にこの形）。
    `ValidatingWebhookConfiguration` は caBundle 空で配り、cert と caBundle をどう供給するかは
    利用側の裁量（design.md §14 の分担そのもの）。これで増える依存は
    `admissionregistration.k8s.io/v1` だけ、すなわち core API のみで、§7 の
@@ -24,9 +24,10 @@
 4. **別オブジェクトを参照する検査は webhook に入れない。** handler の実在と `spec.phase` の一致は
    定義時に弾いてはいけない — admission が別オブジェクトの存在に依存してはならず、handler が
    まだ無いことを理由に TaskFlow を拒否すると適用順で詰む。design.md §8「遅延バインディングの
-   代償」の立場（framework は実在確認をしない）を維持し、実行時の `brokenFlow` → `TaskFailed` のまま
-5. **admission が走ったことに依存する実装にしない。** `internal/transition` の実行時検査は
-   webhook が入っても残す。編集済みの flow が走行中のタスクの足元に残るため（#19）
+   代償」の立場（framework は実在確認をしない）を維持し、実行時に定義の破損として `TaskFailed`
+   に倒すまま
+5. **admission が走ったことに依存する実装にしない。** コントローラが Task を遷移させるときの
+   実行時検査は webhook が入っても残す。編集済みの flow が走行中のタスクの足元に残るため（#19）
 
 **覆したもの**: なし。design.md §5 が未決のまま並べていた 2 機構を確定させただけ
 
