@@ -43,7 +43,9 @@ func TestRefusesOldTerminalsInJoinAlways(t *testing.T) {
 }
 
 // Catches the terminals old-name loop going missing: without it a flow
-// declaring Escalated or Failed as a terminal passes silently (#217).
+// declaring Escalated or Failed as a terminal passes silently (#217). Also
+// catches the refusal being rooted under spec.bindings, a field that does not
+// hold terminals (#233).
 func TestRefusesOldTerminalsInTerminals(t *testing.T) {
 	for _, old := range []flowv1alpha1.Phase{redEscalated, redFailed} {
 		t.Run(string(old), func(t *testing.T) {
@@ -51,13 +53,14 @@ func TestRefusesOldTerminalsInTerminals(t *testing.T) {
 			spec.Terminals = map[flowv1alpha1.Phase]flowv1alpha1.TerminalSeverity{
 				old: flowv1alpha1.TerminalSuccess,
 			}
+			want := "spec.terminals[" + string(old) + "]"
 			got := check(spec)
 			for _, line := range got {
-				if strings.Contains(line, string(old)) && strings.Contains(line, "TaskFailed") {
+				if strings.HasPrefix(line, want+":") && strings.Contains(line, "TaskFailed") {
 					return
 				}
 			}
-			t.Fatalf("wanted %s refused with TaskFailed named, got %v", old, got)
+			t.Fatalf("wanted %s refused at %s with TaskFailed named, got %v", old, want, got)
 		})
 	}
 }
@@ -76,7 +79,7 @@ func TestOldTerminalsInTerminalsAreReportedInNameOrder(t *testing.T) {
 		var got []flowv1alpha1.Phase
 		for _, line := range check(spec) {
 			for _, old := range want {
-				if strings.Contains(line, "terminals["+string(old)+"]:") {
+				if strings.HasPrefix(line, "spec.terminals["+string(old)+"]:") {
 					got = append(got, old)
 				}
 			}

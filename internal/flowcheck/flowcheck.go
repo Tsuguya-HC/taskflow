@@ -51,7 +51,7 @@ func Check(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
 	bindings := path.Child("bindings")
 
-	errs = append(errs, checkOldTerminalNames(spec, bindings)...)
+	errs = append(errs, checkOldTerminalNames(spec, path)...)
 
 	for _, phase := range sortedPhases(spec.Bindings) {
 		key := bindings.Key(string(phase))
@@ -112,8 +112,9 @@ func Check(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 // destinations, terminals, and always entries. They stopped being reserved,
 // so without this a flow written for them would read as an unbound declared
 // ending and pass silently, succeeding a task nobody decided.
-func checkOldTerminalNames(spec *flowv1alpha1.TaskFlowSpec, bindings *field.Path) field.ErrorList {
+func checkOldTerminalNames(spec *flowv1alpha1.TaskFlowSpec, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
+	bindings := path.Child("bindings")
 	for _, phase := range sortedPhases(spec.Bindings) {
 		if oldTerminal(phase) {
 			errs = append(errs, field.Forbidden(bindings.Key(string(phase)),
@@ -136,7 +137,7 @@ func checkOldTerminalNames(spec *flowv1alpha1.TaskFlowSpec, bindings *field.Path
 	}
 	for _, terminal := range sortedTerminals(spec.Terminals) {
 		if oldTerminal(terminal) {
-			errs = append(errs, field.Forbidden(bindings.Child("terminals").Key(string(terminal)),
+			errs = append(errs, field.Forbidden(path.Child("terminals").Key(string(terminal)),
 				fmt.Sprintf("%s is no longer a terminal; name TaskFailed instead", terminal)))
 		}
 	}
