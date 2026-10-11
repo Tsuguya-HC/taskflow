@@ -1293,7 +1293,9 @@ func (r *TaskReconciler) retryInfra(
 
 	logf.FromContext(ctx).Info("retrying a run that never started",
 		"phase", run.Phase, "runID", run.RunID, "failure", failure, "retries", run.InfraRetries)
-	taskstate.RetryInfra(&task.Status)
+	if err := taskstate.RetryInfra(&task.Status); err != nil {
+		return err
+	}
 	return r.Status().Update(ctx, task)
 }
 

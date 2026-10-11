@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -416,7 +417,9 @@ func TestInfraRetryCostsNeitherARunNorTheLimit(t *testing.T) {
 		RunID:       4,
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: phaseReport, RunID: 4}},
 	}
-	RetryInfra(s)
+	if err := RetryInfra(s); err != nil {
+		t.Fatal(err)
+	}
 
 	if s.RunID != 4 || Current(s).RunID != 4 {
 		t.Fatalf("runID = %d, want it to stay 4: a runID counts decided runs, not attempts at starting one", s.RunID)
@@ -432,6 +435,32 @@ func TestInfraRetryCostsNeitherARunNorTheLimit(t *testing.T) {
 	}
 	if Current(s).InfraRetries != 1 {
 		t.Fatalf("infraRetries = %d, want 1", Current(s).InfraRetries)
+	}
+}
+
+// RetryInfra retries the one run in flight, so it refuses, and leaves status
+// as it found it, whenever Current names none. Two shapes come here:
+// a fork's branches in flight, which one rebuilt run would collapse into one;
+// and nothing in flight, where the old fallback counted the retry as attempt
+// 0 — the first attempt's name again, so a first attempt that failed would be
+// "retried" by finding its own failed Job.
+func TestRetryInfraRefusesWithoutASingleRun(t *testing.T) {
+	for name, s := range map[string]*flowv1alpha1.TaskStatus{
+		"branches in flight": {Phase: phasePick, RunID: 3, CurrentRuns: []flowv1alpha1.RunRef{
+			{Phase: phaseLogic, RunID: 2, JobName: "l", InfraRetries: 1},
+			{Phase: phaseSecurity, RunID: 3, JobName: "s"},
+		}},
+		"nothing in flight": {Phase: phaseReport, RunID: 4},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := s.DeepCopy()
+			if err := RetryInfra(s); err == nil {
+				t.Fatal("RetryInfra without a single run in flight returned no error")
+			}
+			if !equality.Semantic.DeepEqual(s, want) {
+				t.Fatalf("status = %+v, want it untouched: %+v", s, want)
+			}
+		})
 	}
 }
 
@@ -597,7 +626,9 @@ func TestCurrentRunNamesTheCurrentPhase(t *testing.T) {
 	Begin(s, phaseInvestigate)
 	agrees(t, "Begin", s)
 
-	RetryInfra(s)
+	if err := RetryInfra(s); err != nil {
+		t.Fatal(err)
+	}
 	agrees(t, "RetryInfra", s)
 
 	Advance(s, spec(), dirMore, transition.Result{
@@ -927,7 +958,9 @@ func TestRetryInfraKeepsTheCleanupRunsName(t *testing.T) {
 		RunID:       3,
 		CurrentRuns: []flowv1alpha1.RunRef{{Phase: flowv1alpha1.PhaseFinally, RunID: 3}},
 	}
-	RetryInfra(s)
+	if err := RetryInfra(s); err != nil {
+		t.Fatal(err)
+	}
 
 	if !InFinally(s) {
 		t.Fatalf("currentRun = %+v, want the cleanup run again", Current(s))
