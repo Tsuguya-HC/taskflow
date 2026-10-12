@@ -68,6 +68,9 @@ jobs:
               - '.golangci.yml'
               - '.custom-gcl.yml'
               - '.github/workflows/_go.yml'
+              # docs の YAML は test/docs が CRD に対して検査する。docs だけを
+              # 変えた PR でも走らせないと、壊れた例がそのまま入る。
+              - 'docs/**/*.md'
             workflows:
               - '.github/workflows/**'
             renovate:
