@@ -838,6 +838,30 @@ func TestSidecarUIDStepsPastTheHandlers(t *testing.T) {
 	}
 }
 
+// Catches the pod-level guard's && turned to ||, which dereferences a uid the
+// pod does not have (#138). No Job is built from such a pod, so the template
+// goes to sidecarUID itself; what it must still do there is step past the
+// uids the containers name.
+func TestSidecarUIDStepsPastTheContainersWithNoPodUID(t *testing.T) {
+	for name, podSC := range map[string]*corev1.PodSecurityContext{
+		"no securityContext at all":         nil,
+		"securityContext with no runAsUser": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := &corev1.PodSpec{
+				SecurityContext: podSC,
+				Containers: []corev1.Container{{
+					Name:            "agent",
+					SecurityContext: &corev1.SecurityContext{RunAsUser: ptr(preferredSidecarUID)},
+				}},
+			}
+			if got := sidecarUID(pod); got != preferredSidecarUID-1 {
+				t.Fatalf("sidecarUID = %d; the container already runs as %d", got, preferredSidecarUID)
+			}
+		})
+	}
+}
+
 // A pod that does not say its uid runs as whatever each image was built
 // with, which the sidecar cannot be sure to differ from. Refused rather
 // than guessed: the closing of the run's directory is the whole enforcement.
