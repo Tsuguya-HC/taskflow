@@ -166,10 +166,12 @@ group は `flow.tgy.io`。**リソースとして存在するのは Flow / Handl
 ### TaskFlow（型 / **namespaced**、GitOps）
 
 ```yaml
+apiVersion: flow.tgy.io/v1alpha1
 kind: TaskFlow
 metadata: {name: sample-flow}
 spec:
   profile: investigate        # 必須フェーズを規定する検証スキーマ（コントローラ組み込みの enum）
+  start: 調査                 # 最初に走るフェーズ。推測せず宣言させる（P8）
   bindings:                   # 各フェーズを誰が埋めるか + 次にどこへ行くか（両方必須）
     調査:                      # ステータス名は利用側が決める
       handler: sample-handler
@@ -192,6 +194,7 @@ spec:
 ### Task（実体 / namespaced）
 
 ```yaml
+apiVersion: flow.tgy.io/v1alpha1
 kind: Task
 spec:
   flow: sample-flow
@@ -301,6 +304,7 @@ status は写しの名前も参照も持たない。持つのは `DefinitionsPin
 フェーズを埋める「箱」。先に作っておいて、使うときに名前で指名する。
 
 ```yaml
+apiVersion: flow.tgy.io/v1alpha1
 kind: TaskHandler
 metadata: {name: sample-reviewer}
 spec:
@@ -322,7 +326,7 @@ spec:
         containers:
           - name: agent
             volumeMounts: [{name: work, mountPath: /workspace}]
-            ...
+            # image・command など、エージェント自身の設定
   timeout: 30m
   maxInfraRetries: 2
 ```
@@ -1480,6 +1484,7 @@ annotations:
 利用側の語彙で。
 
 ```yaml
+apiVersion: flow.tgy.io/v1alpha1
 kind: TaskHandler
 spec:
   phase: 調査
@@ -1487,6 +1492,8 @@ spec:
     template:
       metadata:
         labels: {role: repo-reader}   # 名前も語彙も利用側のもの
+      spec:
+        containers: [{name: agent}]   # Pod の中身は省略
 ```
 
 あとは既存の仕組みが反応する。
