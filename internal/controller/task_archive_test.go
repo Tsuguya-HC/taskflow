@@ -747,6 +747,87 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Entry("some withheld", true, `{"uploaded":2,"withheld":4}`, "Withheld"),
 			Entry("the Job failed", false, "", "Failed"),
 		)
+
+		// The counter is raised on the series the Job's creation primed. A
+		// settle-time read error or a flow that appeared while the Job ran
+		// must not move the count onto a series that was never primed.
+		It("does not fold a settle-time read error into the unresolved series", func() {
+			ended()
+			fx.reconcile()
+			for _, o := range outcomes {
+				_, ok := counted(fx.name, o)
+				Expect(ok).To(BeTrue(), "%s is primed under the flow", o)
+			}
+			beforeUnresolved := total(unresolvedLabel, "Uploaded")
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.APIReader = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.ControllerRevision); ok {
+						return errors.New("the apiserver blinked at settle time")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			settle(archiveJob(), true, `{"uploaded":3,"withheld":0}`)
+			_, _ = fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+
+			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(beforeUnresolved), "the unresolved series did not move")
+		})
+
+		// A Job made before the label was recorded on it has no primed series
+		// to name; the count goes to the unresolved one.
+		It("counts a Job without the recorded label under the unresolved series", func() {
+			ended()
+			fx.reconcile()
+			job := archiveJob()
+			delete(job.Annotations, annotationFlowLabel)
+			Expect(k8sClient.Update(fx.ctx, job)).To(Succeed())
+			before := total(unresolvedLabel, "Uploaded")
+			settle(archiveJob(), true, `{"uploaded":3,"withheld":0}`)
+			fx.reconcile()
+
+			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(before + 1))
+			Expect(total(fx.name, "Uploaded")).To(Equal(float64(0)))
+		})
+
+		It("does not count on a series the Job's creation never primed", func() {
+			fx.makeFlow()
+			fx.name += "-run2"
+			tk := &flowv1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
+				Spec:       flowv1alpha1.TaskSpec{Flow: "appears-later"},
+			}
+			Expect(k8sClient.Create(fx.ctx, tk)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, tk) })
+			fx.taskUID = tk.UID
+			tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
+			tk.Status.ExpiresAt = &metav1.Time{Time: expiresAt}
+			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+			fx.reconcile()
+			beforeUnresolved := total(unresolvedLabel, "Uploaded")
+			_, wasPrimed := counted("appears-later", "Uploaded")
+			Expect(wasPrimed).To(BeFalse())
+
+			later := &flowv1alpha1.TaskFlow{
+				ObjectMeta: metav1.ObjectMeta{Name: "appears-later", Namespace: resourceNamespace},
+				Spec: flowv1alpha1.TaskFlowSpec{
+					Profile: flowv1alpha1.ProfileInvestigate,
+					Start:   phaseInvestigate,
+					Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+						phaseInvestigate: {Handler: fx.name, Next: map[flowv1alpha1.Phase]string{phaseReport: "ok"}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(fx.ctx, later)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, later) })
+			settle(archiveJob(), true, `{"uploaded":1,"withheld":0}`)
+			fx.reconcile()
+
+			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(beforeUnresolved+1), "the primed series took the count")
+			_, nowExists := counted("appears-later", "Uploaded")
+			Expect(nowExists).To(BeFalse(), "no series appeared from nowhere")
+		})
 	})
 
 	Describe("without configuration", func() {

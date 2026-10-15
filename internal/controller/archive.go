@@ -49,11 +49,12 @@ const (
 	archiveWithheld     = "Withheld"
 	archiveUploadFailed = "UploadFailed"
 
-	actionArchiving         = "Archiving"
-	archiveContainer        = "archive"
-	archiveUnresolved       = "_unresolved"
-	archiveRecheck          = 30 * time.Second
-	archiveUID        int64 = 65532
+	actionArchiving           = "Archiving"
+	archiveContainer          = "archive"
+	archiveUnresolved         = "_unresolved"
+	archiveRecheck            = 30 * time.Second
+	annotationFlowLabel       = "flow.tgy.io/archive-flow-label"
+	archiveUID          int64 = 65532
 )
 
 // ArchiveConfig is what the controller is told about sending ended Tasks away.
@@ -149,7 +150,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		return true, r.setArchived(ctx, task, metav1.ConditionUnknown, archiveUploading, "the record is being sent")
 	case failure != "":
 		msg := fmt.Sprintf("the archive Job failed: %s", failure)
-		if err := r.settleArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
+		if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
 			return false, err
 		}
 		if r.Recorder != nil {
@@ -170,7 +171,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 				looked++
 				if err := json.Unmarshal([]byte(t.Message), &res); err != nil {
 					msg := fmt.Sprintf("the archive Job's result could not be read: %v", err)
-					if err := r.settleArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
+					if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
 						return false, err
 					}
 					if r.Recorder != nil {
@@ -187,23 +188,25 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		return false, nil
 	}
 	if res.Withheld > 0 {
-		return true, r.settleArchived(ctx, task, metav1.ConditionTrue, archiveWithheld,
+		return true, r.settleArchived(ctx, task, job, metav1.ConditionTrue, archiveWithheld,
 			fmt.Sprintf("%d uploaded, %d withheld", res.Uploaded, res.Withheld), metrics.ArchiveWithheld)
 	}
-	return true, r.settleArchived(ctx, task, metav1.ConditionTrue, archiveUploaded,
+	return true, r.settleArchived(ctx, task, job, metav1.ConditionTrue, archiveUploaded,
 		fmt.Sprintf("%d uploaded", res.Uploaded), metrics.ArchiveUploaded)
 }
 
 // settleArchived records how the sending ended and counts it. The count
 // follows the write, so a write that failed is tried again and counted once.
+// The series is the one the Job's creation primed, read back from the Job:
+// resolving the flow again here could land on another series, or fail.
 func (r *TaskReconciler) settleArchived(
-	ctx context.Context, task *flowv1alpha1.Task, status metav1.ConditionStatus, reason, message, outcome string,
+	ctx context.Context, task *flowv1alpha1.Task, job *batchv1.Job, status metav1.ConditionStatus, reason, message, outcome string,
 ) error {
 	if err := r.setArchived(ctx, task, status, reason, message); err != nil {
 		return err
 	}
-	_, label, err := r.archiveFlow(ctx, task)
-	if err != nil {
+	label, ok := job.Annotations[annotationFlowLabel]
+	if !ok {
 		label = metrics.FlowUnresolved
 	}
 	metrics.ArchiveOutcomes.With(prometheus.Labels{metrics.LabelFlow: label, metrics.LabelOutcome: outcome}).Inc()
@@ -259,7 +262,7 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 		return nil, err
 	}
 	metrics.PrimeArchiveOutcomes(label)
-	job := r.buildArchiveJob(task, pvc, prefix)
+	job := r.buildArchiveJob(task, pvc, prefix, label)
 	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
 		return nil, err
 	}
@@ -358,7 +361,7 @@ func (r *TaskReconciler) archiveFlow(ctx context.Context, task *flowv1alpha1.Tas
 	return task.Spec.Flow, task.Spec.Flow, nil
 }
 
-func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix string) *batchv1.Job {
+func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix, flowLabel string) *batchv1.Job {
 	cfg := r.Archive
 	const recordDir = "/archive"
 	args := []string{
@@ -385,6 +388,7 @@ func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix st
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: archiveJobName(task.Name), Namespace: task.Namespace, Labels: archiveLabels(task),
+			Annotations: map[string]string{annotationFlowLabel: flowLabel},
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:          ptr.To(int32(2)),

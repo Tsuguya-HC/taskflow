@@ -125,7 +125,8 @@ const (
 )
 
 // PrimeArchiveOutcomes creates all three series of ArchiveOutcomes for a flow
-// at zero (see PrimeOutcome).
+// at zero. Asking a CounterVec for a child creates it and leaves an existing
+// one at what it has counted, so calling this again for the same flow is safe.
 func PrimeArchiveOutcomes(flow string) {
 	for _, o := range []string{ArchiveUploaded, ArchiveWithheld, ArchiveFailed} {
 		ArchiveOutcomes.With(prometheus.Labels{LabelFlow: flow, LabelOutcome: o})
