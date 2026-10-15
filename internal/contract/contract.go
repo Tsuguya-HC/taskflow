@@ -103,6 +103,12 @@ const (
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 	ManagedBy      = "taskflow"
 
+	// LabelRole says what an object of the Task's is for where the Task has
+	// more than one kind of child; RoleArchive is the Job that sends the
+	// Task's record away, and the ConfigMap that carries the record to it.
+	LabelRole   = "flow.tgy.io/role"
+	RoleArchive = "archive"
+
 	// AnnotationChoices is the vocabulary a State run may be answered with, on
 	// the verdict box the controller opens for it. It is there so that
 	// answering does not require reading the flow: the declaration puts the
