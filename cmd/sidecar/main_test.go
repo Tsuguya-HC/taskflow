@@ -959,6 +959,8 @@ func TestScanTermLog(t *testing.T) {
 		"double dash space form":          {[]string{termLogFlag, "/x"}, "/x"},
 		// An `=` form carries its own value, so the next token is still a flag name.
 		"equals form does not swallow next": {[]string{"--bucket=x", termLogFlag, "/p"}, "/p"},
+		// A bool flag takes no value, so the next token is still a flag.
+		"bare bool flag does not swallow next": {[]string{"--secure", termLogFlag, "/p"}, "/p"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := scanTermLog(tc.args); got != tc.want {
