@@ -98,6 +98,21 @@ spec:
               output was put is the deployment's arrangement, and this status is written
               by a controller that has no part in it (ADR-0008).
             properties:
+              archive:
+                description: |-
+                  Archive says where the record of this task was sent. It is set when the
+                  sending begins and is absent where ended tasks are not sent away.
+                properties:
+                  endpoint:
+                    description: Endpoint is the object store's address that Location
+                      is on.
+                    type: string
+                  location:
+                    description: |-
+                      Location is the s3:// URL, ending in a slash, under which the record's
+                      objects are stored.
+                    type: string
+                type: object
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

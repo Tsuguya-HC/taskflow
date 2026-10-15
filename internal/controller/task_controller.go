@@ -1022,7 +1022,7 @@ func jobFinished(job *batchv1.Job) (finished bool, failure string) {
 			// A failure with no reason is still a failure, and an empty
 			// string would read as "completed" to the caller.
 			if c.Reason == "" {
-				return true, "Failed"
+				return true, string(batchv1.JobFailed)
 			}
 			return true, c.Reason
 		}
