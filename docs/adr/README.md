@@ -25,3 +25,4 @@ design.md を書き直すと経緯が本文に埋まるので、覆した判断�
 | [0012](0012-run-limit-per-phase.md) | accepted | 循環の上限はフェーズごとの実行回数（`maxRunsPerPhase`）。`reworkBudget` を置き換える |
 | [0013](0013-parallel-phases.md) | accepted | 並列フェーズは `join` で宣言し、分岐から合流までを閉じた領域にする。枝ごとに runID、読む口は `inputs` ビュー |
 | [0014](0014-pin-definitions-at-start.md) | accepted | Task は開始時に写した定義で最後まで走る。新しい定義は作り直した Task から |
+| [0015](0015-archive-ended-tasks.md) | accepted | 終わった Task は S3 互換ストレージへ送ってから消す。`status.archive` に限って 0008 を覆す |

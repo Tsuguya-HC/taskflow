@@ -3,6 +3,7 @@
 - **status**: accepted（2026-09-05、人間の承認）
 - **根拠**: issue #21。`status.artifacts` と `status.history[].ref` が API に宣言されたまま、
   誰も書かないフィールドとして 10 日以上本番の CRD に載っていた
+- **一部を覆された**: [ADR-0015](0015-archive-ended-tasks.md)（決定 1 の「store を status に持たない」を `status.archive` に限って）
 
 **決定**:
 
