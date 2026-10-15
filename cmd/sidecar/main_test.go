@@ -804,9 +804,9 @@ func TestArchiveWritesTerminationMessage(t *testing.T) {
 	termLog := filepath.Join(dir, "term")
 	t.Setenv("AWS_ACCESS_KEY_ID", "k")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
-	err := run([]string{"archive", "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
+	err := run([]string{archiveCmd, "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
 		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", "--bucket", "bkt", "--region", "r",
-		"--termination-log", termLog})
+		termLogFlag, termLog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -819,6 +819,11 @@ func TestArchiveWritesTerminationMessage(t *testing.T) {
 	}
 }
 
+const (
+	archiveCmd  = "archive"
+	termLogFlag = "--termination-log"
+)
+
 // archiveFlags is a complete archive invocation against srv; the tests below
 // drop or break one part of it.
 func archiveFlags(t *testing.T, srv *httptest.Server, termLog string) []string {
@@ -829,9 +834,9 @@ func archiveFlags(t *testing.T, srv *httptest.Server, termLog string) []string {
 	}
 	t.Setenv("AWS_ACCESS_KEY_ID", "k")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
-	return []string{"archive", "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
+	return []string{archiveCmd, "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
 		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", "--bucket", "bkt", "--region", "r",
-		"--termination-log", termLog}
+		termLogFlag, termLog}
 }
 
 func withoutFlag(args []string, name string) []string {
@@ -888,7 +893,11 @@ func TestArchiveSendsNothingButPUT(t *testing.T) {
 	}))
 	defer srv.Close()
 	args := withoutFlag(archiveFlags(t, srv, filepath.Join(t.TempDir(), "term")), "region")
-	_ = run(args)
+	// Without a region the run must stop before any request, so the location
+	// lookup that PUT-only credentials cannot make is never attempted.
+	if err := run(args); err == nil || !strings.Contains(err.Error(), "region is required") {
+		t.Fatalf("err = %v, want region is required", err)
+	}
 	for _, m := range methods {
 		if m != http.MethodPut {
 			t.Fatalf("methods = %v, want PUT only", methods)
@@ -919,5 +928,25 @@ func TestArchiveFailureIsRecordedInTerminationLog(t *testing.T) {
 				t.Fatalf("termination log = %q, want the failure recorded", got)
 			}
 		})
+	}
+}
+
+// A flag that fails to parse must still leave a reason, replacing what the
+// termination log held before. --termination-log comes first so it is parsed
+// by the time the bad flag stops the parse.
+func TestArchiveParseFailureIsRecordedInTerminationLog(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "term")
+	if err := os.WriteFile(log, []byte("stale-previous-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{archiveCmd, termLogFlag, log, "--not-a-real-flag=x"}); err == nil {
+		t.Fatal("expected parse failure")
+	}
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "archive failed") {
+		t.Errorf("termination log = %q, want an archive failure reason", got)
 	}
 }

@@ -130,6 +130,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	}
 	if taskInfo.Mode()&fs.ModeSymlink != 0 {
 		hold("task.json", "symlink")
+	} else if !taskInfo.Mode().IsRegular() {
+		hold("task.json", "not-regular")
 	} else {
 		body, err := os.ReadFile(cfg.TaskJSON)
 		if err != nil {

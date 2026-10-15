@@ -310,8 +310,8 @@ func podIdentity() (string, error) {
 }
 
 // reportFailure says why in the same channel the answer would have used, so
-// the controller's record shows a prepare or publish that failed rather than
-// a run that said nothing — then returns the original error so the process
+// the controller's record shows a prepare, publish or archive that failed
+// rather than a run that said nothing — then returns the original error so the process
 // still exits non-zero. If writing the termination log itself fails, that
 // failure is wrapped around the cause rather than replacing it, so neither
 // is lost.
@@ -345,10 +345,7 @@ func runArchive(args []string) error {
 }
 
 func archiveTo(args []string, termLogOut *string) error {
-	var (
-		cfg     archive.Config
-		termLog string
-	)
+	var cfg archive.Config
 	fs := flag.NewFlagSet("sidecar archive", flag.ContinueOnError)
 	fs.StringVar(&cfg.TaskJSON, "task-json", "", "the Task's JSON file")
 	fs.StringVar(&cfg.Results, "results", "", "the results/ shelf directory; empty when the flow has no workspace")
@@ -357,11 +354,10 @@ func archiveTo(args []string, termLogOut *string) error {
 	fs.BoolVar(&cfg.Secure, "secure", true, "use https to reach the endpoint")
 	fs.StringVar(&cfg.Bucket, "bucket", "", "bucket name")
 	fs.StringVar(&cfg.Region, "region", "", "bucket region")
-	fs.StringVar(&termLog, "termination-log", "/dev/termination-log", "where the answer is written for the controller")
+	fs.StringVar(termLogOut, "termination-log", "/dev/termination-log", "where the answer is written for the controller")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	*termLogOut = termLog
 	cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
 	cfg.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
 	for name, v := range map[string]string{
@@ -383,8 +379,8 @@ func archiveTo(args []string, termLogOut *string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(termLog, msg, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", termLog, err)
+	if err := os.WriteFile(*termLogOut, msg, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", *termLogOut, err)
 	}
 	return nil
 }

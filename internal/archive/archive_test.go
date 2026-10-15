@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Tsuguya-HC/taskflow/internal/archive"
 )
@@ -323,5 +324,43 @@ func TestRunWithholdsUnreadableDirectory(t *testing.T) {
 	m := manifest(t, f)
 	if len(m) != 1 || m[0].Path != "results/locked" || m[0].Reason != reasonUnreadable {
 		t.Errorf("manifest = %+v", m)
+	}
+}
+
+// A FIFO at task.json would block os.ReadFile until a writer shows up, which
+// would stop the archive Job from ever settling.
+func TestRunWithholdsNonRegularTaskJSON(t *testing.T) {
+	f := newFakeS3(t)
+	dir := t.TempDir()
+	cfg := f.cfg(dir)
+	cfg.Results = ""
+	if err := syscall.Mkfifo(cfg.TaskJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Releases a blocked open so a failing run does not leak its goroutine.
+	t.Cleanup(func() {
+		if fd, err := syscall.Open(cfg.TaskJSON, syscall.O_RDWR|syscall.O_NONBLOCK, 0); err == nil {
+			_ = syscall.Close(fd)
+		}
+	})
+	type out struct {
+		res archive.Result
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		res, err := archive.Run(context.Background(), cfg)
+		done <- out{res, err}
+	}()
+	select {
+	case o := <-done:
+		if o.err != nil {
+			t.Fatalf("Run: %v", o.err)
+		}
+		if o.res.Withheld != 1 || o.res.Uploaded != 0 {
+			t.Errorf("result = %+v, want task.json withheld", o.res)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return for a FIFO task.json")
 	}
 }
