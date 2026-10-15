@@ -344,6 +344,27 @@ func runArchive(args []string) error {
 	return err
 }
 
+const defaultTermLog = "/dev/termination-log"
+
+// scanTermLog finds --termination-log without flag's all-or-nothing parse.
+func scanTermLog(args []string) string {
+	path := defaultTermLog
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		a = strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+		if v, ok := strings.CutPrefix(a, "termination-log="); ok {
+			path = v
+		} else if a == "termination-log" && i+1 < len(args) {
+			path = args[i+1]
+			i++
+		}
+	}
+	return path
+}
+
 func archiveTo(args []string, termLogOut *string) error {
 	var cfg archive.Config
 	fs := flag.NewFlagSet("sidecar archive", flag.ContinueOnError)
@@ -354,8 +375,11 @@ func archiveTo(args []string, termLogOut *string) error {
 	fs.BoolVar(&cfg.Secure, "secure", true, "use https to reach the endpoint")
 	fs.StringVar(&cfg.Bucket, "bucket", "", "bucket name")
 	fs.StringVar(&cfg.Region, "region", "", "bucket region")
-	fs.StringVar(termLogOut, "termination-log", "/dev/termination-log", "where the answer is written for the controller")
+	fs.StringVar(termLogOut, "termination-log", defaultTermLog, "where the answer is written for the controller")
 	if err := fs.Parse(args); err != nil {
+		// flag stops at the first bad flag, so a --termination-log after it
+		// was never read; the failure must still land where the caller said.
+		*termLogOut = scanTermLog(args)
 		return err
 	}
 	cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")

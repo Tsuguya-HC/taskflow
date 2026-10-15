@@ -881,7 +881,8 @@ func TestArchiveRefusesMissingRequiredInput(t *testing.T) {
 }
 
 // The credentials of the archiver may allow PUT only; with no region minio-go
-// asks the endpoint for the bucket location first.
+// would ask the endpoint for the bucket location first, so the run must stop
+// before any request.
 func TestArchiveSendsNothingButPUT(t *testing.T) {
 	var methods []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -893,15 +894,47 @@ func TestArchiveSendsNothingButPUT(t *testing.T) {
 	}))
 	defer srv.Close()
 	args := withoutFlag(archiveFlags(t, srv, filepath.Join(t.TempDir(), "term")), "region")
-	// Without a region the run must stop before any request, so the location
-	// lookup that PUT-only credentials cannot make is never attempted.
 	if err := run(args); err == nil || !strings.Contains(err.Error(), "region is required") {
 		t.Fatalf("err = %v, want region is required", err)
 	}
-	for _, m := range methods {
-		if m != http.MethodPut {
-			t.Fatalf("methods = %v, want PUT only", methods)
-		}
+	if len(methods) != 0 {
+		t.Fatalf("methods = %v, want no request", methods)
+	}
+}
+
+const bad = "--not-a-real-flag=x"
+
+// A parse failure before --termination-log is reached must still be reported
+// to the path the caller passed, not to the default.
+func TestArchiveParseFailureReachesCustomTerminationLog(t *testing.T) {
+	for name, order := range map[string]func(termLog string) []string{
+		"bad flag before": func(l string) []string { return []string{archiveCmd, bad, termLogFlag, l} },
+		"bad flag after":  func(l string) []string { return []string{archiveCmd, termLogFlag, l, bad} },
+		"equals form":     func(l string) []string { return []string{archiveCmd, bad, termLogFlag + "=" + l} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			termLog := filepath.Join(t.TempDir(), "term")
+			if err := os.WriteFile(termLog, []byte("stale"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(order(termLog)); err == nil {
+				t.Fatal("expected a parse error")
+			}
+			got, err := os.ReadFile(termLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), "not-a-real-flag") {
+				t.Errorf("termination message = %q, want the parse failure", got)
+			}
+		})
+	}
+}
+
+// Nothing after "--" is a flag, so it must not move the answer.
+func TestScanTermLogStopsAtDoubleDash(t *testing.T) {
+	if got := scanTermLog([]string{"--", termLogFlag, "/elsewhere"}); got != defaultTermLog {
+		t.Errorf("scanTermLog = %q, want the default %q", got, defaultTermLog)
 	}
 }
 
@@ -939,7 +972,7 @@ func TestArchiveParseFailureIsRecordedInTerminationLog(t *testing.T) {
 	if err := os.WriteFile(log, []byte("stale-previous-content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{archiveCmd, termLogFlag, log, "--not-a-real-flag=x"}); err == nil {
+	if err := run([]string{archiveCmd, termLogFlag, log, bad}); err == nil {
 		t.Fatal("expected parse failure")
 	}
 	got, err := os.ReadFile(log)
