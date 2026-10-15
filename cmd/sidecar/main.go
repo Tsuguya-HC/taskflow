@@ -44,6 +44,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Tsuguya-HC/taskflow/internal/archive"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/sidecar"
 )
@@ -109,11 +110,14 @@ func (p *paths) Set(v string) error {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: sidecar prepare|publish [flags]")
+		return errors.New("usage: sidecar prepare|publish|archive [flags]")
 	}
 	cmd, args := args[0], args[1:]
+	if cmd == contract.SubcommandArchive {
+		return runArchive(args)
+	}
 	if cmd != cmdPrepare && cmd != cmdPublish {
-		return fmt.Errorf("unknown subcommand %q: want prepare or publish", cmd)
+		return fmt.Errorf("unknown subcommand %q: want prepare, publish or archive", cmd)
 	}
 
 	var o options
@@ -322,6 +326,53 @@ func reportFailure(termLog, cmd string, cause error) error {
 func report(path string, ans sidecar.Answer) error {
 	if err := os.WriteFile(path, []byte(ans.Message()), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// runArchive is the archive subcommand. It touches neither the run's
+// directory nor the declared vocabulary, so it is dispatched ahead of the
+// flags and environment the other two need.
+func runArchive(args []string) error {
+	var (
+		cfg     archive.Config
+		termLog string
+	)
+	fs := flag.NewFlagSet("sidecar archive", flag.ContinueOnError)
+	fs.StringVar(&cfg.TaskJSON, "task-json", "", "the Task's JSON file")
+	fs.StringVar(&cfg.Results, "results", "", "the results/ shelf directory; empty when the flow has no workspace")
+	fs.StringVar(&cfg.KeyPrefix, "manifest-key-prefix", "", "the key prefix everything is put under")
+	fs.StringVar(&cfg.Endpoint, "endpoint", "", "S3 endpoint as host:port")
+	fs.BoolVar(&cfg.Secure, "secure", true, "use https to reach the endpoint")
+	fs.StringVar(&cfg.Bucket, "bucket", "", "bucket name")
+	fs.StringVar(&cfg.Region, "region", "", "bucket region")
+	fs.StringVar(&termLog, "termination-log", "/dev/termination-log", "where the answer is written for the controller")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	cfg.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	for name, v := range map[string]string{
+		"task-json": cfg.TaskJSON, "manifest-key-prefix": cfg.KeyPrefix,
+		"endpoint": cfg.Endpoint, "bucket": cfg.Bucket,
+		"AWS_ACCESS_KEY_ID": cfg.AccessKey, "AWS_SECRET_ACCESS_KEY": cfg.SecretKey,
+	} {
+		if v == "" {
+			return fmt.Errorf("archive: %s is required", name)
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	res, err := archive.Run(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	msg, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(termLog, msg, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", termLog, err)
 	}
 	return nil
 }

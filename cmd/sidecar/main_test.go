@@ -18,6 +18,9 @@ package main
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -783,5 +786,35 @@ func TestPublishWithTheShelveFlagIsRefused(t *testing.T) {
 	}
 	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
 		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
+	}
+}
+
+func TestArchiveWritesTerminationMessage(t *testing.T) {
+	var puts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		puts++
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	taskJSON := filepath.Join(dir, "task.json")
+	if err := os.WriteFile(taskJSON, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	termLog := filepath.Join(dir, "term")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	err := run([]string{"archive", "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
+		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", "--bucket", "bkt", "--region", "r",
+		"--termination-log", termLog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(termLog)
+	if string(got) != `{"uploaded":1,"withheld":0}` {
+		t.Errorf("termination message = %q", got)
+	}
+	if puts != 2 {
+		t.Errorf("puts = %d, want task.json and manifest.json", puts)
 	}
 }
