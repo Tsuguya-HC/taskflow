@@ -775,20 +775,21 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(beforeUnresolved), "the unresolved series did not move")
 		})
 
-		// A Job made before the label was recorded on it has no primed series
-		// to name; the count goes to the unresolved one.
-		It("counts a Job without the recorded label under the unresolved series", func() {
+		// A Job made before the label was recorded on it was still primed under
+		// the flow's name; the count belongs to that series.
+		It("counts a Job without the recorded label under the flow it was primed for", func() {
 			ended()
 			fx.reconcile()
 			job := archiveJob()
 			delete(job.Annotations, annotationFlowLabel)
 			Expect(k8sClient.Update(fx.ctx, job)).To(Succeed())
-			before := total(unresolvedLabel, "Uploaded")
+			beforeUnresolved := total(unresolvedLabel, "Uploaded")
+			before := total(fx.name, "Uploaded")
 			settle(archiveJob(), true, `{"uploaded":3,"withheld":0}`)
 			fx.reconcile()
 
-			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(before + 1))
-			Expect(total(fx.name, "Uploaded")).To(Equal(float64(0)))
+			Expect(total(fx.name, "Uploaded")).To(Equal(before + 1))
+			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(beforeUnresolved))
 		})
 
 		It("does not count on a series the Job's creation never primed", func() {

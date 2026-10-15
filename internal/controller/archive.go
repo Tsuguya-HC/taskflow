@@ -207,7 +207,12 @@ func (r *TaskReconciler) settleArchived(
 	}
 	label, ok := job.Annotations[annotationFlowLabel]
 	if !ok {
-		label = metrics.FlowUnresolved
+		// A Job made before the label was recorded on it: the flow is all
+		// there is to go by.
+		var err error
+		if _, label, err = r.archiveFlow(ctx, task); err != nil {
+			return err
+		}
 	}
 	metrics.ArchiveOutcomes.With(prometheus.Labels{metrics.LabelFlow: label, metrics.LabelOutcome: outcome}).Inc()
 	return nil
