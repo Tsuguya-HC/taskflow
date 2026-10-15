@@ -890,6 +890,59 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			}
 		})
 
+		adoptable := func(tk *flowv1alpha1.Task) *batchv1.Job {
+			return &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: archiveJobName(fx.name), Namespace: resourceNamespace,
+					Labels: archiveLabels(tk),
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: flowv1alpha1.SchemeGroupVersion.String(), Kind: archiveTaskKind,
+						Name: fx.name, UID: fx.taskUID, Controller: ptr.To(true),
+					}},
+				},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: archiveContainer, Image: sidecarImage}},
+				}}},
+			}
+		}
+
+		// Adopting is the only way a Job this process did not create gets
+		// its status.archive; creation is not the only place the sending begins.
+		It("records status.archive when it adopts an existing Job", func() {
+			tk := ended()
+			Expect(k8sClient.Create(fx.ctx, adoptable(tk))).To(Succeed())
+
+			fx.reconcile()
+
+			Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", "s3.example:9000"))
+			Expect(archiveStatus()).To(HaveKey("location"))
+		})
+
+		// Catches the adopt path discarding the label resolve's error: an
+		// empty-label series would be primed and the pass would carry on.
+		It("fails the pass and primes nothing when the label of an adopted Job cannot be resolved", func() {
+			tk := ended()
+			Expect(k8sClient.Create(fx.ctx, adoptable(tk))).To(Succeed())
+
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.APIReader = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.ControllerRevision); ok {
+						return errors.New("the apiserver blinked while adopting")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			_, err = fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+			Expect(err).To(HaveOccurred(), "the adopted Job's label could not be resolved")
+			for _, o := range outcomes {
+				_, ok := counted("", o)
+				Expect(ok).To(BeFalse(), "no %s series is born under an empty flow label", o)
+			}
+		})
+
 		It("does not count on a series the Job's creation never primed", func() {
 			fx.makeFlow()
 			fx.name += "-run2"

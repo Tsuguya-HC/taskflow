@@ -211,7 +211,7 @@ func (r *TaskReconciler) archiveJobLabel(ctx context.Context, task *flowv1alpha1
 
 // settleArchived records how the sending ended and counts it. The count
 // follows the write, so a write that failed is tried again and counted once.
-// The series is the one the Job's creation primed, read back from the Job,
+// The series is the one primed when the Job was made or found, read back from the Job,
 // because resolving the flow again could land on another series or fail; only
 // a Job made before the label was recorded on it is resolved here.
 func (r *TaskReconciler) settleArchived(
@@ -255,13 +255,23 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 		if err != nil {
 			return nil, err
 		}
-		// A Job this process never made (an older controller's, or one
-		// found again after a restart) has had no series primed for it.
+		// Priming is idempotent and runs on every sight of the Job: one this
+		// process never made (an older controller's, or one found again
+		// after a restart) has had no series primed for it.
 		label, err := r.archiveJobLabel(ctx, task, job)
 		if err != nil {
 			return nil, err
 		}
 		metrics.PrimeArchiveOutcomes(label)
+		if task.Status.Archive == nil {
+			flow, _, err := r.archiveFlow(ctx, task)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := r.recordArchive(ctx, task, flow); err != nil {
+				return nil, err
+			}
+		}
 		return job, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -279,12 +289,8 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 	if err != nil {
 		return nil, err
 	}
-	prefix := path.Join(r.Archive.Prefix, task.Namespace, flow, string(task.UID))
-	task.Status.Archive = &flowv1alpha1.ArchiveStatus{
-		Location: "s3://" + r.Archive.Bucket + "/" + prefix + "/",
-		Endpoint: r.Archive.Endpoint,
-	}
-	if err := r.Status().Update(ctx, task); err != nil {
+	prefix, err := r.recordArchive(ctx, task, flow)
+	if err != nil {
 		return nil, err
 	}
 	metrics.PrimeArchiveOutcomes(label)
@@ -303,6 +309,17 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 		return nil, err
 	}
 	return job, nil
+}
+
+// recordArchive writes where the task's archive goes and returns the key
+// prefix under it.
+func (r *TaskReconciler) recordArchive(ctx context.Context, task *flowv1alpha1.Task, flow string) (string, error) {
+	prefix := path.Join(r.Archive.Prefix, task.Namespace, flow, string(task.UID))
+	task.Status.Archive = &flowv1alpha1.ArchiveStatus{
+		Location: "s3://" + r.Archive.Bucket + "/" + prefix + "/",
+		Endpoint: r.Archive.Endpoint,
+	}
+	return prefix, r.Status().Update(ctx, task)
 }
 
 func (r *TaskReconciler) ensureArchiveMap(ctx context.Context, task *flowv1alpha1.Task) error {
