@@ -195,6 +195,20 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		fmt.Sprintf("%d uploaded", res.Uploaded), metrics.ArchiveUploaded)
 }
 
+// archiveJobLabel is the flow label of the series the Job's outcome is counted
+// in. It is resolved before the condition is written: once the condition is
+// there nothing calls settleArchived again, so a resolve that failed after it
+// would lose the count for good.
+func (r *TaskReconciler) archiveJobLabel(ctx context.Context, task *flowv1alpha1.Task, job *batchv1.Job) (string, error) {
+	if label, ok := job.Annotations[annotationFlowLabel]; ok {
+		return label, nil
+	}
+	// A Job made before the label was recorded on it: the flow is all there
+	// is to go by.
+	_, label, err := r.archiveFlow(ctx, task)
+	return label, err
+}
+
 // settleArchived records how the sending ended and counts it. The count
 // follows the write, so a write that failed is tried again and counted once.
 // The series is the one the Job's creation primed, read back from the Job,
@@ -203,17 +217,12 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 func (r *TaskReconciler) settleArchived(
 	ctx context.Context, task *flowv1alpha1.Task, job *batchv1.Job, status metav1.ConditionStatus, reason, message, outcome string,
 ) error {
-	if err := r.setArchived(ctx, task, status, reason, message); err != nil {
+	label, err := r.archiveJobLabel(ctx, task, job)
+	if err != nil {
 		return err
 	}
-	label, ok := job.Annotations[annotationFlowLabel]
-	if !ok {
-		// A Job made before the label was recorded on it: the flow is all
-		// there is to go by.
-		var err error
-		if _, label, err = r.archiveFlow(ctx, task); err != nil {
-			return err
-		}
+	if err := r.setArchived(ctx, task, status, reason, message); err != nil {
+		return err
 	}
 	metrics.ArchiveOutcomes.With(prometheus.Labels{metrics.LabelFlow: label, metrics.LabelOutcome: outcome}).Inc()
 	return nil
@@ -242,7 +251,18 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 	var existing batchv1.Job
 	err := r.Get(ctx, key, &existing)
 	if err == nil {
-		return adopt(&existing)
+		job, err := adopt(&existing)
+		if err != nil {
+			return nil, err
+		}
+		// A Job this process never made (an older controller's, or one
+		// found again after a restart) has had no series primed for it.
+		label, err := r.archiveJobLabel(ctx, task, job)
+		if err != nil {
+			return nil, err
+		}
+		metrics.PrimeArchiveOutcomes(label)
+		return job, nil
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, err

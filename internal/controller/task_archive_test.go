@@ -792,6 +792,104 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(total(unresolvedLabel, "Uploaded")).To(Equal(beforeUnresolved))
 		})
 
+		// The Archived condition's write is not retried once made, so a read
+		// that fails around it must not cost the settle its count.
+		It("still counts a settle whose fallback label resolve failed", func() {
+			ended()
+			fx.reconcile()
+			job := archiveJob()
+			delete(job.Annotations, annotationFlowLabel)
+			Expect(k8sClient.Update(fx.ctx, job)).To(Succeed())
+			before := total(fx.name, "Uploaded")
+
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.APIReader = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.ControllerRevision); ok {
+						return errors.New("the apiserver blinked at settle time")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			settle(archiveJob(), true, `{"uploaded":3,"withheld":0}`)
+			_, err = fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+			Expect(err).To(HaveOccurred(), "the fallback resolve failed")
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown), "the settle waits for the label rather than being written without it")
+
+			fx.reconciler.APIReader = k8sClient
+			fx.reconcile()
+			Expect(total(fx.name, "Uploaded")).To(Equal(before+1), "a later pass still counts it once")
+		})
+
+		// The adopt path resolves the label first and would fail before the
+		// settle does; here only the settle's own resolve fails, so the order
+		// of that resolve and the condition write is what is held.
+		It("does not write the settle's condition when its own label resolve fails", func() {
+			ended()
+			fx.reconcile()
+			job := archiveJob()
+			delete(job.Annotations, annotationFlowLabel)
+			Expect(k8sClient.Update(fx.ctx, job)).To(Succeed())
+			before := total(fx.name, "Uploaded")
+
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			reads := 0
+			fx.reconciler.APIReader = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.ControllerRevision); ok {
+						reads++
+						if reads > 1 {
+							return errors.New("the apiserver blinked at settle time")
+						}
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			settle(archiveJob(), true, `{"uploaded":3,"withheld":0}`)
+			_, err = fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+			Expect(err).To(HaveOccurred(), "the settle's resolve failed")
+			Expect(reads).To(BeNumerically(">", 1), "the adopt path's resolve passed and the settle's did not")
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+
+			fx.reconciler.APIReader = k8sClient
+			fx.reconcile()
+			Expect(total(fx.name, "Uploaded")).To(Equal(before + 1))
+		})
+
+		// A Job this controller did not create (an earlier version's, or one
+		// found again after a restart) is adopted; its series must be born at
+		// 0 while it runs, not at 1 when it settles.
+		It("primes the series of an existing Job it adopts before the Job settles", func() {
+			tk := ended()
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: archiveJobName(fx.name), Namespace: resourceNamespace,
+					Labels: archiveLabels(tk),
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: flowv1alpha1.SchemeGroupVersion.String(), Kind: archiveTaskKind,
+						Name: fx.name, UID: fx.taskUID, Controller: ptr.To(true),
+					}},
+				},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: archiveContainer, Image: sidecarImage}},
+				}}},
+			}
+			Expect(k8sClient.Create(fx.ctx, job)).To(Succeed())
+			_, wasPrimed := counted(fx.name, "Failed")
+			Expect(wasPrimed).To(BeFalse(), "nothing has primed this Job's series yet")
+
+			fx.reconcile()
+
+			for _, o := range outcomes {
+				v, ok := counted(fx.name, o)
+				Expect(ok).To(BeTrue(), "%s is primed once the Job is adopted", o)
+				Expect(v).To(BeZero())
+			}
+		})
+
 		It("does not count on a series the Job's creation never primed", func() {
 			fx.makeFlow()
 			fx.name += "-run2"
