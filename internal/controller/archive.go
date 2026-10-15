@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -55,6 +56,10 @@ const (
 	archiveRecheck            = 30 * time.Second
 	annotationFlowLabel       = "flow.tgy.io/archive-flow-label"
 	archiveUID          int64 = 65532
+
+	flagEndpoint          = "--endpoint"
+	flagBucket            = "--bucket"
+	flagManifestKeyPrefix = "--manifest-key-prefix"
 )
 
 // ArchiveConfig is what the controller is told about sending ended Tasks away.
@@ -264,11 +269,17 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 		}
 		metrics.PrimeArchiveOutcomes(label)
 		if task.Status.Archive == nil {
-			flow, _, err := r.archiveFlow(ctx, task)
-			if err != nil {
-				return nil, err
+			// Where the Job sends is read from the Job: resolving the flow again could
+			// name another place than the one it writes to.
+			status, ok := archiveStatusOf(job)
+			if !ok {
+				flow, _, err := r.archiveFlow(ctx, task)
+				if err != nil {
+					return nil, err
+				}
+				status = r.archiveStatusAt(r.archivePrefix(task, flow))
 			}
-			if _, err := r.recordArchive(ctx, task, flow); err != nil {
+			if err := r.recordArchive(ctx, task, status); err != nil {
 				return nil, err
 			}
 		}
@@ -289,8 +300,8 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 	if err != nil {
 		return nil, err
 	}
-	prefix, err := r.recordArchive(ctx, task, flow)
-	if err != nil {
+	prefix := r.archivePrefix(task, flow)
+	if err := r.recordArchive(ctx, task, r.archiveStatusAt(prefix)); err != nil {
 		return nil, err
 	}
 	metrics.PrimeArchiveOutcomes(label)
@@ -311,15 +322,43 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 	return job, nil
 }
 
-// recordArchive writes where the task's archive goes and returns the key
-// prefix under it.
-func (r *TaskReconciler) recordArchive(ctx context.Context, task *flowv1alpha1.Task, flow string) (string, error) {
-	prefix := path.Join(r.Archive.Prefix, task.Namespace, flow, string(task.UID))
-	task.Status.Archive = &flowv1alpha1.ArchiveStatus{
-		Location: "s3://" + r.Archive.Bucket + "/" + prefix + "/",
-		Endpoint: r.Archive.Endpoint,
+// recordArchive writes where the task's archive goes.
+func (r *TaskReconciler) recordArchive(ctx context.Context, task *flowv1alpha1.Task, status *flowv1alpha1.ArchiveStatus) error {
+	task.Status.Archive = status
+	return r.Status().Update(ctx, task)
+}
+
+func (r *TaskReconciler) archivePrefix(task *flowv1alpha1.Task, flow string) string {
+	return path.Join(r.Archive.Prefix, task.Namespace, flow, string(task.UID))
+}
+
+func (r *TaskReconciler) archiveStatusAt(prefix string) *flowv1alpha1.ArchiveStatus {
+	return &flowv1alpha1.ArchiveStatus{Location: archiveLocation(r.Archive.Bucket, prefix), Endpoint: r.Archive.Endpoint}
+}
+
+func archiveLocation(bucket, prefix string) string {
+	return "s3://" + bucket + "/" + prefix + "/"
+}
+
+// archiveStatusOf reads the place a Job sends to from its own arguments.
+func archiveStatusOf(job *batchv1.Job) (*flowv1alpha1.ArchiveStatus, bool) {
+	for _, c := range job.Spec.Template.Spec.Containers {
+		if c.Name != archiveContainer {
+			continue
+		}
+		args := map[string]string{}
+		for _, a := range c.Args {
+			if k, v, ok := strings.Cut(a, "="); ok {
+				args[k] = v
+			}
+		}
+		prefix, bucket, endpoint := args[flagManifestKeyPrefix], args[flagBucket], args[flagEndpoint]
+		if prefix == "" || bucket == "" || endpoint == "" {
+			return nil, false
+		}
+		return &flowv1alpha1.ArchiveStatus{Location: archiveLocation(bucket, prefix), Endpoint: endpoint}, true
 	}
-	return prefix, r.Status().Update(ctx, task)
+	return nil, false
 }
 
 func (r *TaskReconciler) ensureArchiveMap(ctx context.Context, task *flowv1alpha1.Task) error {
@@ -410,10 +449,10 @@ func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix, f
 	args := []string{
 		contract.SubcommandArchive,
 		"--task-json=" + recordDir + "/task.json",
-		"--endpoint=" + cfg.Endpoint,
-		"--bucket=" + cfg.Bucket,
+		flagEndpoint + "=" + cfg.Endpoint,
+		flagBucket + "=" + cfg.Bucket,
 		"--region=" + cfg.Region,
-		"--manifest-key-prefix=" + prefix,
+		flagManifestKeyPrefix + "=" + prefix,
 	}
 	mounts := []corev1.VolumeMount{{Name: "record", MountPath: recordDir, ReadOnly: true}}
 	volumes := []corev1.Volume{{Name: "record", VolumeSource: corev1.VolumeSource{

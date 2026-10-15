@@ -919,6 +919,54 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(archiveStatus()).To(HaveKey("location"))
 		})
 
+		It("records where the adopted Job sends, not where the flow resolves now", func() {
+			tk := ended()
+			job := adoptable(tk)
+			job.Spec.Template.Spec.Containers[0].Args = []string{
+				"--endpoint=elsewhere:9000", "--bucket=old-bucket", "--manifest-key-prefix=old/prefix",
+			}
+			Expect(k8sClient.Create(fx.ctx, job)).To(Succeed())
+
+			fx.reconcile()
+
+			Expect(archiveStatus()).To(HaveKeyWithValue("location", "s3://old-bucket/old/prefix/"))
+			Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", "elsewhere:9000"))
+		})
+
+		// Catches archiveStatusOf accepting a Job whose arguments name only part
+		// of the place: the rest would be filled with nothing instead of the
+		// flow's resolution.
+		DescribeTable("resolves the flow again when the adopted Job's arguments lack part of the place",
+			func(args ...string) {
+				tk := ended()
+				job := adoptable(tk)
+				job.Spec.Template.Spec.Containers[0].Args = args
+				Expect(k8sClient.Create(fx.ctx, job)).To(Succeed())
+
+				fx.reconcile()
+
+				Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", "s3.example:9000"))
+				Expect(archiveStatus()).To(HaveKeyWithValue("location",
+					And(HavePrefix("s3://"), Not(ContainSubstring("old/prefix")), Not(ContainSubstring("old-bucket")))))
+			},
+			Entry("no bucket", "--endpoint=elsewhere:9000", "--manifest-key-prefix=old/prefix"),
+			Entry("no endpoint", "--bucket=old-bucket", "--manifest-key-prefix=old/prefix"),
+			Entry("no prefix", "--endpoint=elsewhere:9000", "--bucket=old-bucket"),
+		)
+
+		It("keeps the status.archive already recorded when it adopts the Job", func() {
+			tk := ended()
+			tk.Status.Archive = &flowv1alpha1.ArchiveStatus{Location: "s3://kept/prefix/", Endpoint: "kept:9000"}
+			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+			job := adoptable(tk)
+			job.Spec.Template.Spec.Containers[0].Args = []string{"--bucket=other", "--manifest-key-prefix=other/prefix"}
+			Expect(k8sClient.Create(fx.ctx, job)).To(Succeed())
+
+			fx.reconcile()
+
+			Expect(archiveStatus()).To(HaveKeyWithValue("location", "s3://kept/prefix/"))
+		})
+
 		// Catches the adopt path discarding the label resolve's error: an
 		// empty-label series would be primed and the pass would carry on.
 		It("fails the pass and primes nothing when the label of an adopted Job cannot be resolved", func() {
