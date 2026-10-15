@@ -47,10 +47,11 @@ const (
 	archiveWithheld     = "Withheld"
 	archiveUploadFailed = "UploadFailed"
 
-	actionArchiving        = "Archiving"
-	archiveContainer       = "archive"
-	archiveRecheck         = 30 * time.Second
-	archiveUID       int64 = 65532
+	actionArchiving         = "Archiving"
+	archiveContainer        = "archive"
+	archiveUnresolved       = "_unresolved"
+	archiveRecheck          = 30 * time.Second
+	archiveUID        int64 = 65532
 )
 
 // ArchiveConfig is what the controller is told about sending ended Tasks away.
@@ -86,7 +87,7 @@ func (c ArchiveConfig) Validate() error {
 
 // archiveJobName is the name of the Task's archive Job.
 func archiveJobName(taskName string) string {
-	return taskName + "-archive"
+	return runner.ArchiveName(taskName)
 }
 
 func (r *TaskReconciler) archiveReader() client.Reader {
@@ -101,6 +102,16 @@ func (r *TaskReconciler) archiveReader() client.Reader {
 func archiveSettled(task *flowv1alpha1.Task) bool {
 	c := meta.FindStatusCondition(task.Status.Conditions, archivedType)
 	return c != nil && c.Status != metav1.ConditionUnknown
+}
+
+// archiveHeld reports whether the Task must outlive its date for the upload's
+// sake: it is switched on and not settled, or it was begun and never settled,
+// which a restart with the switch off must not turn into a deletion.
+func (r *TaskReconciler) archiveHeld(task *flowv1alpha1.Task) bool {
+	if archiveSettled(task) {
+		return false
+	}
+	return r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil
 }
 
 // driveArchive makes the archive Job for a Task that has none yet, and records
@@ -138,12 +149,28 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		return false, err
 	}
 	var res archive.Result
+	looked := 0
 	for _, p := range pods.Items {
 		for _, cs := range p.Status.ContainerStatuses {
 			if t := cs.State.Terminated; t != nil && t.ExitCode == 0 && t.Message != "" {
-				_ = json.Unmarshal([]byte(t.Message), &res)
+				looked++
+				if err := json.Unmarshal([]byte(t.Message), &res); err != nil {
+					msg := fmt.Sprintf("the archive Job's result could not be read: %v", err)
+					if err := r.setArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg); err != nil {
+						return false, err
+					}
+					if r.Recorder != nil {
+						r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, archiveUploadFailed, actionArchiving, "%s", msg)
+					}
+					return true, nil
+				}
 			}
 		}
+	}
+	// Nothing to read yet is not an upload of nothing: the Pod may not have
+	// reached the cache, and the Task stays held until it has.
+	if looked == 0 {
+		return false, nil
 	}
 	if res.Withheld > 0 {
 		return true, r.setArchived(ctx, task, metav1.ConditionTrue, archiveWithheld,
@@ -188,7 +215,11 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 	if err != nil {
 		return nil, err
 	}
-	job := r.buildArchiveJob(task, pvc)
+	flow, err := r.archiveFlowKey(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	job := r.buildArchiveJob(task, pvc, flow)
 	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
 		return nil, err
 	}
@@ -275,7 +306,18 @@ func archiveLabels(task *flowv1alpha1.Task) map[string]string {
 	}
 }
 
-func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc string) *batchv1.Job {
+// archiveFlowKey is the flow's place in the manifest key.
+func (r *TaskReconciler) archiveFlowKey(ctx context.Context, task *flowv1alpha1.Task) (string, error) {
+	if _, _, err := r.resolveFlow(ctx, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return archiveUnresolved, nil
+		}
+		return "", err
+	}
+	return task.Spec.Flow, nil
+}
+
+func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, flow string) *batchv1.Job {
 	cfg := r.Archive
 	const recordDir = "/archive"
 	args := []string{
@@ -284,7 +326,7 @@ func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc string) *b
 		"--endpoint=" + cfg.Endpoint,
 		"--bucket=" + cfg.Bucket,
 		"--region=" + cfg.Region,
-		"--manifest-key-prefix=" + path.Join(cfg.Prefix, task.Namespace, task.Name, string(task.UID)),
+		"--manifest-key-prefix=" + path.Join(cfg.Prefix, task.Namespace, flow, string(task.UID)),
 	}
 	mounts := []corev1.VolumeMount{{Name: "record", MountPath: recordDir, ReadOnly: true}}
 	volumes := []corev1.Volume{{Name: "record", VolumeSource: corev1.VolumeSource{

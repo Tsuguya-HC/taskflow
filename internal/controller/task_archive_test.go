@@ -354,7 +354,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 					Name: archiveJobName(fx.name), Namespace: resourceNamespace,
 					OwnerReferences: []metav1.OwnerReference{{
 						APIVersion: flowv1alpha1.SchemeGroupVersion.String(), Kind: archiveTaskKind,
-						Name: "someone-elses-task", UID: types.UID("not-" + string(fx.taskUID)),
+						Name: foreignOwnerName, UID: types.UID("not-" + string(fx.taskUID)),
 						Controller: ptr.To(true),
 					}},
 				},
@@ -371,8 +371,173 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			_, err := fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring(stray.Name))
-			Expect(err.Error()).To(ContainSubstring("someone-elses-task"))
+			Expect(err.Error()).To(ContainSubstring(foreignOwnerName))
 			Expect(archived()).To(BeNil(), "someone else's Job is not this task's upload")
+		})
+	})
+
+	// argValue is the value of a --name=value argument of the archive Job.
+	argValue := func(job *batchv1.Job, name string) string {
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, a := range append(append([]string{}, c.Command...), c.Args...) {
+			if v, ok := strings.CutPrefix(a, name+"="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+
+	// completeWithoutPod marks the Job complete with no pod behind it, the
+	// shape of a Job whose pod the controller cannot see (yet, or any more).
+	completeWithoutPod := func(job *batchv1.Job) {
+		now := metav1.Now()
+		job.Status.StartTime = &now
+		job.Status.CompletionTime = &now
+		job.Status.Conditions = append(job.Status.Conditions,
+			batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+			batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		Expect(k8sClient.Status().Update(fx.ctx, job)).To(Succeed())
+	}
+
+	// strayOwner is an owner that is not the task, as when a name was taken
+	// by something else.
+	strayOwner := func() []metav1.OwnerReference {
+		return []metav1.OwnerReference{{
+			APIVersion: flowv1alpha1.SchemeGroupVersion.String(), Kind: archiveTaskKind,
+			Name: foreignOwnerName, UID: types.UID("not-" + string(fx.taskUID)),
+			Controller: ptr.To(true),
+		}}
+	}
+
+	Describe("a long task name", func() {
+		It("still gets its Job and ConfigMap, the names fitting what a label can hold", func() {
+			fx.name = strings.Repeat("a", 58-len(fx.name)) + fx.name
+			Expect(fx.name).To(HaveLen(58))
+			ended()
+			fx.reconcile()
+
+			Expect(len(archiveJob().Name)).To(BeNumerically("<=", 63))
+			Expect(archiveMaps()).To(HaveLen(1))
+			Expect(archived()).NotTo(BeNil())
+		})
+	})
+
+	Describe("the key the record is sent under", func() {
+		// endedUnder makes an ended task whose name is not its flow's.
+		endedUnder := func(flow string) {
+			fx.makeFlow()
+			fx.name = fx.name + "-run2"
+			tk := &flowv1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
+				Spec:       flowv1alpha1.TaskSpec{Flow: flow},
+			}
+			Expect(k8sClient.Create(fx.ctx, tk)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, tk) })
+			fx.taskUID = tk.UID
+			tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
+			tk.Status.ExpiresAt = &metav1.Time{Time: expiresAt}
+			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+		}
+
+		It("is namespace, flow and UID under the prefix, the flow's name not the task's", func() {
+			flow := fx.name
+			endedUnder(flow)
+			fx.reconcile()
+
+			Expect(argValue(archiveJob(), "--manifest-key-prefix")).To(Equal(
+				"taskflow/" + resourceNamespace + "/" + flow + "/" + string(fx.taskUID)))
+		})
+
+		It("puts _unresolved where the flow would be when the task's flow is not there", func() {
+			endedUnder("no-such-flow")
+			fx.reconcile()
+
+			Expect(argValue(archiveJob(), "--manifest-key-prefix")).To(Equal(
+				"taskflow/" + resourceNamespace + "/_unresolved/" + string(fx.taskUID)))
+		})
+	})
+
+	Describe("a Job that finished with nothing to read", func() {
+		It("is not recorded as uploaded when its pod cannot be found", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+
+			if c := archived(); c != nil {
+				Expect(c.Status).NotTo(Equal(metav1.ConditionTrue), "nothing was seen to be sent")
+			}
+		})
+
+		It("is not recorded as uploaded when its termination message is not a result", func() {
+			ended()
+			fx.reconcile()
+			settle(archiveJob(), true, "not json")
+			fx.reconcile()
+
+			if c := archived(); c != nil {
+				Expect(c.Status).NotTo(Equal(metav1.ConditionTrue), "nothing was seen to be sent")
+			}
+		})
+	})
+
+	Describe("a restart with the archive switched off", func() {
+		It("does not delete a task whose upload was still in flight", func() {
+			ended()
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+
+			clock = expiresAt.Add(time.Minute)
+			fx.reconciler.Archive = ArchiveConfig{}
+			fx.reconcile()
+
+			Expect(gone()).To(BeFalse(), "an unsettled upload holds the task whatever the flags say now")
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+		})
+	})
+
+	Describe("looking again before the date", func() {
+		It("comes back within the recheck interval while the upload is unsettled", func() {
+			ended()
+			fx.reconcile()
+			res := fx.reconcile()
+
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(res.RequeueAfter).To(BeNumerically("<=", 30*time.Second),
+				"the date is an hour away but the upload may settle sooner")
+		})
+	})
+
+	Describe("a ConfigMap or claim of that name that another owner holds", func() {
+		It("refuses a ConfigMap of that name", func() {
+			ended()
+			stray := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: archiveJobName(fx.name), Namespace: resourceNamespace, OwnerReferences: strayOwner(),
+			}}
+			Expect(k8sClient.Create(fx.ctx, stray)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, stray) })
+
+			_, err := fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(foreignOwnerName))
+			Expect(archiveJobs()).To(BeZero(), "no Job is made on a record that is not this task's")
+		})
+
+		It("refuses a workspace claim of the task's claim name that another owner holds", func() {
+			tk := ended(func(f *flowv1alpha1.TaskFlow) { f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{} })
+			var flow flowv1alpha1.TaskFlow
+			Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, &flow)).To(Succeed())
+			stray := runner.BuildWorkspacePVC(tk, flow.Spec.Workspace.VolumeClaimTemplate)
+			stray.OwnerReferences = strayOwner()
+			Expect(k8sClient.Create(fx.ctx, stray)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, stray) })
+
+			_, err := fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(foreignOwnerName))
+			Expect(archiveJobs()).To(BeZero(), "no Job mounts a claim that is not this task's")
 		})
 	})
 
@@ -398,3 +563,6 @@ func reqFor(name string) reconcile.Request {
 }
 
 const archiveTaskKind = "Task"
+
+// foreignOwnerName is the owner a pre-existing, not-ours object claims.
+const foreignOwnerName = "someone-elses-task"

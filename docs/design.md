@@ -624,6 +624,9 @@ Job・PVC・verdict の置き場・定義の写し（ControllerRevision）のよ
 | `flow.tgy.io/task-uid` | どの Task のものか |
 | `flow.tgy.io/run-id` | どの run のものか |
 
+run を持たない物には `run-id` の代わりに `flow.tgy.io/role` を付ける。終わった Task の記録を送る Job とその
+ConfigMap がそれで、値は `archive`。
+
 **ラベルか注釈かは「値がラベル値として合法か」で決まる。** UID と数字はラベルに置けるが、
 flow が選んだフェーズ名（`調査`）は置けないので注釈になる。
 
@@ -1091,8 +1094,8 @@ pod の中身が全部ユーザー定義になるため、**コントローラ�
 | エージェント → サイドカー | **ディレクトリ**（`next` の宣言から生成、例: `/workspace/{ok,more}/`） | LLM の散文・フォーマット崩れに耐える。パーミッションで語彙を強制 |
 | サイドカー → コントローラ | **termination message**（`/dev/termination-log`） | K8s ネイティブ。認証情報も store 依存も不要。両端が決定論的プログラム |
 
-> **スケッチ（未実装）**: 終わった Task の記録を送る送り役 Job（[ADR-0015](adr/0015-archive-ended-tasks.md)）は
-> verdict とは別の経路になる。資格情報は Job の env にだけ渡り、コントローラは Secret を読まず、verdict には関わらない。
+終わった Task の記録を送る送り役 Job（[ADR-0015](adr/0015-archive-ended-tasks.md)）は
+verdict とは別の経路。資格情報は Job の env にだけ渡り、コントローラは Secret を読まず、verdict には関わらない。
 
 サイドカーは書かれたディレクトリを検証して、その名前を `/dev/termination-log` に書く。
 コントローラは `state.terminated.message` を読むだけ。
@@ -1706,9 +1709,9 @@ prefix を消す」だけで済み、**経過日数の判定すら要らない**
 
 ### Task の TTL（実装済み）
 
-> **スケッチ（未実装）**: archive を有効にした配置では、削除するのは `expiresAt` を過ぎ、かつ送信が決着した
-> （成功でも失敗でも）ときになる（[ADR-0015](adr/0015-archive-ended-tasks.md) 決定 2）。下記の無条件の delete は、
-> archive の設定が無い現在の動きで、設定が無いときは今のままにする。
+archive を有効にした配置では、削除するのは `expiresAt` を過ぎ、かつ送信が決着した
+（成功でも失敗でも）ときになる（[ADR-0015](adr/0015-archive-ended-tasks.md) 決定 2）。下記の無条件の delete は、
+archive の設定が無いときの動き。
 
 - 終端に着いた瞬間に **`status.expiresAt`** を焼く。規則は 1 本 — **人間が来て見る必要がある終端は
   `ttl.failed`、それ以外は `ttl.succeeded`**。該当するのは終端の意味 4 値（§5）のうち 2 つ:
