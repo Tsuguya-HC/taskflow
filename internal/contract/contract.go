@@ -188,6 +188,10 @@ const (
 	// so the two ends of the verdict protocol cannot drift over a spelling.
 	SubcommandPrepare = "prepare"
 	SubcommandPublish = "publish"
+	// SubcommandArchive is the third subcommand: it sends an ended Task's
+	// record to S3-compatible storage and shares none of the other two's
+	// flags.
+	SubcommandArchive = "archive"
 
 	// FlagOut is the name of the flag both the injected Args and the
 	// sidecar's flag set use for the run's own directory: the one prepare

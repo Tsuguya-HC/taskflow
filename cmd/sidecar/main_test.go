@@ -18,6 +18,9 @@ package main
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +68,7 @@ func readFile(t *testing.T, path string) string {
 // flag names are spelled once rather than at every call site. out is the
 // run's own directory — what the handler sees at its mount's root.
 func runArgs(cmd, out, log string) []string {
-	return []string{cmd, "-out", out, "-termination-log", log}
+	return []string{cmd, "-out", out, termLogShort, log}
 }
 
 // publishArgs is runArgs for publish plus the flag a flow-workspace one
@@ -326,7 +329,7 @@ func TestRunWithoutOutIsRefused(t *testing.T) {
 	for _, cmd := range []string{cmdPrepare, cmdPublish} {
 		t.Run(cmd, func(t *testing.T) {
 			log := termLog(t)
-			if err := run([]string{cmd, "-termination-log", log}); err == nil {
+			if err := run([]string{cmd, termLogShort, log}); err == nil {
 				t.Fatalf("%s without -out must be refused", cmd)
 			}
 			if got := readFile(t, log); !strings.Contains(got, cmd+" failed:") || !strings.Contains(got, "-out") {
@@ -783,5 +786,232 @@ func TestPublishWithTheShelveFlagIsRefused(t *testing.T) {
 	}
 	if got := readFile(t, log); !strings.Contains(got, "publish failed:") {
 		t.Fatalf("termination log = %q, want it to contain %q", got, "publish failed:")
+	}
+}
+
+func TestArchiveWritesTerminationMessage(t *testing.T) {
+	var puts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		puts++
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	taskJSON := filepath.Join(dir, "task.json")
+	if err := os.WriteFile(taskJSON, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	termLog := filepath.Join(dir, "term")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	err := run([]string{archiveCmd, taskJSONFlag, taskJSON, "--results", "", "--manifest-key-prefix", "p",
+		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", bucketFlag, "bkt", "--region", "r",
+		termLogFlag, termLog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(termLog)
+	if string(got) != `{"uploaded":1,"withheld":0}` {
+		t.Errorf("termination message = %q", got)
+	}
+	if puts != 2 {
+		t.Errorf("puts = %d, want task.json and manifest.json", puts)
+	}
+}
+
+const (
+	archiveCmd   = "archive"
+	termLogFlag  = "--termination-log"
+	termLogShort = "-termination-log"
+	taskJSONFlag = "--task-json"
+	bucketFlag   = "--bucket"
+)
+
+// archiveFlags is a complete archive invocation against srv; the tests below
+// drop or break one part of it.
+func archiveFlags(t *testing.T, srv *httptest.Server, termLog string) []string {
+	t.Helper()
+	taskJSON := filepath.Join(t.TempDir(), "task.json")
+	if err := os.WriteFile(taskJSON, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	return []string{archiveCmd, taskJSONFlag, taskJSON, "--results", "", "--manifest-key-prefix", "p",
+		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", bucketFlag, "bkt", "--region", "r",
+		termLogFlag, termLog}
+}
+
+func withoutFlag(args []string, name string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--"+name {
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+// An empty bucket would still fail at the PUT, so the refusal is told apart
+// by its message and by nothing having reached the endpoint.
+func TestArchiveRefusesMissingRequiredInput(t *testing.T) {
+	for _, name := range []string{"task-json", "manifest-key-prefix", "endpoint", "bucket", "region",
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		t.Run(name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				requests++
+			}))
+			defer srv.Close()
+			args := archiveFlags(t, srv, filepath.Join(t.TempDir(), "term"))
+			if strings.HasPrefix(name, "AWS_") {
+				t.Setenv(name, "")
+			} else {
+				args = withoutFlag(args, name)
+			}
+			err := run(args)
+			if err == nil || !strings.Contains(err.Error(), name+" is required") {
+				t.Fatalf("err = %v, want %q is required", err, name)
+			}
+			if requests != 0 {
+				t.Errorf("%d requests reached the endpoint", requests)
+			}
+		})
+	}
+}
+
+// The credentials of the archiver may allow PUT only; with no region minio-go
+// would ask the endpoint for the bucket location first, so the run must stop
+// before any request.
+func TestArchiveSendsNothingButPUT(t *testing.T) {
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		methods = append(methods, r.Method)
+		if r.Method != http.MethodPut {
+			http.Error(w, "only PUT", http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+	args := withoutFlag(archiveFlags(t, srv, filepath.Join(t.TempDir(), "term")), "region")
+	if err := run(args); err == nil || !strings.Contains(err.Error(), "region is required") {
+		t.Fatalf("err = %v, want region is required", err)
+	}
+	if len(methods) != 0 {
+		t.Fatalf("methods = %v, want no request", methods)
+	}
+}
+
+const bad = "--not-a-real-flag=x"
+
+// A parse failure before --termination-log is reached must still be reported
+// to the path the caller passed, not to the default.
+func TestArchiveParseFailureReachesCustomTerminationLog(t *testing.T) {
+	for name, order := range map[string]func(termLog string) []string{
+		"bad flag before": func(l string) []string { return []string{archiveCmd, bad, termLogFlag, l} },
+		"bad flag after":  func(l string) []string { return []string{archiveCmd, termLogFlag, l, bad} },
+		"equals form":     func(l string) []string { return []string{archiveCmd, bad, termLogFlag + "=" + l} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			termLog := filepath.Join(t.TempDir(), "term")
+			if err := os.WriteFile(termLog, []byte("stale"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(order(termLog)); err == nil {
+				t.Fatal("expected a parse error")
+			}
+			got, err := os.ReadFile(termLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), "not-a-real-flag") {
+				t.Errorf("termination message = %q, want the parse failure", got)
+			}
+		})
+	}
+}
+
+// Nothing after "--" is a flag, so it must not move the answer.
+func TestScanTermLogStopsAtDoubleDash(t *testing.T) {
+	if got := scanTermLog([]string{"--", termLogFlag, "/elsewhere"}); got != defaultTermLog {
+		t.Errorf("scanTermLog = %q, want the default %q", got, defaultTermLog)
+	}
+}
+
+func TestScanTermLog(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		// Another flag's value spelled like our flag name must not make the
+		// next token the path.
+		"value that looks like the flag name": {
+			[]string{bucketFlag, "termination-log", "--not-a-real-flag=x"}, defaultTermLog},
+		// A trailing flag with no value must not index past the end.
+		"trailing flag without value": {[]string{taskJSONFlag, "t", termLogFlag}, defaultTermLog},
+		"trailing single-dash flag":   {[]string{termLogShort}, defaultTermLog},
+		// The consumed value is not rescanned as a flag.
+		"consumed value is not rescanned": {[]string{termLogFlag, termLogFlag + "=/x"}, termLogFlag + "=/x"},
+		"single dash equals form":         {[]string{"-termination-log=/x"}, "/x"},
+		"double dash space form":          {[]string{termLogFlag, "/x"}, "/x"},
+		// An `=` form carries its own value, so the next token is still a flag name.
+		"equals form does not swallow next": {[]string{"--bucket=x", termLogFlag, "/p"}, "/p"},
+		// A bool flag takes no value, so the next token is still a flag.
+		"bare bool flag does not swallow next": {[]string{"--secure", termLogFlag, "/p"}, "/p"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := scanTermLog(tc.args); got != tc.want {
+				t.Errorf("scanTermLog(%q) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// Failure must leave a reason for the controller, never the previous content.
+func TestArchiveFailureIsRecordedInTerminationLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	for name, mod := range map[string]func([]string) []string{
+		"put failure":  func(a []string) []string { return a },
+		"missing flag": func(a []string) []string { return withoutFlag(a, "bucket") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "term")
+			if err := os.WriteFile(log, []byte("stale-previous-content"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(mod(archiveFlags(t, srv, log))); err == nil {
+				t.Fatal("expected a failure")
+			}
+			got := readFile(t, log)
+			if got == "" || got == "stale-previous-content" {
+				t.Fatalf("termination log = %q, want the failure recorded", got)
+			}
+		})
+	}
+}
+
+// A flag that fails to parse must still leave a reason, replacing what the
+// termination log held before. --termination-log comes first so it is parsed
+// by the time the bad flag stops the parse.
+func TestArchiveParseFailureIsRecordedInTerminationLog(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "term")
+	if err := os.WriteFile(log, []byte("stale-previous-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{archiveCmd, termLogFlag, log, bad}); err == nil {
+		t.Fatal("expected parse failure")
+	}
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "archive failed") {
+		t.Errorf("termination log = %q, want an archive failure reason", got)
 	}
 }

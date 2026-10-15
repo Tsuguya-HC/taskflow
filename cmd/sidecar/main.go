@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// The sidecar image's entrypoint: one binary, two subcommands, so the code
+// The sidecar image's entrypoint: one binary, three subcommands, so the code
 // that lays the vocabulary down and the code that reads it back are the same
 // code.
 //
@@ -25,6 +25,8 @@ limitations under the License.
 //	sidecar publish   native sidecar: wait to be stopped, check the run is
 //	                  this pod's, seal, report — and, for a flow workspace,
 //	                  move the now-sealed run onto the results/ shelf first
+//	sidecar archive   put task.json and the results/ shelf's regular files
+//	                  to S3, then a manifest.json of what was withheld
 //
 // The declared directories arrive in FLOW_DIRECTORIES, which the controller
 // sets on every container. The run's directory — the one the handler's own
@@ -44,6 +46,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Tsuguya-HC/taskflow/internal/archive"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
 	"github.com/Tsuguya-HC/taskflow/internal/sidecar"
 )
@@ -55,8 +58,8 @@ func main() {
 	}
 }
 
-// cmdPrepare and cmdPublish name the two subcommands. They are the
-// contract's own names — internal/contract is what the controller's side
+// cmdPrepare and cmdPublish name the subcommands that share the run's
+// directory. They are the contract's own names — internal/contract is what the controller's side
 // (runner.BuildJob) reads too, so the two ends cannot drift over a spelling.
 const (
 	cmdPrepare = contract.SubcommandPrepare
@@ -109,11 +112,14 @@ func (p *paths) Set(v string) error {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: sidecar prepare|publish [flags]")
+		return errors.New("usage: sidecar prepare|publish|archive [flags]")
 	}
 	cmd, args := args[0], args[1:]
+	if cmd == contract.SubcommandArchive {
+		return runArchive(args)
+	}
 	if cmd != cmdPrepare && cmd != cmdPublish {
-		return fmt.Errorf("unknown subcommand %q: want prepare or publish", cmd)
+		return fmt.Errorf("unknown subcommand %q: want prepare, publish or archive", cmd)
 	}
 
 	var o options
@@ -304,8 +310,8 @@ func podIdentity() (string, error) {
 }
 
 // reportFailure says why in the same channel the answer would have used, so
-// the controller's record shows a prepare or publish that failed rather than
-// a run that said nothing — then returns the original error so the process
+// the controller's record shows a prepare, publish or archive that failed
+// rather than a run that said nothing — then returns the original error so the process
 // still exits non-zero. If writing the termination log itself fails, that
 // failure is wrapped around the cause rather than replacing it, so neither
 // is lost.
@@ -322,6 +328,100 @@ func reportFailure(termLog, cmd string, cause error) error {
 func report(path string, ans sidecar.Answer) error {
 	if err := os.WriteFile(path, []byte(ans.Message()), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// runArchive is the archive subcommand. It touches neither the run's
+// directory nor the declared vocabulary, so it is dispatched ahead of the
+// flags and environment the other two need.
+func runArchive(args []string) error {
+	var termLog string
+	err := archiveTo(args, &termLog)
+	if err != nil && termLog != "" {
+		return reportFailure(termLog, contract.SubcommandArchive, err)
+	}
+	return err
+}
+
+const defaultTermLog = "/dev/termination-log"
+
+// scanTermLog finds --termination-log without flag's all-or-nothing parse.
+// A token that is another flag's value is skipped, so a value spelled like
+// the flag name is not taken for it.
+func scanTermLog(args []string) string {
+	path := defaultTermLog
+	takesValue := map[string]bool{}
+	newArchiveFlagSet(&archive.Config{}, new(string)).VisitAll(func(f *flag.Flag) {
+		b, ok := f.Value.(interface{ IsBoolFlag() bool })
+		takesValue[f.Name] = !ok || !b.IsBoolFlag()
+	})
+	delete(takesValue, "termination-log") // the loop below reads its value itself
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if takesValue[strings.TrimLeft(a, "-")] && !strings.Contains(a, "=") {
+			i++
+			continue
+		}
+		if a == "--" {
+			break
+		}
+		a = strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+		if v, ok := strings.CutPrefix(a, "termination-log="); ok {
+			path = v
+		} else if a == "termination-log" && i+1 < len(args) {
+			path = args[i+1]
+			i++
+		}
+	}
+	return path
+}
+
+func newArchiveFlagSet(cfg *archive.Config, termLogOut *string) *flag.FlagSet {
+	fs := flag.NewFlagSet("sidecar archive", flag.ContinueOnError)
+	fs.StringVar(&cfg.TaskJSON, "task-json", "", "the Task's JSON file")
+	fs.StringVar(&cfg.Results, "results", "", "the results/ shelf directory; empty when the flow has no workspace")
+	fs.StringVar(&cfg.KeyPrefix, "manifest-key-prefix", "", "the key prefix everything is put under")
+	fs.StringVar(&cfg.Endpoint, "endpoint", "", "S3 endpoint as host:port")
+	fs.BoolVar(&cfg.Secure, "secure", true, "use https to reach the endpoint")
+	fs.StringVar(&cfg.Bucket, "bucket", "", "bucket name")
+	fs.StringVar(&cfg.Region, "region", "", "bucket region")
+	fs.StringVar(termLogOut, "termination-log", defaultTermLog, "where the answer is written for the controller")
+	return fs
+}
+
+func archiveTo(args []string, termLogOut *string) error {
+	var cfg archive.Config
+	fs := newArchiveFlagSet(&cfg, termLogOut)
+	if err := fs.Parse(args); err != nil {
+		// flag stops at the first bad flag, so a --termination-log after it
+		// was never read; the failure must still land where the caller said.
+		*termLogOut = scanTermLog(args)
+		return err
+	}
+	cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	cfg.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	for name, v := range map[string]string{
+		"task-json": cfg.TaskJSON, "manifest-key-prefix": cfg.KeyPrefix,
+		"endpoint": cfg.Endpoint, "bucket": cfg.Bucket, "region": cfg.Region,
+		"AWS_ACCESS_KEY_ID": cfg.AccessKey, "AWS_SECRET_ACCESS_KEY": cfg.SecretKey,
+	} {
+		if v == "" {
+			return fmt.Errorf("archive: %s is required", name)
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	res, err := archive.Run(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	msg, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(*termLogOut, msg, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", *termLogOut, err)
 	}
 	return nil
 }

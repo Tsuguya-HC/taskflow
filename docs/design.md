@@ -1196,8 +1196,9 @@ PVC になった（[ADR-0002](adr/0002-per-task-workspace-pvc.md)）ので、認
 一度も要らないまま終わった — 消費者の無いフィールドを先に置かない、という 08-25 の判断そのものは
 正しかった。
 
-実装は `internal/sidecar`（純粋関数 `Prepare` / `Seal`）と `cmd/sidecar`（`prepare` / `publish` の
-2 サブコマンド、同一イメージ `Dockerfile.sidecar`）、注入は `internal/runner`。
+実装は `internal/sidecar`（純粋関数 `Prepare` / `Seal`）と `cmd/sidecar`（`prepare` / `publish` /
+`archive` の 3 サブコマンド、同一イメージ `Dockerfile.sidecar`）。注入（`internal/runner`）の対象は
+`prepare` / `publish` の 2 本だけで、`archive` の Job を組み立てる側はまだ無い。
 
 **フェーズ間の引き渡しは Task ごとの PVC**（[ADR-0002](adr/0002-per-task-workspace-pvc.md)）。
 flow が `spec.workspace.volumeClaimTemplate`（corev1 の **spec のみ**。省略時は CRD 既定
