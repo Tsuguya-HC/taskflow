@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// The sidecar image's entrypoint: one binary, two subcommands, so the code
+// The sidecar image's entrypoint: one binary, three subcommands, so the code
 // that lays the vocabulary down and the code that reads it back are the same
 // code.
 //
@@ -25,6 +25,8 @@ limitations under the License.
 //	sidecar publish   native sidecar: wait to be stopped, check the run is
 //	                  this pod's, seal, report — and, for a flow workspace,
 //	                  move the now-sealed run onto the results/ shelf first
+//	sidecar archive   put task.json and the results/ shelf's regular files
+//	                  to S3, then a manifest.json of what was withheld
 //
 // The declared directories arrive in FLOW_DIRECTORIES, which the controller
 // sets on every container. The run's directory — the one the handler's own
@@ -56,8 +58,8 @@ func main() {
 	}
 }
 
-// cmdPrepare and cmdPublish name the two subcommands. They are the
-// contract's own names — internal/contract is what the controller's side
+// cmdPrepare and cmdPublish name the subcommands that share the run's
+// directory. They are the contract's own names — internal/contract is what the controller's side
 // (runner.BuildJob) reads too, so the two ends cannot drift over a spelling.
 const (
 	cmdPrepare = contract.SubcommandPrepare
@@ -334,6 +336,15 @@ func report(path string, ans sidecar.Answer) error {
 // directory nor the declared vocabulary, so it is dispatched ahead of the
 // flags and environment the other two need.
 func runArchive(args []string) error {
+	var termLog string
+	err := archiveTo(args, &termLog)
+	if err != nil && termLog != "" {
+		return reportFailure(termLog, contract.SubcommandArchive, err)
+	}
+	return err
+}
+
+func archiveTo(args []string, termLogOut *string) error {
 	var (
 		cfg     archive.Config
 		termLog string
@@ -350,11 +361,12 @@ func runArchive(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*termLogOut = termLog
 	cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
 	cfg.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
 	for name, v := range map[string]string{
 		"task-json": cfg.TaskJSON, "manifest-key-prefix": cfg.KeyPrefix,
-		"endpoint": cfg.Endpoint, "bucket": cfg.Bucket,
+		"endpoint": cfg.Endpoint, "bucket": cfg.Bucket, "region": cfg.Region,
 		"AWS_ACCESS_KEY_ID": cfg.AccessKey, "AWS_SECRET_ACCESS_KEY": cfg.SecretKey,
 	} {
 		if v == "" {

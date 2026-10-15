@@ -124,14 +124,22 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 	// Files are sent whole: the size is known before the PUT, which is what
 	// lets a single PUT stand in for multipart.
-	body, err := os.ReadFile(cfg.TaskJSON)
+	taskInfo, err := os.Lstat(cfg.TaskJSON)
 	if err != nil {
 		return Result{}, fmt.Errorf("read task json: %w", err)
 	}
-	if rule := Inspect(body); rule != "" {
-		hold("task.json", rule)
-	} else if p.put(path.Join(cfg.KeyPrefix, "task.json"), body) {
-		p.result.Uploaded++
+	if taskInfo.Mode()&fs.ModeSymlink != 0 {
+		hold("task.json", "symlink")
+	} else {
+		body, err := os.ReadFile(cfg.TaskJSON)
+		if err != nil {
+			return Result{}, fmt.Errorf("read task json: %w", err)
+		}
+		if rule := Inspect(body); rule != "" {
+			hold("task.json", rule)
+		} else if p.put(path.Join(cfg.KeyPrefix, "task.json"), body) {
+			p.result.Uploaded++
+		}
 	}
 
 	if cfg.Results != "" {

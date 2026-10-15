@@ -818,3 +818,106 @@ func TestArchiveWritesTerminationMessage(t *testing.T) {
 		t.Errorf("puts = %d, want task.json and manifest.json", puts)
 	}
 }
+
+// archiveFlags is a complete archive invocation against srv; the tests below
+// drop or break one part of it.
+func archiveFlags(t *testing.T, srv *httptest.Server, termLog string) []string {
+	t.Helper()
+	taskJSON := filepath.Join(t.TempDir(), "task.json")
+	if err := os.WriteFile(taskJSON, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	return []string{"archive", "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
+		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", "--bucket", "bkt", "--region", "r",
+		"--termination-log", termLog}
+}
+
+func withoutFlag(args []string, name string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--"+name {
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
+// An empty bucket would still fail at the PUT, so the refusal is told apart
+// by its message and by nothing having reached the endpoint.
+func TestArchiveRefusesMissingRequiredInput(t *testing.T) {
+	for _, name := range []string{"task-json", "manifest-key-prefix", "endpoint", "bucket", "region",
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		t.Run(name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				requests++
+			}))
+			defer srv.Close()
+			args := archiveFlags(t, srv, filepath.Join(t.TempDir(), "term"))
+			if strings.HasPrefix(name, "AWS_") {
+				t.Setenv(name, "")
+			} else {
+				args = withoutFlag(args, name)
+			}
+			err := run(args)
+			if err == nil || !strings.Contains(err.Error(), name+" is required") {
+				t.Fatalf("err = %v, want %q is required", err, name)
+			}
+			if requests != 0 {
+				t.Errorf("%d requests reached the endpoint", requests)
+			}
+		})
+	}
+}
+
+// The credentials of the archiver may allow PUT only; with no region minio-go
+// asks the endpoint for the bucket location first.
+func TestArchiveSendsNothingButPUT(t *testing.T) {
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		methods = append(methods, r.Method)
+		if r.Method != http.MethodPut {
+			http.Error(w, "only PUT", http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+	args := withoutFlag(archiveFlags(t, srv, filepath.Join(t.TempDir(), "term")), "region")
+	_ = run(args)
+	for _, m := range methods {
+		if m != http.MethodPut {
+			t.Fatalf("methods = %v, want PUT only", methods)
+		}
+	}
+}
+
+// Failure must leave a reason for the controller, never the previous content.
+func TestArchiveFailureIsRecordedInTerminationLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	for name, mod := range map[string]func([]string) []string{
+		"put failure":  func(a []string) []string { return a },
+		"missing flag": func(a []string) []string { return withoutFlag(a, "bucket") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "term")
+			if err := os.WriteFile(log, []byte("stale-previous-content"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(mod(archiveFlags(t, srv, log))); err == nil {
+				t.Fatal("expected a failure")
+			}
+			got := readFile(t, log)
+			if got == "" || got == "stale-previous-content" {
+				t.Fatalf("termination log = %q, want the failure recorded", got)
+			}
+		})
+	}
+}

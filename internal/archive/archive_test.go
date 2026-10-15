@@ -16,6 +16,11 @@ import (
 	"github.com/Tsuguya-HC/taskflow/internal/archive"
 )
 
+const (
+	reasonSymlink    = "symlink"
+	reasonUnreadable = "unreadable"
+)
+
 // Secret-shaped strings are assembled at run time so this file itself does
 // not trip a scanner.
 var (
@@ -180,14 +185,14 @@ func TestRunPutsFilesAndWithholds(t *testing.T) {
 		reasons[w.Path] = w.Reason
 	}
 	want := map[string]string{
-		"results/run1/env":            "symlink",
-		"results/run1/unreadable.txt": "unreadable",
+		"results/run1/env":            reasonSymlink,
+		"results/run1/unreadable.txt": reasonUnreadable,
 		"results/run1/secret.txt":     ruleAkia,
 	}
 	for p, r := range want {
 		switch r {
 		case ruleAkia:
-			if got := reasons[p]; got == "" || got == "symlink" || got == "unreadable" {
+			if got := reasons[p]; got == "" || got == reasonSymlink || got == reasonUnreadable {
 				t.Errorf("manifest[%s] = %q, want a rule name", p, got)
 			}
 		default:
@@ -233,5 +238,90 @@ func TestRunPutFailure(t *testing.T) {
 	f.failOn = "a.txt"
 	if _, err := archive.Run(context.Background(), f.cfg(dir)); err == nil {
 		t.Fatal("PUT failure returned nil")
+	}
+}
+
+// The Lstat guard on the shelf has to cover task.json too: a link there
+// would carry whatever the sidecar can read (its own env file, say) out as
+// task.json. The target is a string no rule matches, so only the link check
+// can hold it back.
+func TestRunWithholdsTaskJSONSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	write(t, target, "not-matched-by-any-rule")
+	if err := os.Symlink(target, filepath.Join(dir, "task.json")); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeS3(t)
+	cfg := f.cfg(dir)
+	cfg.Results = ""
+	if _, err := archive.Run(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if body, ok := f.puts["pre/ns/flow/uid/task.json"]; ok {
+		t.Errorf("task.json symlink target was put: %q", body)
+	}
+	if m := manifest(t, f); len(m) != 1 || m[0].Path != "task.json" || m[0].Reason != reasonSymlink {
+		t.Errorf("manifest = %+v", m)
+	}
+}
+
+// Catches dropping the read error of task.json: an empty body would pass
+// Inspect and be put as if it were the Task.
+func TestRunMissingTaskJSONFails(t *testing.T) {
+	dir := t.TempDir()
+	f := newFakeS3(t)
+	cfg := f.cfg(dir)
+	cfg.Results = ""
+	if _, err := archive.Run(context.Background(), cfg); err == nil {
+		t.Fatal("a missing task.json returned nil")
+	}
+	if len(f.puts) != 0 {
+		t.Errorf("put despite no task.json: %v", keys(f.puts))
+	}
+}
+
+// Catches ignoring the read error of a task.json that exists but cannot be read.
+func TestRunUnreadableTaskJSONFails(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "task.json"), `{}`)
+	if err := os.Chmod(filepath.Join(dir, "task.json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(filepath.Join(dir, "task.json")); err == nil {
+		t.Skip("permissions are not enforced (running as root)")
+	}
+	f := newFakeS3(t)
+	cfg := f.cfg(dir)
+	cfg.Results = ""
+	if _, err := archive.Run(context.Background(), cfg); err == nil {
+		t.Fatal("an unreadable task.json returned nil")
+	}
+	if len(f.puts) != 0 {
+		t.Errorf("put despite unreadable task.json: %v", keys(f.puts))
+	}
+}
+
+// Catches ignoring the walk error: a directory that cannot be listed must be
+// recorded, not silently skipped.
+func TestRunWithholdsUnreadableDirectory(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "task.json"), `{}`)
+	write(t, filepath.Join(dir, "results/locked/a.txt"), "a")
+	locked := filepath.Join(dir, "results/locked")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("directory permissions are not enforced for this user")
+	}
+	f := newFakeS3(t)
+	if _, err := archive.Run(context.Background(), f.cfg(dir)); err != nil {
+		t.Fatal(err)
+	}
+	m := manifest(t, f)
+	if len(m) != 1 || m[0].Path != "results/locked" || m[0].Reason != reasonUnreadable {
+		t.Errorf("manifest = %+v", m)
 	}
 }
