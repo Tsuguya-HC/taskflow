@@ -264,6 +264,23 @@ type TaskStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Archive says where the record of this task was sent. It is set when the
+	// sending begins and is absent where ended tasks are not sent away.
+	// +optional
+	Archive *ArchiveStatus `json:"archive,omitempty"`
+}
+
+// ArchiveStatus is where a task's record was sent.
+type ArchiveStatus struct {
+	// Location is the s3:// URL, ending in a slash, under which the record's
+	// objects are stored.
+	// +optional
+	Location string `json:"location,omitempty"`
+
+	// Endpoint is the object store's address that Location is on.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // +kubebuilder:object:root=true

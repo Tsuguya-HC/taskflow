@@ -104,6 +104,34 @@ var FinallyOutcomes = prometheus.NewCounterVec(
 	[]string{LabelFlow, LabelOutcome},
 )
 
+// ArchiveOutcomes counts the sendings of ended tasks' records by how they
+// ended: Uploaded for all of it sent, Withheld for some of it held back,
+// Failed for a sending that did not complete. Like every label here its
+// cardinality is fixed by the code, and flow is a TaskFlow that exists or
+// FlowUnresolved.
+var ArchiveOutcomes = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "taskflow_archive_outcomes_total",
+		Help: "Sendings of an ended task's record, by how they ended.",
+	},
+	[]string{LabelFlow, LabelOutcome},
+)
+
+// The outcomes of ArchiveOutcomes.
+const (
+	ArchiveUploaded = "Uploaded"
+	ArchiveWithheld = "Withheld"
+	ArchiveFailed   = "Failed"
+)
+
+// PrimeArchiveOutcomes creates all three series of ArchiveOutcomes for a flow
+// at zero (see PrimeOutcome).
+func PrimeArchiveOutcomes(flow string) {
+	for _, o := range []string{ArchiveUploaded, ArchiveWithheld, ArchiveFailed} {
+		ArchiveOutcomes.With(prometheus.Labels{LabelFlow: flow, LabelOutcome: o})
+	}
+}
+
 // PrimeOutcome creates the child series for one ending and one outcome and
 // leaves it at zero, so a later increment reads as a rise rather than as a
 // series appearing from nowhere.
@@ -133,5 +161,5 @@ func PrimeFinallyOutcome(flow, outcome string) {
 }
 
 func init() {
-	metrics.Registry.MustRegister(TaskOutcomes, FinallyOutcomes)
+	metrics.Registry.MustRegister(TaskOutcomes, FinallyOutcomes, ArchiveOutcomes)
 }

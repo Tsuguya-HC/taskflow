@@ -24,6 +24,7 @@ import (
 	"path"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +38,7 @@ import (
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 	"github.com/Tsuguya-HC/taskflow/internal/archive"
 	"github.com/Tsuguya-HC/taskflow/internal/contract"
+	"github.com/Tsuguya-HC/taskflow/internal/metrics"
 	"github.com/Tsuguya-HC/taskflow/internal/runner"
 )
 
@@ -147,7 +149,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		return true, r.setArchived(ctx, task, metav1.ConditionUnknown, archiveUploading, "the record is being sent")
 	case failure != "":
 		msg := fmt.Sprintf("the archive Job failed: %s", failure)
-		if err := r.setArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg); err != nil {
+		if err := r.settleArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
 			return false, err
 		}
 		if r.Recorder != nil {
@@ -168,7 +170,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 				looked++
 				if err := json.Unmarshal([]byte(t.Message), &res); err != nil {
 					msg := fmt.Sprintf("the archive Job's result could not be read: %v", err)
-					if err := r.setArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg); err != nil {
+					if err := r.settleArchived(ctx, task, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
 						return false, err
 					}
 					if r.Recorder != nil {
@@ -185,10 +187,27 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		return false, nil
 	}
 	if res.Withheld > 0 {
-		return true, r.setArchived(ctx, task, metav1.ConditionTrue, archiveWithheld,
-			fmt.Sprintf("%d uploaded, %d withheld", res.Uploaded, res.Withheld))
+		return true, r.settleArchived(ctx, task, metav1.ConditionTrue, archiveWithheld,
+			fmt.Sprintf("%d uploaded, %d withheld", res.Uploaded, res.Withheld), metrics.ArchiveWithheld)
 	}
-	return true, r.setArchived(ctx, task, metav1.ConditionTrue, archiveUploaded, fmt.Sprintf("%d uploaded", res.Uploaded))
+	return true, r.settleArchived(ctx, task, metav1.ConditionTrue, archiveUploaded,
+		fmt.Sprintf("%d uploaded", res.Uploaded), metrics.ArchiveUploaded)
+}
+
+// settleArchived records how the sending ended and counts it. The count
+// follows the write, so a write that failed is tried again and counted once.
+func (r *TaskReconciler) settleArchived(
+	ctx context.Context, task *flowv1alpha1.Task, status metav1.ConditionStatus, reason, message, outcome string,
+) error {
+	if err := r.setArchived(ctx, task, status, reason, message); err != nil {
+		return err
+	}
+	_, label, err := r.archiveFlow(ctx, task)
+	if err != nil {
+		label = metrics.FlowUnresolved
+	}
+	metrics.ArchiveOutcomes.With(prometheus.Labels{metrics.LabelFlow: label, metrics.LabelOutcome: outcome}).Inc()
+	return nil
 }
 
 func (r *TaskReconciler) setArchived(
@@ -227,11 +246,20 @@ func (r *TaskReconciler) ensureArchiveJob(ctx context.Context, task *flowv1alpha
 	if err != nil {
 		return nil, err
 	}
-	flow, err := r.archiveFlowKey(ctx, task)
+	flow, label, err := r.archiveFlow(ctx, task)
 	if err != nil {
 		return nil, err
 	}
-	job := r.buildArchiveJob(task, pvc, flow)
+	prefix := path.Join(r.Archive.Prefix, task.Namespace, flow, string(task.UID))
+	task.Status.Archive = &flowv1alpha1.ArchiveStatus{
+		Location: "s3://" + r.Archive.Bucket + "/" + prefix + "/",
+		Endpoint: r.Archive.Endpoint,
+	}
+	if err := r.Status().Update(ctx, task); err != nil {
+		return nil, err
+	}
+	metrics.PrimeArchiveOutcomes(label)
+	job := r.buildArchiveJob(task, pvc, prefix)
 	if err := controllerutil.SetControllerReference(task, job, r.Scheme); err != nil {
 		return nil, err
 	}
@@ -318,18 +346,19 @@ func archiveLabels(task *flowv1alpha1.Task) map[string]string {
 	}
 }
 
-// archiveFlowKey is the flow's place in the manifest key.
-func (r *TaskReconciler) archiveFlowKey(ctx context.Context, task *flowv1alpha1.Task) (string, error) {
+// archiveFlow is the flow's place in the manifest key and its value for the
+// metric's flow label.
+func (r *TaskReconciler) archiveFlow(ctx context.Context, task *flowv1alpha1.Task) (key, label string, err error) {
 	if _, _, err := r.resolveFlow(ctx, task); err != nil {
 		if apierrors.IsNotFound(err) {
-			return archiveUnresolved, nil
+			return archiveUnresolved, metrics.FlowUnresolved, nil
 		}
-		return "", err
+		return "", "", err
 	}
-	return task.Spec.Flow, nil
+	return task.Spec.Flow, task.Spec.Flow, nil
 }
 
-func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, flow string) *batchv1.Job {
+func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix string) *batchv1.Job {
 	cfg := r.Archive
 	const recordDir = "/archive"
 	args := []string{
@@ -338,7 +367,7 @@ func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, flow stri
 		"--endpoint=" + cfg.Endpoint,
 		"--bucket=" + cfg.Bucket,
 		"--region=" + cfg.Region,
-		"--manifest-key-prefix=" + path.Join(cfg.Prefix, task.Namespace, flow, string(task.UID)),
+		"--manifest-key-prefix=" + prefix,
 	}
 	mounts := []corev1.VolumeMount{{Name: "record", MountPath: recordDir, ReadOnly: true}}
 	volumes := []corev1.Volume{{Name: "record", VolumeSource: corev1.VolumeSource{

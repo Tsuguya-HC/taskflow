@@ -30,10 +30,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
@@ -634,7 +636,146 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		})
 	})
 
+	// The spec reads status.archive and the counter by their wire names, not
+	// through the Go types: the specs must compile before the field and the
+	// variable exist, and a rename of either should fail them.
+	Describe("where the record went, and how it ended", func() {
+		const unresolvedLabel = "<unresolved>"
+		outcomes := []string{"Uploaded", "Withheld", "Failed"}
+
+		// archiveStatus is status.archive as the API server stores it.
+		archiveStatus := func() map[string]any {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(flowv1alpha1.GroupVersion.WithKind("Task"))
+			Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, u)).To(Succeed())
+			got, _, err := unstructured.NestedMap(u.Object, "status", "archive")
+			Expect(err).NotTo(HaveOccurred())
+			return got
+		}
+		// counted reads taskflow_archive_outcomes_total from the registry
+		// rather than asking the vector for a child, which would create the
+		// series the spec is asking about.
+		counted := func(flow, outcome string) (float64, bool) {
+			fams, err := ctrlmetrics.Registry.Gather()
+			Expect(err).NotTo(HaveOccurred())
+			for _, f := range fams {
+				if f.GetName() != "taskflow_archive_outcomes_total" {
+					continue
+				}
+				for _, m := range f.GetMetric() {
+					labels := map[string]string{}
+					for _, l := range m.GetLabel() {
+						labels[l.GetName()] = l.GetValue()
+					}
+					if labels["flow"] == flow && labels["outcome"] == outcome {
+						return m.GetCounter().GetValue(), true
+					}
+				}
+			}
+			return 0, false
+		}
+
+		// total is counted's value alone, for Expect, which refuses a
+		// non-zero extra return.
+		total := func(flow, outcome string) float64 {
+			v, _ := counted(flow, outcome)
+			return v
+		}
+
+		It("records the location and endpoint when the Job is made", func() {
+			tk := ended()
+			fx.reconcile()
+
+			Expect(archiveStatus()).To(And(
+				HaveKeyWithValue("location", "s3://records/taskflow/"+resourceNamespace+"/"+fx.name+"/"+string(tk.UID)+"/"),
+				HaveKeyWithValue("endpoint", "s3.example:9000")))
+		})
+
+		It("files the location under _unresolved when the task's flow is not there", func() {
+			fx.makeFlow()
+			fx.name += "-run2"
+			tk := &flowv1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: fx.name, Namespace: resourceNamespace},
+				Spec:       flowv1alpha1.TaskSpec{Flow: "no-such-flow"},
+			}
+			Expect(k8sClient.Create(fx.ctx, tk)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(fx.ctx, tk) })
+			fx.taskUID = tk.UID
+			tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
+			tk.Status.ExpiresAt = &metav1.Time{Time: expiresAt}
+			Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+			fx.reconcile()
+
+			Expect(archiveStatus()).To(HaveKeyWithValue("location",
+				"s3://records/taskflow/"+resourceNamespace+"/_unresolved/"+string(tk.UID)+"/"))
+			for _, o := range outcomes {
+				v, ok := counted(unresolvedLabel, o)
+				Expect(ok).To(BeTrue(), "%s is primed under the unresolved label", o)
+				Expect(v).To(BeNumerically(">=", 0))
+			}
+		})
+
+		It("has all three series at zero before anything has ended", func() {
+			ended()
+			fx.reconcile()
+
+			for _, o := range outcomes {
+				v, ok := counted(fx.name, o)
+				Expect(ok).To(BeTrue(), "%s exists once the Job is made", o)
+				Expect(v).To(BeZero())
+			}
+		})
+
+		DescribeTable("counts the ending once",
+			func(ok bool, message, outcome string) {
+				ended()
+				fx.reconcile()
+				before, _ := counted(fx.name, outcome)
+				settle(archiveJob(), ok, message)
+				fx.reconcile()
+
+				Expect(total(fx.name, outcome)).To(Equal(before+1), "%s rose by one", outcome)
+				for _, other := range outcomes {
+					if other != outcome {
+						Expect(total(fx.name, other)).To(BeZero(), "%s did not move", other)
+					}
+				}
+				fx.reconcile()
+				Expect(total(fx.name, outcome)).To(Equal(before+1), "a later pass does not count it again")
+			},
+			Entry("sent", true, `{"uploaded":3,"withheld":0}`, "Uploaded"),
+			Entry("some withheld", true, `{"uploaded":2,"withheld":4}`, "Withheld"),
+			Entry("the Job failed", false, "", "Failed"),
+		)
+	})
+
 	Describe("without configuration", func() {
+		It("leaves status.archive and the counter's series out", func() {
+			fx.reconciler.Archive = ArchiveConfig{}
+			ended()
+			fx.reconcile()
+
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(flowv1alpha1.GroupVersion.WithKind("Task"))
+			Expect(k8sClient.Get(fx.ctx, types.NamespacedName{Name: fx.name, Namespace: resourceNamespace}, u)).To(Succeed())
+			_, found, err := unstructured.NestedMap(u.Object, "status", "archive")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse())
+
+			fams, err := ctrlmetrics.Registry.Gather()
+			Expect(err).NotTo(HaveOccurred())
+			for _, f := range fams {
+				if f.GetName() != "taskflow_archive_outcomes_total" {
+					continue
+				}
+				for _, m := range f.GetMetric() {
+					for _, l := range m.GetLabel() {
+						Expect(l.GetValue()).NotTo(Equal(fx.name), "no series for a flow when nothing is sent")
+					}
+				}
+			}
+		})
+
 		It("makes nothing, adds no condition, and deletes at the date as before", func() {
 			fx.reconciler.Archive = ArchiveConfig{}
 			ended()
