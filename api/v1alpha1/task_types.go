@@ -247,6 +247,8 @@ type TaskStatus struct {
 	CurrentRuns []RunRef `json:"currentRuns,omitempty"`
 
 	// ExpiresAt is when the controller deletes this task, set once it stops.
+	// Where ended tasks are sent away, the deletion waits past this moment
+	// until the sending has either succeeded or failed.
 	// The moment is fixed here rather than derived from the flow's ttl each
 	// time, so a task at TaskFailed keeps its date even after the flow that
 	// set it is edited or gone — the same reason the reserved phases need no

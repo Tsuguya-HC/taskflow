@@ -67,6 +67,8 @@ type TaskReconciler struct {
 	Now func() time.Time
 	// SidecarImage is what runs prepare and publish in every Job.
 	SidecarImage string
+	// Archive is the zero value when ended Tasks are not sent away.
+	Archive ArchiveConfig
 	// APIReader reads without the manager's cache. It is for objects the
 	// controller holds get on and neither list nor watch: the ConfigMap a State
 	// run is answered in (ADR-0011 決定4) and the ControllerRevision a task's
@@ -119,11 +121,34 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// only path such a task reaches on every later reconcile until then.
 	if task.Status.ExpiresAt != nil {
 		remaining := task.Status.ExpiresAt.Sub(r.now())
+		if r.Archive.Enabled() {
+			wrote, err := r.driveArchive(ctx, &task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if wrote {
+				return ctrl.Result{Requeue: true}, nil
+			}
+		}
 		if remaining > 0 {
 			if err := r.reapCancelledJobs(ctx, &task); err != nil {
 				return ctrl.Result{}, err
 			}
+			held, err := r.archiveHeld(ctx, &task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if held {
+				remaining = min(remaining, archiveRecheck)
+			}
 			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+		held, err := r.archiveHeld(ctx, &task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if held {
+			return ctrl.Result{RequeueAfter: archiveRecheck}, nil
 		}
 		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt)
 		return ctrl.Result{}, r.expire(ctx, &task)

@@ -340,6 +340,12 @@ func childName(taskName, suffix string) string {
 	return prefix + suffix
 }
 
+// ArchiveName is the name of the Job, and of the ConfigMap, that send one
+// ended task's record away.
+func ArchiveName(taskName string) string {
+	return childName(taskName, "-archive")
+}
+
 // BuildJob returns the Job that runs one phase of one task.
 func BuildJob(in Input) (*batchv1.Job, error) {
 	if in.Task == nil || in.Handler == nil {

@@ -333,7 +333,7 @@ var _ = Describe("starting a task", func() {
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: flowv1alpha1.SchemeGroupVersion.String(),
 					Kind:       "Task",
-					Name:       "someone-elses-task",
+					Name:       foreignOwnerName,
 					UID:        types.UID("not-" + string(tk.UID)),
 					Controller: &controllerTrue,
 				}},
@@ -357,7 +357,7 @@ var _ = Describe("starting a task", func() {
 		var broken brokenFlow
 		Expect(errors.As(err, &broken)).To(BeFalse(), "another owner claiming the name is interference, not a flow definition problem")
 		Expect(err.Error()).To(ContainSubstring(jobName), "the error must name the Job in question")
-		Expect(err.Error()).To(ContainSubstring("someone-elses-task"), "the error must name the actual owner")
+		Expect(err.Error()).To(ContainSubstring(foreignOwnerName), "the error must name the actual owner")
 	})
 
 	// BuildJob's own validation (a handler bound to a phase other than the one

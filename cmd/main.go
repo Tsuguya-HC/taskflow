@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -82,6 +83,16 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.StringVar(&sidecarImage, "sidecar-image", "",
 		"Image the controller puts into every Job to prepare the workspace and publish the verdict. Required.")
+	var archive controller.ArchiveConfig
+	flag.StringVar(&archive.Endpoint, "archive-endpoint", "",
+		"S3 endpoint (host:port) ended Tasks are sent to. "+
+			"Archiving is off unless this, --archive-bucket and --archive-credentials-secret are all set.")
+	flag.StringVar(&archive.Bucket, "archive-bucket", "", "Bucket ended Tasks are sent to.")
+	flag.StringVar(&archive.Prefix, "archive-prefix", "", "Key prefix under which ended Tasks are put.")
+	flag.StringVar(&archive.Region, "archive-region", "us-east-1", "Region of the archive bucket.")
+	flag.StringVar(&archive.CredentialsSecret, "archive-credentials-secret", "",
+		"Secret, in the Task's namespace, whose keys are the archive Job's environment.")
+	flag.DurationVar(&archive.Timeout, "archive-timeout", 15*time.Minute, "Deadline of an archive Job.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
@@ -94,6 +105,11 @@ func main() {
 
 	if sidecarImage == "" {
 		setupLog.Error(errors.New("--sidecar-image is required"), "No sidecar image to put into Jobs")
+		os.Exit(1)
+	}
+
+	if err := archive.Validate(); err != nil {
+		setupLog.Error(err, "Archive flags are incomplete")
 		os.Exit(1)
 	}
 
@@ -198,6 +214,7 @@ func main() {
 		// through here instead.
 		APIReader:    mgr.GetAPIReader(),
 		SidecarImage: sidecarImage,
+		Archive:      archive,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "task")
 		os.Exit(1)
