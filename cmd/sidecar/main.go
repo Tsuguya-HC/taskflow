@@ -347,10 +347,22 @@ func runArchive(args []string) error {
 const defaultTermLog = "/dev/termination-log"
 
 // scanTermLog finds --termination-log without flag's all-or-nothing parse.
+// A token that is another flag's value is skipped, so a value spelled like
+// the flag name is not taken for it.
 func scanTermLog(args []string) string {
 	path := defaultTermLog
+	takesValue := map[string]bool{}
+	newArchiveFlagSet(&archive.Config{}, new(string)).VisitAll(func(f *flag.Flag) {
+		b, ok := f.Value.(interface{ IsBoolFlag() bool })
+		takesValue[f.Name] = !ok || !b.IsBoolFlag()
+	})
+	delete(takesValue, "termination-log") // the loop below reads its value itself
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if takesValue[strings.TrimLeft(a, "-")] && !strings.Contains(a, "=") {
+			i++
+			continue
+		}
 		if a == "--" {
 			break
 		}
@@ -365,8 +377,7 @@ func scanTermLog(args []string) string {
 	return path
 }
 
-func archiveTo(args []string, termLogOut *string) error {
-	var cfg archive.Config
+func newArchiveFlagSet(cfg *archive.Config, termLogOut *string) *flag.FlagSet {
 	fs := flag.NewFlagSet("sidecar archive", flag.ContinueOnError)
 	fs.StringVar(&cfg.TaskJSON, "task-json", "", "the Task's JSON file")
 	fs.StringVar(&cfg.Results, "results", "", "the results/ shelf directory; empty when the flow has no workspace")
@@ -376,6 +387,12 @@ func archiveTo(args []string, termLogOut *string) error {
 	fs.StringVar(&cfg.Bucket, "bucket", "", "bucket name")
 	fs.StringVar(&cfg.Region, "region", "", "bucket region")
 	fs.StringVar(termLogOut, "termination-log", defaultTermLog, "where the answer is written for the controller")
+	return fs
+}
+
+func archiveTo(args []string, termLogOut *string) error {
+	var cfg archive.Config
+	fs := newArchiveFlagSet(&cfg, termLogOut)
 	if err := fs.Parse(args); err != nil {
 		// flag stops at the first bad flag, so a --termination-log after it
 		// was never read; the failure must still land where the caller said.

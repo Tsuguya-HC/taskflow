@@ -68,7 +68,7 @@ func readFile(t *testing.T, path string) string {
 // flag names are spelled once rather than at every call site. out is the
 // run's own directory — what the handler sees at its mount's root.
 func runArgs(cmd, out, log string) []string {
-	return []string{cmd, "-out", out, "-termination-log", log}
+	return []string{cmd, "-out", out, termLogShort, log}
 }
 
 // publishArgs is runArgs for publish plus the flag a flow-workspace one
@@ -329,7 +329,7 @@ func TestRunWithoutOutIsRefused(t *testing.T) {
 	for _, cmd := range []string{cmdPrepare, cmdPublish} {
 		t.Run(cmd, func(t *testing.T) {
 			log := termLog(t)
-			if err := run([]string{cmd, "-termination-log", log}); err == nil {
+			if err := run([]string{cmd, termLogShort, log}); err == nil {
 				t.Fatalf("%s without -out must be refused", cmd)
 			}
 			if got := readFile(t, log); !strings.Contains(got, cmd+" failed:") || !strings.Contains(got, "-out") {
@@ -804,8 +804,8 @@ func TestArchiveWritesTerminationMessage(t *testing.T) {
 	termLog := filepath.Join(dir, "term")
 	t.Setenv("AWS_ACCESS_KEY_ID", "k")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
-	err := run([]string{archiveCmd, "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
-		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", "--bucket", "bkt", "--region", "r",
+	err := run([]string{archiveCmd, taskJSONFlag, taskJSON, "--results", "", "--manifest-key-prefix", "p",
+		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", bucketFlag, "bkt", "--region", "r",
 		termLogFlag, termLog})
 	if err != nil {
 		t.Fatal(err)
@@ -820,8 +820,11 @@ func TestArchiveWritesTerminationMessage(t *testing.T) {
 }
 
 const (
-	archiveCmd  = "archive"
-	termLogFlag = "--termination-log"
+	archiveCmd   = "archive"
+	termLogFlag  = "--termination-log"
+	termLogShort = "-termination-log"
+	taskJSONFlag = "--task-json"
+	bucketFlag   = "--bucket"
 )
 
 // archiveFlags is a complete archive invocation against srv; the tests below
@@ -834,8 +837,8 @@ func archiveFlags(t *testing.T, srv *httptest.Server, termLog string) []string {
 	}
 	t.Setenv("AWS_ACCESS_KEY_ID", "k")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
-	return []string{archiveCmd, "--task-json", taskJSON, "--results", "", "--manifest-key-prefix", "p",
-		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", "--bucket", "bkt", "--region", "r",
+	return []string{archiveCmd, taskJSONFlag, taskJSON, "--results", "", "--manifest-key-prefix", "p",
+		"--endpoint", strings.TrimPrefix(srv.URL, "http://"), "--secure=false", bucketFlag, "bkt", "--region", "r",
 		termLogFlag, termLog}
 }
 
@@ -935,6 +938,33 @@ func TestArchiveParseFailureReachesCustomTerminationLog(t *testing.T) {
 func TestScanTermLogStopsAtDoubleDash(t *testing.T) {
 	if got := scanTermLog([]string{"--", termLogFlag, "/elsewhere"}); got != defaultTermLog {
 		t.Errorf("scanTermLog = %q, want the default %q", got, defaultTermLog)
+	}
+}
+
+func TestScanTermLog(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		// Another flag's value spelled like our flag name must not make the
+		// next token the path.
+		"value that looks like the flag name": {
+			[]string{bucketFlag, "termination-log", "--not-a-real-flag=x"}, defaultTermLog},
+		// A trailing flag with no value must not index past the end.
+		"trailing flag without value": {[]string{taskJSONFlag, "t", termLogFlag}, defaultTermLog},
+		"trailing single-dash flag":   {[]string{termLogShort}, defaultTermLog},
+		// The consumed value is not rescanned as a flag.
+		"consumed value is not rescanned": {[]string{termLogFlag, termLogFlag + "=/x"}, termLogFlag + "=/x"},
+		"single dash equals form":         {[]string{"-termination-log=/x"}, "/x"},
+		"double dash space form":          {[]string{termLogFlag, "/x"}, "/x"},
+		// An `=` form carries its own value, so the next token is still a flag name.
+		"equals form does not swallow next": {[]string{"--bucket=x", termLogFlag, "/p"}, "/p"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := scanTermLog(tc.args); got != tc.want {
+				t.Errorf("scanTermLog(%q) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 
