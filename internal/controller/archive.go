@@ -197,8 +197,9 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 
 // settleArchived records how the sending ended and counts it. The count
 // follows the write, so a write that failed is tried again and counted once.
-// The series is the one the Job's creation primed, read back from the Job:
-// resolving the flow again here could land on another series, or fail.
+// The series is the one the Job's creation primed, read back from the Job,
+// because resolving the flow again could land on another series or fail; only
+// a Job made before the label was recorded on it is resolved here.
 func (r *TaskReconciler) settleArchived(
 	ctx context.Context, task *flowv1alpha1.Task, job *batchv1.Job, status metav1.ConditionStatus, reason, message, outcome string,
 ) error {
