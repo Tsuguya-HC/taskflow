@@ -537,6 +537,59 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		})
 	})
 
+	Describe("a restart with the archive switched off and the Job unreadable or not ours", func() {
+		// Catches archiveHeld swallowing the Get error (the task would be
+		// deleted with a send possibly in flight) or ignoring the owner check
+		// (a stranger's Job of the same name would hold the task forever).
+		It("returns the error instead of deleting when the Job cannot be read", func() {
+			tk := ended()
+			_, err := fx.reconciler.ensureArchiveJob(fx.ctx, tk)
+			Expect(err).NotTo(HaveOccurred())
+
+			boom := errors.New("the apiserver blinked")
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						return boom
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			clock = expiresAt.Add(time.Minute)
+			fx.reconciler.Archive = ArchiveConfig{}
+			_, err = fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+
+			Expect(err).To(MatchError(ContainSubstring(boom.Error())))
+			Expect(gone()).To(BeFalse(), "a Job that could not be read may still be sending")
+		})
+
+		It("deletes at the date when the Job of that name belongs to another owner", func() {
+			ended()
+			stray := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: archiveJobName(fx.name), Namespace: resourceNamespace, OwnerReferences: strayOwner(),
+				},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+				}}},
+			}
+			Expect(k8sClient.Create(fx.ctx, stray)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(fx.ctx, stray, client.PropagationPolicy(metav1.DeletePropagationBackground))
+			})
+
+			clock = expiresAt.Add(time.Minute)
+			fx.reconciler.Archive = ArchiveConfig{}
+			fx.reconcile()
+
+			Expect(gone()).To(BeTrue(), "a Job this task does not own is not an upload of its record")
+		})
+	})
+
 	Describe("looking again before the date", func() {
 		It("comes back within the recheck interval while the upload is unsettled", func() {
 			ended()
