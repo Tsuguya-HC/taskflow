@@ -134,12 +134,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			if err := r.reapCancelledJobs(ctx, &task); err != nil {
 				return ctrl.Result{}, err
 			}
-			if r.archiveHeld(&task) {
+			held, err := r.archiveHeld(ctx, &task)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if held {
 				remaining = min(remaining, archiveRecheck)
 			}
 			return ctrl.Result{RequeueAfter: remaining}, nil
 		}
-		if r.archiveHeld(&task) {
+		held, err := r.archiveHeld(ctx, &task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if held {
 			return ctrl.Result{RequeueAfter: archiveRecheck}, nil
 		}
 		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt)

@@ -17,11 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
@@ -457,6 +461,28 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		})
 	})
 
+	Describe("a flow that cannot be read for a reason other than being absent", func() {
+		It("fails instead of filing the record under _unresolved", func() {
+			tk := ended()
+			boom := errors.New("the apiserver said no")
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.APIReader = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.ControllerRevision); ok {
+						return boom
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			_, err = fx.reconciler.ensureArchiveJob(fx.ctx, tk)
+
+			Expect(err).To(MatchError(ContainSubstring(boom.Error())))
+			Expect(archiveJobs()).To(BeZero(), "no record is sent under a key that was guessed")
+		})
+	})
+
 	Describe("a Job that finished with nothing to read", func() {
 		It("is not recorded as uploaded when its pod cannot be found", func() {
 			ended()
@@ -482,6 +508,20 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 	})
 
 	Describe("a restart with the archive switched off", func() {
+		// The process died between making the Job and writing the condition.
+		It("does not delete a task whose Job was made but whose condition was never written", func() {
+			tk := ended()
+			_, err := fx.reconciler.ensureArchiveJob(fx.ctx, tk)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(archived()).To(BeNil(), "the crash happened before the condition was written")
+
+			clock = expiresAt.Add(time.Minute)
+			fx.reconciler.Archive = ArchiveConfig{}
+			fx.reconcile()
+
+			Expect(gone()).To(BeFalse(), "an upload Job exists for this task; it must not be deleted out from under it")
+		})
+
 		It("does not delete a task whose upload was still in flight", func() {
 			ended()
 			fx.reconcile()

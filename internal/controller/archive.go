@@ -106,12 +106,24 @@ func archiveSettled(task *flowv1alpha1.Task) bool {
 
 // archiveHeld reports whether the Task must outlive its date for the upload's
 // sake: it is switched on and not settled, or it was begun and never settled,
-// which a restart with the switch off must not turn into a deletion.
-func (r *TaskReconciler) archiveHeld(task *flowv1alpha1.Task) bool {
+// which a restart with the switch off must not turn into a deletion. Begun
+// includes a Job made before the condition could be written.
+func (r *TaskReconciler) archiveHeld(ctx context.Context, task *flowv1alpha1.Task) (bool, error) {
 	if archiveSettled(task) {
-		return false
+		return false, nil
 	}
-	return r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil
+	if r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
+		return true, nil
+	}
+	var job batchv1.Job
+	err := r.Get(ctx, types.NamespacedName{Name: archiveJobName(task.Name), Namespace: task.Namespace}, &job)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return metav1.IsControlledBy(&job, task), nil
 }
 
 // driveArchive makes the archive Job for a Task that has none yet, and records
