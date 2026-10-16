@@ -150,7 +150,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if held {
 			return ctrl.Result{RequeueAfter: archiveRecheck}, nil
 		}
-		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt)
+		log.Info("task expired", "phase", task.Status.Phase, "expiresAt", task.Status.ExpiresAt.Time)
 		return ctrl.Result{}, r.expire(ctx, &task)
 	}
 
