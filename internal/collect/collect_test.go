@@ -421,3 +421,108 @@ func TestABoxAnswersForAFork(t *testing.T) {
 		t.Fatalf("got %+v answered=%v, want more/ok", got, answered)
 	}
 }
+
+func exited(name, reason string, code int32, msg string) corev1.ContainerStatus {
+	return corev1.ContainerStatus{
+		Name: name,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: reason, ExitCode: code, Message: msg,
+		}},
+	}
+}
+
+func TestNoAnswerNamesTheContainerThatWasKilled(t *testing.T) {
+	got := FromPod(pod(exited("agent", "OOMKilled", 137, ""), exited("publish", "Completed", 0, "")), declared, false)
+	want := "agent: OOMKilled (exit 137); no container left a termination message"
+	if got.Directory != "" || got.Reason != want {
+		t.Fatalf("got %q / %q, want no directory and %q", got.Directory, got.Reason, want)
+	}
+}
+
+func TestCleanExitsAddNothingToTheReason(t *testing.T) {
+	got := FromPod(pod(exited("prepare", "Completed", 0, ""), exited("publish", "Completed", 0, "")), declared, false)
+	if got.Reason != "no container left a termination message" {
+		t.Fatalf("reason = %q", got.Reason)
+	}
+}
+
+func TestEmptyReasonPrintsOnlyTheExitCode(t *testing.T) {
+	got := FromPod(pod(exited("agent", "", 2, "")), declared, false)
+	if got.Reason != "agent: exit 2; no container left a termination message" {
+		t.Fatalf("reason = %q", got.Reason)
+	}
+}
+
+// Completed with a non-zero code, and a non-Completed reason with code 0, are
+// both abnormal.
+func TestAbnormalIsEitherANonZeroCodeOrNotCompleted(t *testing.T) {
+	got := FromPod(pod(exited("a", "Completed", 1, ""), exited("b", "Error", 0, "")), declared, false)
+	want := "a: Completed (exit 1), b: Error (exit 0); no container left a termination message"
+	if got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
+	}
+}
+
+func TestContainersWithoutATerminatedStateAreNotListed(t *testing.T) {
+	running := corev1.ContainerStatus{Name: "sidecar", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	got := FromPod(pod(running, exited("agent", "OOMKilled", 137, "")), declared, false)
+	if got.Reason != "agent: OOMKilled (exit 137); no container left a termination message" {
+		t.Fatalf("reason = %q", got.Reason)
+	}
+}
+
+func TestContainerPartComesBeforeTheUndeclaredMessageReason(t *testing.T) {
+	got := FromPod(pod(exited("agent", "Error", 1, "bogus"), exited("publish", "Completed", 0, "")), declared, false)
+	want := "agent: Error (exit 1); 1 container(s) reported, none naming a declared directory (ok, more)"
+	if got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
+	}
+}
+
+// One container wrote a message and another died without one.
+func TestMixedMessageAndNoMessage(t *testing.T) {
+	got := FromPod(pod(exited("agent", "OOMKilled", 137, ""), exited("publish", "Completed", 0, "nope")), declared, false)
+	want := "agent: OOMKilled (exit 137); 1 container(s) reported, none naming a declared directory (ok, more)"
+	if got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
+	}
+}
+
+func TestSeveralAbnormalContainersAreJoinedWithCommas(t *testing.T) {
+	got := FromPod(pod(exited("a", "OOMKilled", 137, ""), exited("b", "Error", 1, "")), declared, false)
+	want := "a: OOMKilled (exit 137), b: Error (exit 1); no container left a termination message"
+	if got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
+	}
+}
+
+func TestTwoAnswersKeepTheirOwnReason(t *testing.T) {
+	got := FromPod(pod(exited("a", "Error", 1, "ok"), exited("b", "Error", 1, "ok")), declared, false)
+	if strings.Contains(got.Reason, "exit 1") {
+		t.Fatalf("reason = %q, want the existing more-than-one reason unchanged", got.Reason)
+	}
+}
+
+func TestContainersOfSeveralPodsAreQualifiedByPod(t *testing.T) {
+	p1 := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{exited("agent", "OOMKilled", 137, "")}}}
+	p1.Name = "job-a"
+	p2 := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{exited("agent", "Error", 1, "")}}}
+	p2.Name = "job-b"
+	got := FromPods([]corev1.Pod{p1, p2}, declared, false)
+	want := "job-a/agent: OOMKilled (exit 137), job-b/agent: Error (exit 1); no container left a termination message"
+	if got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
+	}
+}
+
+// The container part is in front so that the cap cuts the long tail, not it.
+func TestLongReasonKeepsTheContainerPart(t *testing.T) {
+	long := strings.Repeat("d", maxReasonRunes)
+	got := FromPod(pod(exited("agent", "OOMKilled", 137, "bogus")), []string{long}, false)
+	if !strings.HasPrefix(got.Reason, "agent: OOMKilled (exit 137); ") {
+		t.Fatalf("reason = %q, want the container part kept", got.Reason)
+	}
+	if n := len([]rune(got.Reason)); n > maxReasonRunes {
+		t.Fatalf("reason has %d runes, want at most %d", n, maxReasonRunes)
+	}
+}

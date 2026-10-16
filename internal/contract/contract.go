@@ -173,7 +173,8 @@ const (
 	// it, and an empty value is the honest report of that rather than the last
 	// unrelated run's verdict (P8). EnvEndingDecidedBy is the phase name of that
 	// same run, which EnvEndingPhase cannot say when several branches stopped at
-	// TaskFailed; it is empty under the same condition.
+	// TaskFailed; it is empty under the same condition. EnvEndingReason is the
+	// reason on that run's history line, empty under the same condition.
 	//
 	// They are values to read, not a control flow to obey: a handler may
 	// report differently for a Failure than for a Success, but nothing the
@@ -182,6 +183,7 @@ const (
 	EnvEndingPhase     = "FLOW_ENDING_PHASE"
 	EnvEndingOutcome   = "FLOW_ENDING_OUTCOME"
 	EnvEndingDecidedBy = "FLOW_ENDING_DECIDED_BY"
+	EnvEndingReason    = "FLOW_ENDING_REASON"
 
 	// WorkspaceVolume is the name of the volume the controller adds to a Job
 	// when the task's flow declares a workspace, backed by that task's own

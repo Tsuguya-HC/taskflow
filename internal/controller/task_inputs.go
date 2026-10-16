@@ -243,6 +243,15 @@ func endingDecidedBy(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, c
 	return ""
 }
 
+// endingReason is the reason on the history line endingOutcome speaks of, and
+// empty when no run decided the ending.
+func endingReason(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, cleanup *flowv1alpha1.RunRef) string {
+	if i := decidingLine(task, flow, cleanup); i >= 0 {
+		return task.Status.History[i].Reason
+	}
+	return ""
+}
+
 // unsweptRuns is the numbers of every run prepare must not sweep away as
 // though it were debris: a fork's other branches still in flight besides
 // run, and every run history records as Cancelled. A cancelled branch's Job

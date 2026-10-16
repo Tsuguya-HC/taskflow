@@ -119,3 +119,9 @@ func TestEnvEndingDecidedByIsTheNameHandlersRead(t *testing.T) {
 		t.Fatalf("EnvEndingDecidedBy = %q, want FLOW_ENDING_DECIDED_BY", EnvEndingDecidedBy)
 	}
 }
+
+func TestEnvEndingReasonIsTheNameHandlersRead(t *testing.T) {
+	if EnvEndingReason != "FLOW_ENDING_REASON" {
+		t.Fatalf("EnvEndingReason = %q, want FLOW_ENDING_REASON", EnvEndingReason)
+	}
+}

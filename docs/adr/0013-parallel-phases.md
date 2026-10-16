@@ -99,7 +99,7 @@
    cat /inputs/*/report.md   # 仕分け: 全観点のレポート。番号も前のフェーズ名も知らない
    ```
 
-   - finally が受け取る単一値の env のうち、`FLOW_ENDING_OUTCOME` と `FLOW_ENDING_DECIDED_BY`
+   - finally が受け取る単一値の env のうち、`FLOW_ENDING_OUTCOME`・`FLOW_ENDING_DECIDED_BY`・`FLOW_ENDING_REASON`
      （[ADR-0009](0009-finally-after-the-ending.md) 決定6）は「**終端を決めた run** の行」から引く。
      `FLOW_ENDING_PHASE` は Task が着いた終端で、行からは引かない。決定4の
      とおり並列では複数の枝がフェーズ名の順に history へ積まれうるので、`TaskFailed` に着いたときは

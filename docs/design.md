@@ -819,8 +819,8 @@ finally:
   出し、TTL は `ttl.failed` を取る。仕事の結論を表す値はどれも動かさない。この metric も
   `TaskOutcomes` と同じ理由で起きる前から 0 として出るが、`finally` を宣言していない flow には出さない
   — 宣言していない flow はどちらの outcome も起こりえないため（ADR-0010）
-- **受け取るもの**: 終端の意味（4 値: `Success` / `Failure` / `TaskFailed` / `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome、その run のフェーズ名。他の run と同じ
-  経路で値として差し込む（`FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME` / `FLOW_ENDING_DECIDED_BY`。finally の run
+- **受け取るもの**: 終端の意味（4 値: `Success` / `Failure` / `TaskFailed` / `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome、その run のフェーズ名、その run の history の理由。他の run と同じ
+  経路で値として差し込む（`FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME` / `FLOW_ENDING_DECIDED_BY` / `FLOW_ENDING_REASON`。finally の run
   にだけ付く。`FLOW_PHASE` は他の run と同じく「この run が何か」= `Finally` を言う）。outcome は
   **終端を決めた run** の行から引く — 直列なら番号が 1 つ前の run、並列の途中で枝が止めたならその枝
   （ADR-0013 決定8。history の最後に積まれる）。run が一度も決着せずに `TaskFailed` に着いた場合、outcome とフェーズ名は

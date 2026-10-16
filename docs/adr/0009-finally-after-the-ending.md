@@ -69,8 +69,8 @@
    足元から Task を消さない。この機能より前に終端へ着いた Task の backfill は、従来どおり終端到達で
    焼き、finally は走らせない（決定 7 の表と同じ）
 6. **finally が受け取るもの**は、終端の意味（`Success` / `Failure` / `TaskFailed` /
-   `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome、その run のフェーズ名。他の run と同じ経路（環境変数
-   `FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME` / `FLOW_ENDING_DECIDED_BY`、finally の run にだけ付く）で
+   `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome、その run のフェーズ名、その run の history の理由。他の run と同じ経路（環境変数
+   `FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME` / `FLOW_ENDING_DECIDED_BY` / `FLOW_ENDING_REASON`、finally の run にだけ付く）で
    値として差し込む。分岐は書かせない（P9）。**run が一度も決着せずに `TaskFailed` に着いた場合**
    （flow の破損が run の開始前・開始不能で判明した場合）、outcome は**空で渡す**。無い値を推測で
    埋めない（P8）。フェーズ名も同じく空で渡す。outcome は history の末尾ではなく **finally の runID − 1 の行**から引く — 決着

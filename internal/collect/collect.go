@@ -104,12 +104,24 @@ func FromPods(pods []corev1.Pod, declared []string, many bool) Answer {
 	type candidate struct{ container, dir, reason string }
 	var found []candidate
 	looked := 0
+	var abnormal []string
 
 	for _, pod := range pods {
 		statuses := slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses)
 		for _, cs := range statuses {
 			if cs.State.Terminated == nil {
 				continue
+			}
+			if t := cs.State.Terminated; t.ExitCode != 0 || t.Reason != "Completed" {
+				name := cs.Name
+				if len(pods) > 1 {
+					name = pod.Name + "/" + cs.Name
+				}
+				if t.Reason == "" {
+					abnormal = append(abnormal, fmt.Sprintf("%s: exit %d", name, t.ExitCode))
+				} else {
+					abnormal = append(abnormal, fmt.Sprintf("%s: %s (exit %d)", name, t.Reason, t.ExitCode))
+				}
 			}
 			msg := cs.State.Terminated.Message
 			if msg == "" {
@@ -133,15 +145,21 @@ func FromPods(pods []corev1.Pod, declared []string, many bool) Answer {
 	case 1:
 		return Answer{Directory: found[0].dir, Reason: found[0].reason, Container: found[0].container}
 	case 0:
+		// The containers' own endings go first so that the cap in reasonf
+		// cuts the declared-directory list, never the part that says why.
+		prefix := ""
+		if len(abnormal) > 0 {
+			prefix = strings.Join(abnormal, ", ") + "; "
+		}
 		if looked == 0 {
 			// Nothing wrote a message at all: the node died, the pod was
 			// OOM-killed, or the sidecar never ran. Fail-closed with no
 			// effort, which is the point of using this channel.
-			return Answer{Reason: "no container left a termination message"}
+			return Answer{Reason: reasonf("%sno container left a termination message", prefix)}
 		}
 		return Answer{Reason: reasonf(
-			"%d container(s) reported, none naming a declared directory (%s)",
-			looked, strings.Join(declared, ", "))}
+			"%s%d container(s) reported, none naming a declared directory (%s)",
+			prefix, looked, strings.Join(declared, ", "))}
 	default:
 		names := make([]string, 0, len(found))
 		for _, c := range found {
