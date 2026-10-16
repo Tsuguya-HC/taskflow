@@ -69,15 +69,15 @@
    足元から Task を消さない。この機能より前に終端へ着いた Task の backfill は、従来どおり終端到達で
    焼き、finally は走らせない（決定 7 の表と同じ）
 6. **finally が受け取るもの**は、終端の意味（`Success` / `Failure` / `TaskFailed` /
-   `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome、その run のフェーズ名。他の run と同じ経路（環境変数
-   `FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME` / `FLOW_ENDING_DECIDED_BY`、finally の run にだけ付く）で
+   `Undeclared`）、終端のフェーズ名、終端に着いた run の outcome、その run のフェーズ名、その run の history の理由。他の run と同じ経路（環境変数
+   `FLOW_ENDING` / `FLOW_ENDING_PHASE` / `FLOW_ENDING_OUTCOME` / `FLOW_ENDING_DECIDED_BY` / `FLOW_ENDING_REASON`、finally の run にだけ付く）で
    値として差し込む。分岐は書かせない（P9）。**run が一度も決着せずに `TaskFailed` に着いた場合**
    （flow の破損が run の開始前・開始不能で判明した場合）、outcome は**空で渡す**。無い値を推測で
    埋めない（P8）。フェーズ名も同じく空で渡す。outcome は history の末尾ではなく **finally の runID − 1 の行**から引く — 決着
    しなかった経路では末尾が無関係な前の run の verdict になっており、それは「この終端の outcome」
    ではない
 
-   **4 値は dispatch 時点の flow から読む**（Job の template や image と同じ扱い）。決定 2 が
+   **5 値は dispatch 時点の flow から読む**（Job の template や image と同じ扱い）。決定 2 が
    封印すると言っているのは終端に着いた瞬間に**既に書かれたもの**（`status.phase`、Ready の
    reason、Event、metric の sample）で、その後の flow の編集がそれらを書き換えることはない。
    TTL の選択も同じ理由の裏返しで、片付けが決着した時点の flow を再度読むのではなく、終端到達時に

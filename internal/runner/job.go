@@ -83,6 +83,7 @@ const (
 	EnvEndingPhase     = contract.EnvEndingPhase
 	EnvEndingOutcome   = contract.EnvEndingOutcome
 	EnvEndingDecidedBy = contract.EnvEndingDecidedBy
+	EnvEndingReason    = contract.EnvEndingReason
 
 	frameworkPrefix = contract.Prefix
 
@@ -235,7 +236,7 @@ type InputEntry struct {
 
 // Ending is what the cleanup run is told about the ending it follows: what
 // stopping there meant, where the task stopped, and how the run that got it
-// there was accounted for, and which phase's run that was. Four values,
+// there was accounted for, and which phase's run that was. Five values,
 // injected as environment variables like the rest, and not a decision the run is asked to make — the ending is
 // already decided (ADR-0009 決定2).
 type Ending struct {
@@ -251,6 +252,8 @@ type Ending struct {
 	// DecidedBy is the phase name of the run that reached the ending, and
 	// empty when no run did.
 	DecidedBy flowv1alpha1.Phase
+	// Reason is the history line's reason for the run DecidedBy names.
+	Reason string
 }
 
 // ErrReservedField reports a jobTemplate that sets something the design keeps
@@ -937,10 +940,10 @@ func sidecarContainer(name, image, subcommand, out string, ws flowv1alpha1.Works
 // left alone: a handler that already sets FLOW_PHASE means it, and silently
 // overwriting would leave the YAML disagreeing with what ran.
 //
-// FLOW_PHASE, FLOW_INPUT, FLOW_ENDING_PHASE and FLOW_ENDING_DECIDED_BY carry
-// free strings their authors control — the flow's phase names and the task's
-// spec.input — so all four have $(...) escaped. The other two of the ending's
-// four are framework constants, escaped anyway rather than left to whoever
+// FLOW_PHASE, FLOW_INPUT, FLOW_ENDING_PHASE, FLOW_ENDING_DECIDED_BY and
+// FLOW_ENDING_REASON carry free strings their authors control — the flow's
+// phase names, the task's spec.input and a handler's reason — so all five have $(...) escaped. The other two of the ending's
+// values are framework constants, escaped anyway rather than left to whoever
 // next adds a value to either enum.
 // Kubernetes expands $(VAR_NAME) in an env value against everything resolved
 // before it: all of the container's envFrom, then env entries earlier in the
@@ -962,7 +965,8 @@ func injectEnv(pod *corev1.PodSpec, in Input) {
 			corev1.EnvVar{Name: EnvEnding, Value: escapeVarRefs(in.Ending.Meaning)},
 			corev1.EnvVar{Name: EnvEndingPhase, Value: escapeVarRefs(string(in.Ending.Phase))},
 			corev1.EnvVar{Name: EnvEndingOutcome, Value: escapeVarRefs(in.Ending.Outcome)},
-			corev1.EnvVar{Name: EnvEndingDecidedBy, Value: escapeVarRefs(string(in.Ending.DecidedBy))})
+			corev1.EnvVar{Name: EnvEndingDecidedBy, Value: escapeVarRefs(string(in.Ending.DecidedBy))},
+			corev1.EnvVar{Name: EnvEndingReason, Value: escapeVarRefs(in.Ending.Reason)})
 	}
 	for i := range pod.InitContainers {
 		pod.InitContainers[i].Env = merge(pod.InitContainers[i].Env, env)

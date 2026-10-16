@@ -280,3 +280,28 @@ func TestEndingForNamesTheDecidingRunsPhase(t *testing.T) {
 		}
 	})
 }
+
+// FLOW_ENDING_REASON is read off the same line as the outcome, whatever the
+// outcome is: a Declared line carries the sentence the handler wrote.
+func TestEndingForCarriesTheDecidingLinesReason(t *testing.T) {
+	flow := &flowv1alpha1.TaskFlowSpec{Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+		"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"完了": dirSent}},
+	}}
+	cleanup := &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 2}
+	for _, outcome := range []transition.Outcome{transition.OutcomeDeclared, transition.OutcomeNoAnswer} {
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: "完了", History: []flowv1alpha1.HistoryEntry{
+			{Phase: "調査", RunID: 1, Outcome: string(outcome), Reason: "agent: OOMKilled (exit 137); no container left a termination message"},
+		}}}
+		if got := endingFor(task, flow, cleanup); got.Reason != "agent: OOMKilled (exit 137); no container left a termination message" {
+			t.Fatalf("%s: Reason = %q, want the deciding line's", outcome, got.Reason)
+		}
+	}
+	t.Run("no deciding run", func(t *testing.T) {
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed, History: []flowv1alpha1.HistoryEntry{
+			{Phase: "調査", RunID: 1, Outcome: string(transition.OutcomeDeclared), Reason: "earlier run"},
+		}}}
+		if got := endingFor(task, flow, &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: 5}); got.Reason != "" {
+			t.Fatalf("Reason = %q, want empty", got.Reason)
+		}
+	})
+}

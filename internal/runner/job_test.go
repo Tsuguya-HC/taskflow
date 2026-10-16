@@ -1510,3 +1510,36 @@ func TestNoEndingSetsNoDecidedBy(t *testing.T) {
 		t.Fatalf("%s was set to %q for a run with no ending", EnvEndingDecidedBy, got)
 	}
 }
+
+// An empty value is still set: absence would read as "this run is not a cleanup".
+func TestEndingReasonIsSetOnTheCleanupRun(t *testing.T) {
+	for name, reason := range map[string]string{"a reason": "agent: OOMKilled (exit 137)", "no deciding run": ""} {
+		t.Run(name, func(t *testing.T) {
+			job := build(t, Input{
+				Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
+				Ending: &Ending{Meaning: "Success", Phase: "完了", Outcome: "NoAnswer", Reason: reason},
+			})
+			got, ok := endingEnv(job, EnvEndingReason)
+			if !ok || got != reason {
+				t.Fatalf("%s = %q (set: %v), want %q", EnvEndingReason, got, ok, reason)
+			}
+		})
+	}
+}
+
+func TestEndingReasonVarRefsAreEscaped(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
+		Ending: &Ending{Meaning: meaningTaskFailed, Phase: meaningTaskFailed, Reason: "see $(GITHUB_TOKEN)"},
+	})
+	if got, _ := endingEnv(job, EnvEndingReason); got != `see $$(GITHUB_TOKEN)` {
+		t.Fatalf("%s = %q, want $( escaped to $$(", EnvEndingReason, got)
+	}
+}
+
+func TestNoEndingSetsNoReason(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	if got, ok := endingEnv(job, EnvEndingReason); ok {
+		t.Fatalf("%s was set to %q for a run with no ending", EnvEndingReason, got)
+	}
+}

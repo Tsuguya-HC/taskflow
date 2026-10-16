@@ -1750,6 +1750,7 @@ func endingFor(
 		Phase:     task.Status.Phase,
 		Outcome:   endingOutcome(task, flow, run),
 		DecidedBy: endingDecidedBy(task, flow, run),
+		Reason:    endingReason(task, flow, run),
 	}
 }
 
