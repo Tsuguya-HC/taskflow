@@ -991,6 +991,50 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			}
 		})
 
+		// Catches the adopt path discarding the error of resolving the flow again
+		// for a Job whose arguments lack part of the place: the status would be
+		// recorded from a flow that did not resolve. The Job carries its label so
+		// the label resolve, which has its own guard, is not what fails.
+		It("fails the pass when the flow cannot be resolved for an adopted Job lacking part of the place", func() {
+			tk := ended()
+			job := adoptable(tk)
+			job.Annotations = map[string]string{annotationFlowLabel: fx.name}
+			job.Spec.Template.Spec.Containers[0].Args = []string{"--bucket=old-bucket"}
+			Expect(k8sClient.Create(fx.ctx, job)).To(Succeed())
+
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.APIReader = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.ControllerRevision); ok {
+						return errors.New("the apiserver blinked while resolving the place")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			_, err = fx.reconciler.ensureArchiveJob(fx.ctx, tk)
+			Expect(err).To(HaveOccurred(), "the place could not be resolved")
+			Expect(archiveStatus()).NotTo(HaveKey("location"))
+		})
+
+		// Catches the adopt path discarding the error of writing status.archive:
+		// the pass would carry on with the Job and nothing would write it again.
+		It("fails the pass when status.archive of an adopted Job cannot be written", func() {
+			tk := ended()
+			Expect(k8sClient.Create(fx.ctx, adoptable(tk))).To(Succeed())
+
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					return errors.New("the apiserver blinked while recording the place")
+				},
+			})
+			_, err = fx.reconciler.ensureArchiveJob(fx.ctx, tk)
+			Expect(err).To(HaveOccurred(), "status.archive could not be written")
+			Expect(archiveStatus()).NotTo(HaveKey("location"))
+		})
+
 		It("does not count on a series the Job's creation never primed", func() {
 			fx.makeFlow()
 			fx.name += "-run2"
