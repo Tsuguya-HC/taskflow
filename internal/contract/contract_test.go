@@ -111,3 +111,11 @@ func TestTheSeparatorIsNeverInAName(t *testing.T) {
 		t.Fatal("a name containing the separator was accepted")
 	}
 }
+
+// The env name is what a handler reads as a string; the Go symbol alone
+// cannot tell a renamed value from the original.
+func TestEnvEndingDecidedByIsTheNameHandlersRead(t *testing.T) {
+	if EnvEndingDecidedBy != "FLOW_ENDING_DECIDED_BY" {
+		t.Fatalf("EnvEndingDecidedBy = %q, want FLOW_ENDING_DECIDED_BY", EnvEndingDecidedBy)
+	}
+}

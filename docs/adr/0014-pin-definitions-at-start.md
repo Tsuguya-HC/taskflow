@@ -66,7 +66,7 @@ Job の template が run を固定するという指摘は正しいが、固定�
   決定 5（flow を毎 reconcile で読み直す）: 構造検査は残るが写しに対して走り、編集で「`next` から
   ディレクトリが消える」場合は起こらなくなる。そして**未解決**（版をまたぐ引き渡し）: この ADR が閉じる。
   決定 1・2 は残る
-- [ADR-0009](0009-finally-after-the-ending.md) 決定 6 の「3 値は dispatch 時点の flow から読む」: 写しから
+- [ADR-0009](0009-finally-after-the-ending.md) 決定 6 の「4 値は dispatch 時点の flow から読む」: 写しから
   読む。決定 7 の表の 3 行:
   - 「終端に着いた後で flow に `finally` が足された」: 結果は変わらない。写しを持つ Task には、開始の
     瞬間から当てはまる

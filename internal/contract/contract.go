@@ -157,8 +157,8 @@ const (
 	// their arguments.
 	EnvPodUID = "FLOW_POD_UID"
 
-	// EnvEnding, EnvEndingPhase and EnvEndingOutcome are the cleanup run's
-	// alone, and the only three the framework sets that describe something
+	// EnvEnding, EnvEndingPhase, EnvEndingOutcome and EnvEndingDecidedBy are
+	// the cleanup run's alone, and the only four the framework sets that describe something
 	// other than the run they are in: the ending this run follows
 	// (ADR-0009). No other run has an ending to be told about, so no other
 	// run is given them.
@@ -171,14 +171,17 @@ const (
 	// the run that reached the ending, and empty when no run did — a flow
 	// broken before anything could be started has an ending with no run behind
 	// it, and an empty value is the honest report of that rather than the last
-	// unrelated run's verdict (P8).
+	// unrelated run's verdict (P8). EnvEndingDecidedBy is the phase name of that
+	// same run, which EnvEndingPhase cannot say when several branches stopped at
+	// TaskFailed; it is empty under the same condition.
 	//
 	// They are values to read, not a control flow to obey: a handler may
 	// report differently for a Failure than for a Success, but nothing the
 	// framework does depends on which it was.
-	EnvEnding        = "FLOW_ENDING"
-	EnvEndingPhase   = "FLOW_ENDING_PHASE"
-	EnvEndingOutcome = "FLOW_ENDING_OUTCOME"
+	EnvEnding          = "FLOW_ENDING"
+	EnvEndingPhase     = "FLOW_ENDING_PHASE"
+	EnvEndingOutcome   = "FLOW_ENDING_OUTCOME"
+	EnvEndingDecidedBy = "FLOW_ENDING_DECIDED_BY"
 
 	// WorkspaceVolume is the name of the volume the controller adds to a Job
 	// when the task's flow declares a workspace, backed by that task's own

@@ -36,6 +36,8 @@ import (
 const (
 	phaseInvestigate flowv1alpha1.Phase = "調査"
 
+	meaningTaskFailed = "TaskFailed"
+
 	taskUID      = "7f2a-uid"
 	handlerName  = "sample-handler"
 	sidecarImage = "example.invalid/agent-sidecar:v0"
@@ -323,7 +325,7 @@ func TestEndingPhaseVarRefsAreEscaped(t *testing.T) {
 	phase := flowv1alpha1.Phase("報告-$(GITHUB_TOKEN)")
 	job := build(t, Input{
 		Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
-		Ending: &Ending{Meaning: "TaskFailed", Phase: phase, Outcome: "NoAnswer"},
+		Ending: &Ending{Meaning: meaningTaskFailed, Phase: phase, Outcome: "NoAnswer"},
 	})
 
 	want := `報告-$$(GITHUB_TOKEN)`
@@ -1461,5 +1463,50 @@ func TestAForkTellsPublishItMayAnswerWithMore(t *testing.T) {
 	serial := build(t, Input{Task: task(), Handler: handler(flowWorkspace), Phase: phaseInvestigate, RunID: 2, WorkspacePVC: claimName})
 	if slices.Contains(serial.Spec.Template.Spec.InitContainers[1].Args, "--"+contract.FlagMany) {
 		t.Fatal("a run that is not a fork answers with exactly one; its publish is not told otherwise")
+	}
+}
+
+func endingEnv(job *batchv1.Job, name string) (string, bool) {
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == name {
+			return e.Value, true
+		}
+	}
+	return "", false
+}
+
+// The cleanup run is told which phase's run decided the ending, even when
+// that phase is not the status name the task stopped at (完了 here), and an
+// empty value is still set: absence would read as "this run is not a cleanup".
+func TestEndingDecidedByIsSetOnTheCleanupRun(t *testing.T) {
+	for name, decidedBy := range map[string]flowv1alpha1.Phase{"a deciding run": "報告", "no deciding run": ""} {
+		t.Run(name, func(t *testing.T) {
+			job := build(t, Input{
+				Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
+				Ending: &Ending{Meaning: "Success", Phase: "完了", Outcome: "Declared", DecidedBy: decidedBy},
+			})
+			got, ok := endingEnv(job, EnvEndingDecidedBy)
+			if !ok || got != string(decidedBy) {
+				t.Fatalf("%s = %q (set: %v), want %q", EnvEndingDecidedBy, got, ok, decidedBy)
+			}
+		})
+	}
+}
+
+// The deciding phase is a name the flow's author chose, like FLOW_PHASE.
+func TestEndingDecidedByVarRefsAreEscaped(t *testing.T) {
+	job := build(t, Input{
+		Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 2,
+		Ending: &Ending{Meaning: meaningTaskFailed, Phase: meaningTaskFailed, DecidedBy: "報告-$(GITHUB_TOKEN)"},
+	})
+	if got, _ := endingEnv(job, EnvEndingDecidedBy); got != `報告-$$(GITHUB_TOKEN)` {
+		t.Fatalf("%s = %q, want $( escaped to $$(", EnvEndingDecidedBy, got)
+	}
+}
+
+func TestNoEndingSetsNoDecidedBy(t *testing.T) {
+	job := build(t, Input{Task: task(), Handler: handler(), Phase: phaseInvestigate, RunID: 1})
+	if got, ok := endingEnv(job, EnvEndingDecidedBy); ok {
+		t.Fatalf("%s was set to %q for a run with no ending", EnvEndingDecidedBy, got)
 	}
 }

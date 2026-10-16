@@ -234,6 +234,15 @@ func endingOutcome(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, cle
 	return ""
 }
 
+// endingDecidedBy is the phase of the run endingOutcome speaks of, and empty
+// when no run decided the ending.
+func endingDecidedBy(task *flowv1alpha1.Task, flow *flowv1alpha1.TaskFlowSpec, cleanup *flowv1alpha1.RunRef) flowv1alpha1.Phase {
+	if i := decidingLine(task, flow, cleanup); i >= 0 {
+		return task.Status.History[i].Phase
+	}
+	return ""
+}
+
 // unsweptRuns is the numbers of every run prepare must not sweep away as
 // though it were debris: a fork's other branches still in flight besides
 // run, and every run history records as Cancelled. A cancelled branch's Job
