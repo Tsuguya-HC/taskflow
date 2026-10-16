@@ -157,8 +157,8 @@ const (
 	// their arguments.
 	EnvPodUID = "FLOW_POD_UID"
 
-	// EnvEnding, EnvEndingPhase, EnvEndingOutcome and EnvEndingDecidedBy are
-	// the cleanup run's alone, and the only four the framework sets that describe something
+	// EnvEnding, EnvEndingPhase, EnvEndingOutcome, EnvEndingDecidedBy and EnvEndingReason are
+	// the cleanup run's alone, and the only five the framework sets that describe something
 	// other than the run they are in: the ending this run follows
 	// (ADR-0009). No other run has an ending to be told about, so no other
 	// run is given them.

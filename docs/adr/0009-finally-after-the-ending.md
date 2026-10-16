@@ -77,7 +77,7 @@
    しなかった経路では末尾が無関係な前の run の verdict になっており、それは「この終端の outcome」
    ではない
 
-   **4 値は dispatch 時点の flow から読む**（Job の template や image と同じ扱い）。決定 2 が
+   **5 値は dispatch 時点の flow から読む**（Job の template や image と同じ扱い）。決定 2 が
    封印すると言っているのは終端に着いた瞬間に**既に書かれたもの**（`status.phase`、Ready の
    reason、Event、metric の sample）で、その後の flow の編集がそれらを書き換えることはない。
    TTL の選択も同じ理由の裏返しで、片付けが決着した時点の flow を再度読むのではなく、終端到達時に
