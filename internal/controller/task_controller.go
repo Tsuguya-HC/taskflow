@@ -1746,9 +1746,10 @@ func endingFor(
 		return nil
 	}
 	return &runner.Ending{
-		Meaning: string(transition.EndingOf(flow, task.Status.Phase)),
-		Phase:   task.Status.Phase,
-		Outcome: endingOutcome(task, flow, run),
+		Meaning:   string(transition.EndingOf(flow, task.Status.Phase)),
+		Phase:     task.Status.Phase,
+		Outcome:   endingOutcome(task, flow, run),
+		DecidedBy: endingDecidedBy(task, flow, run),
 	}
 }
 

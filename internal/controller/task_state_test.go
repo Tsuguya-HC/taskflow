@@ -571,7 +571,7 @@ var _ = Describe("the shelf a run nothing started leaves behind", func() {
 			f.Spec.Workspace = &flowv1alpha1.FlowWorkspace{}
 			f.Spec.Bindings[phaseReport] = flowv1alpha1.PhaseBinding{
 				Handler: fx.name + "-job",
-				Next:    map[flowv1alpha1.Phase]string{phaseDone: "sent"},
+				Next:    map[flowv1alpha1.Phase]string{phaseDone: dirSent},
 			}
 		})
 		fx.makeHandler(stateRunner(timeout))

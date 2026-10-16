@@ -30,7 +30,7 @@ import (
 func TestLedByInASerialFlow(t *testing.T) {
 	flow := &flowv1alpha1.TaskFlowSpec{Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
 		"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"報告": "ok", "調査": nextMore}},
-		"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"おわり": "sent"}},
+		"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"おわり": dirSent}},
 	}}
 	history := []flowv1alpha1.HistoryEntry{
 		{Phase: "調査", RunID: 1, Directory: nextMore, Outcome: string(transition.OutcomeRework)},
@@ -207,4 +207,64 @@ func TestDecidingLineNeverCountsACancelledLineEvenWhenTheForkIsGone(t *testing.T
 	if got := endingOutcome(task, flow, cleanup); got != "" {
 		t.Fatalf("endingOutcome = %q, want empty", got)
 	}
+}
+
+// FLOW_ENDING_DECIDED_BY is the phase of the line decidingLine points at, not
+// the status name the task stopped at: 完了 is a declared terminal no history
+// line carries, and TaskFailed is the same for every branch of a fork.
+func TestEndingForNamesTheDecidingRunsPhase(t *testing.T) {
+	cleanup := func(id int32) *flowv1alpha1.RunRef {
+		return &flowv1alpha1.RunRef{Phase: flowv1alpha1.PhaseFinally, RunID: id}
+	}
+	t.Run("serial: the run that stopped the task", func(t *testing.T) {
+		flow := &flowv1alpha1.TaskFlowSpec{Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+			"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"報告": "ok"}},
+			"報告": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"完了": dirSent}},
+		}}
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: "完了", History: []flowv1alpha1.HistoryEntry{
+			{Phase: "調査", RunID: 1, Directory: "ok", Outcome: string(transition.OutcomeDeclared)},
+			{Phase: "報告", RunID: 2, Directory: dirSent, Outcome: string(transition.OutcomeDeclared)},
+		}}}
+		got := endingFor(task, flow, cleanup(3))
+		if got.DecidedBy != "報告" {
+			t.Fatalf("DecidedBy = %q, want 報告", got.DecidedBy)
+		}
+	})
+	t.Run("parallel: the first branch by phase name when several reached TaskFailed", func(t *testing.T) {
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed, History: []flowv1alpha1.HistoryEntry{
+			{Phase: phasePick, RunID: 1, Directory: string(phaseSecurity), Outcome: string(transition.OutcomeDeclared)},
+			{Phase: phaseSecurity, RunID: 3, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
+			{Phase: phaseLogic, RunID: 2, Directory: answerStuck, Outcome: string(transition.OutcomeDeclined)},
+		}}}
+		got := endingFor(task, reviewFork(), cleanup(4))
+		if got.DecidedBy != phaseLogic {
+			t.Fatalf("DecidedBy = %q, want %q (the byte-first branch, recorded last)", got.DecidedBy, phaseLogic)
+		}
+		if got.Phase != flowv1alpha1.PhaseTaskFailed {
+			t.Fatalf("Phase = %q, want it unchanged", got.Phase)
+		}
+	})
+	t.Run("no deciding run: empty history", func(t *testing.T) {
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed}}
+		if got := endingFor(task, reviewFork(), cleanup(1)); got.DecidedBy != "" {
+			t.Fatalf("DecidedBy = %q, want empty", got.DecidedBy)
+		}
+	})
+	t.Run("no deciding run: serial RunID does not match", func(t *testing.T) {
+		flow := &flowv1alpha1.TaskFlowSpec{Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+			"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"報告": "ok"}},
+		}}
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed, History: []flowv1alpha1.HistoryEntry{
+			{Phase: "調査", RunID: 1, Directory: "ok", Outcome: string(transition.OutcomeDeclared)},
+		}}}
+		if got := endingFor(task, flow, cleanup(3)); got.DecidedBy != "" {
+			t.Fatalf("DecidedBy = %q, want empty", got.DecidedBy)
+		}
+	})
+	t.Run("not a cleanup run", func(t *testing.T) {
+		task := &flowv1alpha1.Task{}
+		if got := endingFor(task, reviewFork(), &flowv1alpha1.RunRef{Phase: phasePick, RunID: 1}); got != nil {
+			t.Fatalf("endingFor = %+v, want nil", got)
+		}
+	})
 }
