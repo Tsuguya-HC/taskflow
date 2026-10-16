@@ -235,8 +235,8 @@ type InputEntry struct {
 
 // Ending is what the cleanup run is told about the ending it follows: what
 // stopping there meant, where the task stopped, and how the run that got it
-// there was accounted for. Three values, injected as environment variables
-// like the rest, and not a decision the run is asked to make — the ending is
+// there was accounted for, and which phase's run that was. Four values,
+// injected as environment variables like the rest, and not a decision the run is asked to make — the ending is
 // already decided (ADR-0009 決定2).
 type Ending struct {
 	// Meaning is the ending's severity as the framework reports it: the

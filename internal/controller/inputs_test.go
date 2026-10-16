@@ -230,6 +230,18 @@ func TestEndingForNamesTheDecidingRunsPhase(t *testing.T) {
 			t.Fatalf("DecidedBy = %q, want 報告", got.DecidedBy)
 		}
 	})
+	t.Run("serial: the only line in history is the one that decided", func(t *testing.T) {
+		flow := &flowv1alpha1.TaskFlowSpec{Bindings: map[flowv1alpha1.Phase]flowv1alpha1.PhaseBinding{
+			"調査": {Handler: "h", Next: map[flowv1alpha1.Phase]string{"完了": dirSent}},
+		}}
+		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: "完了", History: []flowv1alpha1.HistoryEntry{
+			{Phase: "調査", RunID: 1, Directory: dirSent, Outcome: string(transition.OutcomeDeclared)},
+		}}}
+		got := endingFor(task, flow, cleanup(2))
+		if got.DecidedBy != "調査" {
+			t.Fatalf("DecidedBy = %q, want 調査 (history index 0)", got.DecidedBy)
+		}
+	})
 	t.Run("parallel: the first branch by phase name when several reached TaskFailed", func(t *testing.T) {
 		task := &flowv1alpha1.Task{Status: flowv1alpha1.TaskStatus{Phase: flowv1alpha1.PhaseTaskFailed, History: []flowv1alpha1.HistoryEntry{
 			{Phase: phasePick, RunID: 1, Directory: string(phaseSecurity), Outcome: string(transition.OutcomeDeclared)},
