@@ -497,6 +497,25 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			}
 		})
 
+		// The pod is gone for good (garbage collected), not late: the Task
+		// must not be held past its date forever.
+		It("is given up on as UploadFailed once the pod has been missing long enough", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown), "a pod may still be on its way")
+
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+
+			c := archived()
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			Expect(c.Reason).To(Equal("UploadFailed"))
+		})
+
 		It("is not recorded as uploaded when its termination message is not a result", func() {
 			ended()
 			fx.reconcile()
