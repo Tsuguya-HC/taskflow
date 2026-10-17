@@ -112,6 +112,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		Secure:       cfg.Secure,
 		Region:       cfg.Region,
 		BucketLookup: minio.BucketLookupPath,
+		// A failed PUT must reach the exit code and termination message before
+		// the pod's grace period ends; the default 10 retries back off for seconds.
+		MaxRetries: 1,
 	})
 	if err != nil {
 		return Result{}, err
