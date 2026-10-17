@@ -767,6 +767,24 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Entry("the Job failed", false, "", "Failed"),
 		)
 
+		// The give-up after the read grace is its own branch: its outcome and
+		// its Event are not covered by the Job-failed or bad-message paths.
+		It("counts and announces a Job whose pod stayed unreadable past the grace", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+			before, _ := counted(fx.name, "Failed")
+
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+
+			Expect(total(fx.name, "Failed")).To(Equal(before+1), "Failed rose by one")
+			Expect(total(fx.name, "Uploaded")).To(BeZero())
+			Expect(total(fx.name, "Withheld")).To(BeZero())
+			Expect(fx.announced()).To(ContainElement(And(HavePrefix("Warning"), ContainSubstring(reasonUploadFail))))
+		})
+
 		// The counter is raised on the series the Job's creation primed. A
 		// settle-time read error or a flow that appeared while the Job ran
 		// must not move the count onto a series that was never primed.
