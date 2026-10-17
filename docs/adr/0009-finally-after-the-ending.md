@@ -88,7 +88,7 @@
    |---|---|
    | `TaskFailed` に着いた（NoAnswer / Declined / RunLimitReached / Structural / インフラ再試行の使い切り、`next` で宣言された辺のどれでも） | **走る**。終端の意味 4 値のうち finally の一番の動機 |
    | flow 宣言終端（`terminals` の `Success` / `Failure` / `Undeclared`）に着いた | **走る**。終端の意味は変えない（決定 2） |
-   | Task が削除された（TTL 前の手動削除、走行中の削除） | 走らない。ownerReference で Job も消える。外に残った物は sweep の仕事（§10） |
+   | Task が削除された（TTL 前の手動削除、走行中の削除） | 走らない。ownerReference で Job も消える。外に残った物は sweep の仕事（§10。sweep は未実装） |
    | flow が読めずに `TaskFailed` に着いた | 走らない。finally を読む先が無い |
    | 終端に着いた後で flow に `finally` が足された | 走らない。着き済みの Task は flow の編集を受けない（`expiresAt` の backfill と同じ） |
    | finally の handler が解決できない（不在、template が壊れている） | 走れない。決定 4 の失敗として記録。`status.phase` は `TaskFailed` に**しない** |
@@ -141,7 +141,7 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
 **やらなかったこと**:
 
 - **`metadata.finalizers` で削除時に走らせる**（決定 8）。Flux / cluster-api / Argo Workflows は
-  finalizer に期限と opt-out を自前で足して固着を避けている。ここでは削除時の後始末を持たず、sweep に任せる
+  finalizer に期限と opt-out を自前で足して固着を避けている。ここでは削除時の後始末を持たず、sweep に任せる（§10。sweep は未実装）
 - **finally を複数**。順序・finally 間の参照・集約の問題が全部消える
 - **finally に `when`**。P9
 - **finally 失敗で `status.phase` を `TaskFailed` に**。`TaskFailed` が flow の破損を表す場合もあるが、片付けの失敗ではない
