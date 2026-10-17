@@ -497,6 +497,25 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			}
 		})
 
+		// The pod is gone for good (garbage collected), not late: the Task
+		// must not be held past its date forever.
+		It("is given up on as UploadFailed once the pod has been missing long enough", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown), "a pod may still be on its way")
+
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+
+			c := archived()
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			Expect(c.Reason).To(Equal("UploadFailed"))
+		})
+
 		It("is not recorded as uploaded when its termination message is not a result", func() {
 			ended()
 			fx.reconcile()
@@ -747,6 +766,24 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Entry("some withheld", true, `{"uploaded":2,"withheld":4}`, "Withheld"),
 			Entry("the Job failed", false, "", "Failed"),
 		)
+
+		// The give-up after the read grace is its own branch: its outcome and
+		// its Event are not covered by the Job-failed or bad-message paths.
+		It("counts and announces a Job whose pod stayed unreadable past the grace", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+			before, _ := counted(fx.name, "Failed")
+
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+
+			Expect(total(fx.name, "Failed")).To(Equal(before+1), "Failed rose by one")
+			Expect(total(fx.name, "Uploaded")).To(BeZero())
+			Expect(total(fx.name, "Withheld")).To(BeZero())
+			Expect(fx.announced()).To(ContainElement(And(HavePrefix("Warning"), ContainSubstring(reasonUploadFail))))
+		})
 
 		// The counter is raised on the series the Job's creation primed. A
 		// settle-time read error or a flow that appeared while the Job ran

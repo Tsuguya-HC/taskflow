@@ -54,6 +54,7 @@ const (
 	archiveContainer          = "archive"
 	archiveUnresolved         = "_unresolved"
 	archiveRecheck            = 30 * time.Second
+	archiveReadGrace          = 10 * time.Minute
 	annotationFlowLabel       = "flow.tgy.io/archive-flow-label"
 	archiveUID          int64 = 65532
 
@@ -188,9 +189,21 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		}
 	}
 	// Nothing to read yet is not an upload of nothing: the Pod may not have
-	// reached the cache, and the Task stays held until it has.
+	// reached the cache, and the Task stays held until it has. A Pod that is
+	// still unreadable after the grace is gone for good, and holding on would
+	// keep the Task from ever being deleted.
 	if looked == 0 {
-		return false, nil
+		if r.now().Sub(archiveJobEnded(job)) < archiveReadGrace {
+			return false, nil
+		}
+		msg := "the archive Job's result could not be read: its Pod is gone"
+		if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
+			return false, err
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, archiveUploadFailed, actionArchiving, "%s", msg)
+		}
+		return true, nil
 	}
 	if res.Withheld > 0 {
 		return true, r.settleArchived(ctx, task, job, metav1.ConditionTrue, archiveWithheld,
@@ -198,6 +211,20 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 	}
 	return true, r.settleArchived(ctx, task, job, metav1.ConditionTrue, archiveUploaded,
 		fmt.Sprintf("%d uploaded", res.Uploaded), metrics.ArchiveUploaded)
+}
+
+// archiveJobEnded is when the Job completed, falling back to when its
+// Complete condition last changed, then to its creation.
+func archiveJobEnded(job *batchv1.Job) time.Time {
+	if t := job.Status.CompletionTime; t != nil {
+		return t.Time
+	}
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue && !c.LastTransitionTime.IsZero() {
+			return c.LastTransitionTime.Time
+		}
+	}
+	return job.CreationTimestamp.Time
 }
 
 // archiveJobLabel is the flow label of the series the Job's outcome is counted
