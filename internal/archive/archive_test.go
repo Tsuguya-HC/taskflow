@@ -364,3 +364,28 @@ func TestRunWithholdsNonRegularTaskJSON(t *testing.T) {
 		t.Fatal("Run did not return for a FIFO task.json")
 	}
 }
+
+// A failing PUT must surface promptly: the failure has to reach the
+// termination log within the Pod's grace period, so the client's own retry
+// backoff may not stretch it. Measured before the fix: 7.6-8.2s for three
+// PUTs against a store that answers 500 to everything.
+func TestRunPutFailureIsNotDelayedByRetries(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "task.json"), `{}`)
+	write(t, filepath.Join(dir, "results/a.txt"), "a")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := newFakeS3(t).cfg(dir)
+	cfg.Endpoint = strings.TrimPrefix(srv.URL, "http://")
+
+	start := time.Now()
+	if _, err := archive.Run(context.Background(), cfg); err == nil {
+		t.Fatal("PUT failure returned nil")
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("Run took %s on failing PUTs, want under 2s", took)
+	}
+}
