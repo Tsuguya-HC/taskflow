@@ -138,7 +138,9 @@ func (r *TaskReconciler) archiveHeld(ctx context.Context, task *flowv1alpha1.Tas
 }
 
 // driveArchive makes the archive Job for a Task that has none yet, and records
-// how the Job went once it has ended. It does nothing for a settled Task.
+// how the Job went once it has ended. It does nothing for a settled Task. With
+// archiving switched off it makes no Job: it only carries on a Job of the
+// Task's own that already exists, and does nothing when there is none.
 // wrote says the condition was changed, which is a reconcile of its own: the
 // Task is deleted on a later pass, not in the one that records the outcome.
 func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Task) (wrote bool, err error) {

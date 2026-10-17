@@ -584,6 +584,30 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		})
 	})
 
+	Describe("the archive switched off with its Job gone entirely", func() {
+		// Catches archiveHeld holding on the condition alone, and driveArchive
+		// beginning a send when switched off and no Job exists.
+		It("deletes the task instead of holding it or starting a new send", func() {
+			ended()
+			fx.reconcile()
+			Expect(archiveJobs()).To(Equal(1))
+			Expect(k8sClient.Delete(fx.ctx, archiveJob(), client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+			Eventually(func() int { return archiveJobs() }).Should(Equal(0))
+
+			fx.reconciler.Archive = ArchiveConfig{}
+			clock = time.Now().AddDate(10, 0, 0)
+			for range 3 {
+				if gone() {
+					break
+				}
+				fx.reconcile()
+			}
+
+			Expect(archiveJobs()).To(Equal(0), "switched off, nothing may begin")
+			Expect(gone()).To(BeTrue(), "nothing to wait for once the Job itself is gone")
+		})
+	})
+
 	Describe("a restart with the archive switched off and the Job unreadable or not ours", func() {
 		// Catches archiveHeld swallowing the Get error (the task would be
 		// deleted with a send possibly in flight) or ignoring the owner check
