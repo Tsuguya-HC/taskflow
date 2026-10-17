@@ -951,6 +951,9 @@ func TestScanTermLog(t *testing.T) {
 		// next token the path.
 		"value that looks like the flag name": {
 			[]string{bucketFlag, termLogName, "--not-a-real-flag=x"}, defaultTermLog},
+		// A dashed spelling of our flag name in value position is still a value.
+		"dashed value swallowed by preceding value flag": {
+			[]string{bucketFlag, termLogFlag, "/p"}, defaultTermLog},
 		// A trailing flag with no value must not index past the end.
 		"trailing flag without value": {[]string{taskJSONFlag, "t", termLogFlag}, defaultTermLog},
 		"trailing single-dash flag":   {[]string{termLogShort}, defaultTermLog},
