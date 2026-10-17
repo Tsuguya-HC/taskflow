@@ -1686,7 +1686,12 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 | K8s 内（PVC / ConfigMap / 定義の写し（ControllerRevision）） | **ownerReferences** で Task 所有 → カスケード（写しは Task と一緒に消える。数は Task と同じで、TTL が抑える） |
 | 並列の枝（`Cancelled`）の Job | **`reapCancelledJobs`**（history の `Cancelled` の行を根拠に、Task の TTL を待たずに消す。終わった Job は残す。ADR-0013 決定4） |
 | Task 自身 | **TTL**（succeeded 1h / failed 168h）※ etcd 保護のため必須 |
-| K8s の外（S3 prefix / git ブランチ / レジストリのタグ） | **`task-uid` + 定期 sweep**（1 本に統合） |
+| K8s の外（S3 prefix / git ブランチ / レジストリのタグ） | **`task-uid` + 定期 sweep**（1 本に統合）※未実装 |
+
+> **スケッチ（未実装）**: K8s の外を `task-uid` で巡回して消す sweep はまだ無い。この表の行と、以下
+> 「S3 lifecycle は使わない」・§10 の finalizer の節・§11 の却下表・ADR-0009 が言う「sweep」は、この
+> 未実装の機構を指す（並列の枝の run を掃除するものとは別物）。実装されるまで、Task の削除や
+> finalizer の失敗で外に残った物を拾う手段は無い。
 
 > **スケッチ（未実装）**: 終わった Task の保存物（archive）は Task を跨いで残す層で、sweep の対象外。保存期間は
 > bucket の lifecycle に任せる（[ADR-0015](adr/0015-archive-ended-tasks.md)）。Task が既に無いので
@@ -1694,6 +1699,8 @@ implement→review のピンポンは `.agent/` の中で完結させ、人間�
 > 使わない」は Task の成果物についての規則で、この層には及ばない。
 
 ### S3 lifecycle は使わない
+
+> **スケッチ（未実装）**: この節が前提にする sweep はまだ無い。決定は「掃除を 1 本に保つ」ことで、その 1 本が未実装。
 
 **掃除機構を 1 本に保つため。** K8s の外に出る成果物は S3 だけではなく、git ブランチや
 レジストリのタグも `task-uid` の sweep で消す必要がある。lifecycle を併用すると、同じ
@@ -1736,7 +1743,7 @@ archive の設定が無く、かつ過去に始まって決着していない送
   flow の TTL から一度だけ焼く（backfill）。この reconcile 時点でも flow が無ければ焼かずに残り、上と同じく
   flow が後から現れるのを待つ
 
-- finalizer は **best-effort + デッドライン**。N 分試して駄目なら外し、漏れは sweep に拾わせる。
+- **スケッチ（未実装）**: finalizer は **best-effort + デッドライン**。N 分試して駄目なら外し、漏れは sweep に拾わせる。
   掃除の正しさを finalizer に賭けると、外部 API が 500 を返しているだけで object が
   永久に Terminating で刺さる
 
