@@ -141,7 +141,7 @@ finally の中で終端の意味を読んで振る舞いを変える（それは
 **やらなかったこと**:
 
 - **`metadata.finalizers` で削除時に走らせる**（決定 8）。Flux / cluster-api / Argo Workflows は
-  finalizer に期限と opt-out を自前で足して固着を避けている。ここでは削除時の後始末を持たず、sweep に任せる
+  finalizer に期限と opt-out を自前で足して固着を避けている。ここでは削除時の後始末を持たず、sweep に任せる（§10。sweep は未実装）
 - **finally を複数**。順序・finally 間の参照・集約の問題が全部消える
 - **finally に `when`**。P9
 - **finally 失敗で `status.phase` を `TaskFailed` に**。`TaskFailed` が flow の破損を表す場合もあるが、片付けの失敗ではない
