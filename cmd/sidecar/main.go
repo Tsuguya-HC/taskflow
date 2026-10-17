@@ -344,7 +344,10 @@ func runArchive(args []string) error {
 	return err
 }
 
-const defaultTermLog = "/dev/termination-log"
+const (
+	defaultTermLog = "/dev/termination-log"
+	termLogName    = "termination-log"
+)
 
 // scanTermLog finds --termination-log without flag's all-or-nothing parse.
 // A token that is another flag's value is skipped, so a value spelled like
@@ -356,20 +359,23 @@ func scanTermLog(args []string) string {
 		b, ok := f.Value.(interface{ IsBoolFlag() bool })
 		takesValue[f.Name] = !ok || !b.IsBoolFlag()
 	})
-	delete(takesValue, "termination-log") // the loop below reads its value itself
+	delete(takesValue, termLogName) // the loop below reads its value itself
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if takesValue[strings.TrimLeft(a, "-")] && !strings.Contains(a, "=") {
-			i++
-			continue
-		}
 		if a == "--" {
 			break
 		}
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
 		a = strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
-		if v, ok := strings.CutPrefix(a, "termination-log="); ok {
+		if takesValue[a] {
+			i++
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, termLogName+"="); ok {
 			path = v
-		} else if a == "termination-log" && i+1 < len(args) {
+		} else if a == termLogName && i+1 < len(args) {
 			path = args[i+1]
 			i++
 		}

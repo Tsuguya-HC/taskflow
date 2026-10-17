@@ -825,6 +825,7 @@ const (
 	termLogShort = "-termination-log"
 	taskJSONFlag = "--task-json"
 	bucketFlag   = "--bucket"
+	secureFlag   = "--secure"
 )
 
 // archiveFlags is a complete archive invocation against srv; the tests below
@@ -949,7 +950,10 @@ func TestScanTermLog(t *testing.T) {
 		// Another flag's value spelled like our flag name must not make the
 		// next token the path.
 		"value that looks like the flag name": {
-			[]string{bucketFlag, "termination-log", "--not-a-real-flag=x"}, defaultTermLog},
+			[]string{bucketFlag, termLogName, "--not-a-real-flag=x"}, defaultTermLog},
+		// A dashed spelling of our flag name in value position is still a value.
+		"dashed value swallowed by preceding value flag": {
+			[]string{bucketFlag, termLogFlag, "/p"}, defaultTermLog},
 		// A trailing flag with no value must not index past the end.
 		"trailing flag without value": {[]string{taskJSONFlag, "t", termLogFlag}, defaultTermLog},
 		"trailing single-dash flag":   {[]string{termLogShort}, defaultTermLog},
@@ -960,7 +964,12 @@ func TestScanTermLog(t *testing.T) {
 		// An `=` form carries its own value, so the next token is still a flag name.
 		"equals form does not swallow next": {[]string{"--bucket=x", termLogFlag, "/p"}, "/p"},
 		// A bool flag takes no value, so the next token is still a flag.
-		"bare bool flag does not swallow next": {[]string{"--secure", termLogFlag, "/p"}, "/p"},
+		"bare bool flag does not swallow next": {[]string{secureFlag, termLogFlag, "/p"}, "/p"},
+		// A token without a dash is not a flag name, whatever follows the stripped text.
+		"bare token after bool flag": {
+			[]string{"--badflag", secureFlag, termLogName, "/victim"}, defaultTermLog},
+		"bare token keeps explicit path":       {[]string{termLogFlag, "/p", secureFlag, termLogName, "/victim"}, "/p"},
+		"bare token with equals is not a flag": {[]string{secureFlag, termLogName + "=/victim"}, defaultTermLog},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := scanTermLog(tc.args); got != tc.want {
