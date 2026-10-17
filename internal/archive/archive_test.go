@@ -284,13 +284,13 @@ func TestRunMissingTaskJSONFails(t *testing.T) {
 
 // Catches ignoring the read error of a task.json that exists but cannot be read.
 func TestRunUnreadableTaskJSONFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: chmod 000 does not make a file unreadable for root")
+	}
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "task.json"), `{}`)
 	if err := os.Chmod(filepath.Join(dir, "task.json"), 0); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.ReadFile(filepath.Join(dir, "task.json")); err == nil {
-		t.Skip("permissions are not enforced (running as root)")
 	}
 	f := newFakeS3(t)
 	cfg := f.cfg(dir)
@@ -306,6 +306,9 @@ func TestRunUnreadableTaskJSONFails(t *testing.T) {
 // Catches ignoring the walk error: a directory that cannot be listed must be
 // recorded, not silently skipped.
 func TestRunWithholdsUnreadableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: chmod 000 does not make a directory unreadable for root")
+	}
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "task.json"), `{}`)
 	write(t, filepath.Join(dir, "results/locked/a.txt"), "a")
@@ -314,9 +317,6 @@ func TestRunWithholdsUnreadableDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	if _, err := os.ReadDir(locked); err == nil {
-		t.Skip("directory permissions are not enforced for this user")
-	}
 	f := newFakeS3(t)
 	if _, err := archive.Run(context.Background(), f.cfg(dir)); err != nil {
 		t.Fatal(err)
