@@ -116,12 +116,14 @@ func archiveSettled(task *flowv1alpha1.Task) bool {
 // archiveHeld reports whether the Task must outlive its date for the upload's
 // sake: it is switched on and not settled, or it was begun and never settled,
 // which a restart with the switch off must not turn into a deletion. Begun
-// includes a Job made before the condition could be written.
+// means its Job exists, which includes one made before the condition could be
+// written. With the switch off the hold lasts only as long as the Job does, and
+// driveArchive still runs for it so that a Pod that is gone for good settles.
 func (r *TaskReconciler) archiveHeld(ctx context.Context, task *flowv1alpha1.Task) (bool, error) {
 	if archiveSettled(task) {
 		return false, nil
 	}
-	if r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
+	if r.Archive.Enabled() {
 		return true, nil
 	}
 	var job batchv1.Job
@@ -142,6 +144,17 @@ func (r *TaskReconciler) archiveHeld(ctx context.Context, task *flowv1alpha1.Tas
 func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Task) (wrote bool, err error) {
 	if archiveSettled(task) {
 		return false, nil
+	}
+	if !r.Archive.Enabled() {
+		// Switched off: finish what was begun, never begin.
+		var existing batchv1.Job
+		err := r.Get(ctx, types.NamespacedName{Name: archiveJobName(task.Name), Namespace: task.Namespace}, &existing)
+		if err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		if !metav1.IsControlledBy(&existing, task) {
+			return false, nil
+		}
 	}
 	job, err := r.ensureArchiveJob(ctx, task)
 	if err != nil {

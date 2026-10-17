@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -121,7 +122,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// only path such a task reaches on every later reconcile until then.
 	if task.Status.ExpiresAt != nil {
 		remaining := task.Status.ExpiresAt.Sub(r.now())
-		if r.Archive.Enabled() {
+		if r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
 			wrote, err := r.driveArchive(ctx, &task)
 			if err != nil {
 				return ctrl.Result{}, err

@@ -558,6 +558,32 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		})
 	})
 
+	Describe("the archive switched off while the pod is gone for good", func() {
+		// Catches archiveHeld keeping an Unknown condition for ever once
+		// driveArchive, the only path that gives up on it, is no longer called.
+		It("does not hold the task for ever", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+
+			fx.reconciler.Archive = ArchiveConfig{}
+			clock = time.Now().AddDate(10, 0, 0)
+			for range 3 {
+				if gone() {
+					break
+				}
+				fx.reconcile()
+			}
+
+			if !gone() {
+				Expect(archived().Status).NotTo(Equal(metav1.ConditionUnknown), "an upload nobody can finish must not hold the task")
+			}
+		})
+	})
+
 	Describe("a restart with the archive switched off and the Job unreadable or not ours", func() {
 		// Catches archiveHeld swallowing the Get error (the task would be
 		// deleted with a send possibly in flight) or ignoring the owner check
