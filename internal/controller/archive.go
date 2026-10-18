@@ -114,14 +114,15 @@ func archiveSettled(task *flowv1alpha1.Task) bool {
 }
 
 // archiveHeld reports whether the Task must outlive its date for the upload's
-// sake: it is switched on and not settled, or it was begun and never settled,
-// which a restart with the switch off must not turn into a deletion. Begun
-// includes a Job made before the condition could be written.
+// sake: it is switched on and not settled, or its Job is still there to be
+// followed, which a restart with the switch off must not turn into a deletion.
+// With the switch off a Job that is gone, or not ours, settles nothing: holding
+// the Task for it would keep it from ever being deleted.
 func (r *TaskReconciler) archiveHeld(ctx context.Context, task *flowv1alpha1.Task) (bool, error) {
 	if archiveSettled(task) {
 		return false, nil
 	}
-	if r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
+	if r.Archive.Enabled() {
 		return true, nil
 	}
 	var job batchv1.Job
@@ -143,6 +144,25 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 	if archiveSettled(task) {
 		return false, nil
 	}
+	if !r.Archive.Enabled() {
+		// Switched off: only a Job already ours is followed to its end. Making
+		// one with no destination configured would be sending to nowhere.
+		var existing batchv1.Job
+		err := r.Get(ctx, types.NamespacedName{Name: archiveJobName(task.Name), Namespace: task.Namespace}, &existing)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, err
+		}
+		if apierrors.IsNotFound(err) || !metav1.IsControlledBy(&existing, task) {
+			if meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
+				// The upload was begun and its Job is gone or not ours, so
+				// nothing will ever settle it; say so rather than delete the
+				// Task still Unknown.
+				msg := "the archive Job is gone before the upload settled"
+				return true, r.failArchived(ctx, task, &batchv1.Job{}, msg)
+			}
+			return false, nil
+		}
+	}
 	job, err := r.ensureArchiveJob(ctx, task)
 	if err != nil {
 		return false, err
@@ -156,13 +176,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		return true, r.setArchived(ctx, task, metav1.ConditionUnknown, archiveUploading, "the record is being sent")
 	case failure != "":
 		msg := fmt.Sprintf("the archive Job failed: %s", failure)
-		if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
-			return false, err
-		}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, archiveUploadFailed, actionArchiving, "%s", msg)
-		}
-		return true, nil
+		return true, r.failArchived(ctx, task, job, msg)
 	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(job.Namespace),
@@ -177,13 +191,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 				looked++
 				if err := json.Unmarshal([]byte(t.Message), &res); err != nil {
 					msg := fmt.Sprintf("the archive Job's result could not be read: %v", err)
-					if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
-						return false, err
-					}
-					if r.Recorder != nil {
-						r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, archiveUploadFailed, actionArchiving, "%s", msg)
-					}
-					return true, nil
+					return true, r.failArchived(ctx, task, job, msg)
 				}
 			}
 		}
@@ -197,13 +205,7 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 			return false, nil
 		}
 		msg := "the archive Job's result could not be read: its Pod is gone"
-		if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
-			return false, err
-		}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, archiveUploadFailed, actionArchiving, "%s", msg)
-		}
-		return true, nil
+		return true, r.failArchived(ctx, task, job, msg)
 	}
 	if res.Withheld > 0 {
 		return true, r.settleArchived(ctx, task, job, metav1.ConditionTrue, archiveWithheld,
@@ -211,6 +213,17 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 	}
 	return true, r.settleArchived(ctx, task, job, metav1.ConditionTrue, archiveUploaded,
 		fmt.Sprintf("%d uploaded", res.Uploaded), metrics.ArchiveUploaded)
+}
+
+// failArchived settles the upload as failed and says so.
+func (r *TaskReconciler) failArchived(ctx context.Context, task *flowv1alpha1.Task, job *batchv1.Job, msg string) error {
+	if err := r.settleArchived(ctx, task, job, metav1.ConditionFalse, archiveUploadFailed, msg, metrics.ArchiveFailed); err != nil {
+		return err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(task, nil, corev1.EventTypeWarning, archiveUploadFailed, actionArchiving, "%s", msg)
+	}
+	return nil
 }
 
 // archiveJobEnded is when the Job completed, falling back to when its

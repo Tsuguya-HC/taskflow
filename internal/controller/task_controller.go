@@ -121,14 +121,12 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// only path such a task reaches on every later reconcile until then.
 	if task.Status.ExpiresAt != nil {
 		remaining := task.Status.ExpiresAt.Sub(r.now())
-		if r.Archive.Enabled() {
-			wrote, err := r.driveArchive(ctx, &task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if wrote {
-				return ctrl.Result{Requeue: true}, nil
-			}
+		wrote, err := r.driveArchive(ctx, &task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if wrote {
+			return ctrl.Result{Requeue: true}, nil
 		}
 		if remaining > 0 {
 			if err := r.reapCancelledJobs(ctx, &task); err != nil {
