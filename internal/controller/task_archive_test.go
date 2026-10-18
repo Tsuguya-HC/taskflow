@@ -611,6 +611,27 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(gone()).To(BeTrue(), "the Job is gone; nothing will ever settle this upload")
 		})
 
+		// #280: a task must not be deleted with Archived still Unknown; the
+		// vanished Job's upload is settled as failed and announced first.
+		It("settles the upload as failed before deleting a task whose unsettled Job has vanished", func() {
+			ended()
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+			Expect(k8sClient.Delete(fx.ctx, archiveJob(), client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+			Eventually(archiveJobs).Should(BeZero())
+
+			fx.reconciler.Archive = ArchiveConfig{}
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+			fx.reconcile()
+			fx.reconcile()
+
+			Expect(gone()).To(BeTrue())
+			Expect(fx.announced()).To(ContainElement(And(HavePrefix("Warning"), ContainSubstring(reasonUploadFail))),
+				"deletion must follow a decided outcome, announced")
+		})
+
 		// Catches the switched-off guard in driveArchive being dropped: a Job
 		// would be made with no destination configured.
 		It("makes no Job when the archive is off and none exists", func() {
