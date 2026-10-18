@@ -15,7 +15,9 @@
    （成功でも失敗でも）」の両方がそろったとき。** Task が手動で削除された場合は送らない
 3. **場所は配置側の設定で渡す。** endpoint・bucket・prefix・region・Secret 名をコントローラの flag で
    受ける。flow の定義には何も書かせない。キーは `<prefix>/<namespace>/<flow>/<Task UID>/`。
-   flow が解決できない Task は flow の位置に `_unresolved` を使う
+   flow が解決できない Task は flow の位置に `_unresolved` を使う。
+   TLS を持たない平文 HTTP の endpoint も選べる。その配置では、送り役が本文を署名せずに PUT する
+   （`DisableContentSha256`）ため、本文の秘匿と改ざん検知は経路側に任せることになる
 4. **資格情報。** Task と同じ namespace にある、設定された名前の Secret を、送り役 Job の env にだけ
    渡す。コントローラは Secret を読まない。PUT 以外の権限を前提にしない
 5. **秘密値の検査。** 組み込みの固定規則で検査する。規則に当たったファイル、symlink や通常ファイル
