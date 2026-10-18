@@ -19,7 +19,7 @@ package controller
 import "testing"
 
 func TestArchiveConfigSwitch(t *testing.T) {
-	full := ArchiveConfig{Endpoint: "s3.example:9000", Bucket: "b", CredentialsSecret: "s"}
+	full := ArchiveConfig{Endpoint: archiveTestEndpoint, Bucket: "b", CredentialsSecret: "s"}
 	cases := []struct {
 		name    string
 		mut     func(*ArchiveConfig)
