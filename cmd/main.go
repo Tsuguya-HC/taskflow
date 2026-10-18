@@ -92,6 +92,8 @@ func main() {
 	flag.StringVar(&archive.Region, "archive-region", "us-east-1", "Region of the archive bucket.")
 	flag.StringVar(&archive.CredentialsSecret, "archive-credentials-secret", "",
 		"Secret, in the Task's namespace, whose keys are the archive Job's environment.")
+	flag.BoolVar(&archive.Insecure, "archive-insecure", false,
+		"Reach the archive endpoint over plain HTTP instead of https.")
 	flag.DurationVar(&archive.Timeout, "archive-timeout", 15*time.Minute, "Deadline of an archive Job.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
