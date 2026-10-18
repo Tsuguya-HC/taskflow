@@ -267,6 +267,40 @@ func TestRunWithholdsTaskJSONSymlink(t *testing.T) {
 	}
 }
 
+// The kubelet shows a ConfigMap key as <dir>/task.json -> ..data/task.json,
+// ..data -> ..<timestamp>; the real file is a regular one inside <dir>. A
+// link that stays inside the directory the controller handed over is sent.
+func TestRunSendsConfigMapVolumeTaskJSON(t *testing.T) {
+	dir := t.TempDir()
+	stamp := "..2026_10_18_00_00_00.123456789"
+	if err := os.Mkdir(filepath.Join(dir, stamp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, stamp, "task.json"), `{"kind":"Task"}`)
+	if err := os.Symlink(stamp, filepath.Join(dir, "..data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "task.json"), filepath.Join(dir, "task.json")); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeS3(t)
+	cfg := f.cfg(dir)
+	cfg.Results = ""
+	res, err := archive.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := f.puts["pre/ns/flow/uid/task.json"]; body != `{"kind":"Task"}` {
+		t.Errorf("task.json put = %q", body)
+	}
+	if res.Uploaded != 1 {
+		t.Errorf("uploaded = %d", res.Uploaded)
+	}
+	if m := manifest(t, f); len(m) != 0 {
+		t.Errorf("withheld = %+v", m)
+	}
+}
+
 // Catches dropping the read error of task.json: an empty body would pass
 // Inspect and be put as if it were the Task.
 func TestRunMissingTaskJSONFails(t *testing.T) {

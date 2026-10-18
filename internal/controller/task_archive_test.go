@@ -244,6 +244,21 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(mounted).NotTo(BeNil())
 			Expect(mounted.SubPath).To(Equal("results"))
 			Expect(mounted.ReadOnly).To(BeTrue())
+
+			var recordMount string
+			for _, v := range pod.Volumes {
+				if v.ConfigMap == nil {
+					continue
+				}
+				for _, m := range pod.Containers[0].VolumeMounts {
+					if m.Name == v.Name {
+						recordMount = m.MountPath
+					}
+				}
+			}
+			Expect(recordMount).NotTo(BeEmpty())
+			Expect(mounted.MountPath).NotTo(HavePrefix(strings.TrimSuffix(recordMount, "/")+"/"),
+				"the shelf must not sit under the ConfigMap volume that holds task.json")
 		})
 
 		It("sets Archived to Unknown/Uploading once it has made them", func() {

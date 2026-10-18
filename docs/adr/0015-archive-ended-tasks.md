@@ -23,6 +23,10 @@
 5. **秘密値の検査。** 組み込みの固定規則で検査する。規則に当たったファイル、symlink や通常ファイル
    以外のもの、読めないファイルは送らない。送らなかった理由は保存先の `manifest.json` に残す。
    symlink を辿らないのは、送り役の env にある鍵を送らないため
+   ただし task.json だけは、コントローラが渡すディレクトリの中に収まる symlink を辿る。ConfigMap の
+   ボリュームは各キーを symlink で見せるので、辿らなければ毎回送れない。ディレクトリの外を指すものは
+   従来どおり送らず、results の中の symlink は指す先を問わず辿らない。そのため results は
+   ConfigMap のボリュームの下に重ねず、別のディレクトリに付ける
 6. **失敗時。** 終端・`Ready`・TTL の値は変えない。`Archived` condition、Warning Event、metric で知らせる。
    結果は `status.archive` に持つ
 7. **設定が無いとき。** 今と同じ動きにする。Job も condition も metric も出さない

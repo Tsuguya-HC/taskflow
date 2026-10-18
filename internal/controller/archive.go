@@ -489,6 +489,9 @@ func (r *TaskReconciler) archiveFlow(ctx context.Context, task *flowv1alpha1.Tas
 func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix, flowLabel string) *batchv1.Job {
 	cfg := r.Archive
 	const recordDir = "/archive"
+	// results must not sit under the ConfigMap volume: files the user wrote
+	// would then appear inside the directory task.json is trusted to live in.
+	const resultsDir = "/archive-results"
 	args := []string{
 		contract.SubcommandArchive,
 		"--task-json=" + recordDir + "/task.json",
@@ -503,9 +506,9 @@ func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix, f
 		ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: archiveJobName(task.Name)}},
 	}}}
 	if pvc != "" {
-		args = append(args, "--results="+recordDir+"/results")
+		args = append(args, "--results="+resultsDir)
 		mounts = append(mounts, corev1.VolumeMount{
-			Name: contract.WorkspaceVolume, MountPath: recordDir + "/results", SubPath: "results", ReadOnly: true,
+			Name: contract.WorkspaceVolume, MountPath: resultsDir, SubPath: "results", ReadOnly: true,
 		})
 		volumes = append(volumes, corev1.Volume{Name: contract.WorkspaceVolume, VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc, ReadOnly: true},
