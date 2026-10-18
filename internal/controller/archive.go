@@ -114,14 +114,15 @@ func archiveSettled(task *flowv1alpha1.Task) bool {
 }
 
 // archiveHeld reports whether the Task must outlive its date for the upload's
-// sake: it is switched on and not settled, or it was begun and never settled,
-// which a restart with the switch off must not turn into a deletion. Begun
-// includes a Job made before the condition could be written.
+// sake: it is switched on and not settled, or its Job is still there to be
+// followed, which a restart with the switch off must not turn into a deletion.
+// With the switch off a Job that is gone, or not ours, settles nothing: holding
+// the Task for it would keep it from ever being deleted.
 func (r *TaskReconciler) archiveHeld(ctx context.Context, task *flowv1alpha1.Task) (bool, error) {
 	if archiveSettled(task) {
 		return false, nil
 	}
-	if r.Archive.Enabled() || meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
+	if r.Archive.Enabled() {
 		return true, nil
 	}
 	var job batchv1.Job
