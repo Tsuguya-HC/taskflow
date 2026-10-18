@@ -1446,6 +1446,10 @@ Pod は `batch.kubernetes.io/controller-uid` ラベルで引く（Job controller
 | `Failed`（Job の条件名）かつ**どのコンテナも Terminated に達していない** | インフラ起因。`maxInfraRetries` まで**同じ runID・次の attempt の名前で**作り直し（[ADR-0004](adr/0004-run-id-counts-runs-not-attempts.md)）、尽きたら TaskFailed（`NoAnswer`） | pull 失敗・未スケジュール等、handler が何もしていない失敗だけがコントローラの再試行対象。**走ってから黙った run は再試行しない**（それは handler の沈黙であり人間の仕事） |
 | それ以外（`Complete`、または走ってから `Failed`（Job の条件名）） | termination message を回収して遷移表へ | 終了コードは verdict ではない。agent が exit 1 でも sidecar が `ok` を封していれば `ok` |
 
+終了した Job の Pod 一覧がキャッシュで空のときは、そのまま「読めない」とはしない。Job と Pod は別々に
+観測されるので、Job の `Complete` が Pod より先に見えることがある。API サーバから読み直し、
+それでも無いときに初めて Pod は無いものとして扱う。
+
 Terminated の判定は init コンテナも含む。init が exit 1 で落ちたなら handler 自身のコードが
 走っているので、インフラ起因ではない。
 

@@ -337,6 +337,19 @@ var _ = Describe("a fork", func() {
 			"the retried attempt's Job is stopped along with the rest, not left running under a name cancelBranches never saw")
 	})
 
+	It("reads a branch's answer from the API server when the cache cannot see its pod yet", func() {
+		setUp()
+		forked(string(security))
+
+		answer(jobOf(security, 2), dirForkDone)
+		answer(jobOf(tests, 3), dirForkDone)
+		blindToPods(fx)
+		fx.reconcile()
+
+		Expect(fx.get().Status.Phase).To(Equal(phaseReport),
+			"both branches' pods existed and said done; a stale cache must not turn that into a failure")
+	})
+
 	It("stops the fork when a branch never started and its retries are spent", func() {
 		setUp()
 		forked(string(security))
