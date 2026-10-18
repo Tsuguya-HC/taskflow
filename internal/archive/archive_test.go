@@ -31,6 +31,7 @@ var (
 )
 
 const ruleAkia = "akia"
+const taskJSONName = "task.json"
 
 var rules = []struct {
 	name string
@@ -96,7 +97,7 @@ func (f *fakeS3) cfg(dir string) archive.Config {
 	return archive.Config{
 		Endpoint: strings.TrimPrefix(f.srv.URL, "http://"), Bucket: "bkt", Region: "us-east-1",
 		AccessKey: "k", SecretKey: "s",
-		TaskJSON: filepath.Join(dir, "task.json"), Results: filepath.Join(dir, "results"),
+		TaskJSON: filepath.Join(dir, taskJSONName), Results: filepath.Join(dir, "results"),
 		KeyPrefix: "pre/ns/flow/uid",
 	}
 }
@@ -144,7 +145,7 @@ func TestRunPutsFilesAndWithholds(t *testing.T) {
 		t.Fatal("must run as non-root: chmod 000 does not make a file unreadable for root")
 	}
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "task.json"), `{"name":"t"}`)
+	write(t, filepath.Join(dir, taskJSONName), `{"name":"t"}`)
 	res := filepath.Join(dir, "results")
 	write(t, filepath.Join(res, "run1/out/a.txt"), "hello")
 	write(t, filepath.Join(res, "run1/secret.txt"), "key "+akia)
@@ -212,7 +213,7 @@ func TestRunPutsFilesAndWithholds(t *testing.T) {
 
 func TestRunWithholdsTaskJSON(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "task.json"), `{"env":"`+akia+`"}`)
+	write(t, filepath.Join(dir, taskJSONName), `{"env":"`+akia+`"}`)
 	f := newFakeS3(t)
 	cfg := f.cfg(dir)
 	cfg.Results = ""
@@ -226,14 +227,14 @@ func TestRunWithholdsTaskJSON(t *testing.T) {
 	if _, ok := f.puts["pre/ns/flow/uid/task.json"]; ok {
 		t.Error("task.json put despite matching a rule")
 	}
-	if m := manifest(t, f); len(m) != 1 || m[0].Path != "task.json" || m[0].Reason == "" {
+	if m := manifest(t, f); len(m) != 1 || m[0].Path != taskJSONName || m[0].Reason == "" {
 		t.Errorf("manifest = %+v", m)
 	}
 }
 
 func TestRunPutFailure(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "task.json"), `{}`)
+	write(t, filepath.Join(dir, taskJSONName), `{}`)
 	write(t, filepath.Join(dir, "results/a.txt"), "a")
 	f := newFakeS3(t)
 	f.failOn = "a.txt"
@@ -250,7 +251,7 @@ func TestRunWithholdsTaskJSONSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(t.TempDir(), "elsewhere")
 	write(t, target, "not-matched-by-any-rule")
-	if err := os.Symlink(target, filepath.Join(dir, "task.json")); err != nil {
+	if err := os.Symlink(target, filepath.Join(dir, taskJSONName)); err != nil {
 		t.Fatal(err)
 	}
 	f := newFakeS3(t)
@@ -262,7 +263,30 @@ func TestRunWithholdsTaskJSONSymlink(t *testing.T) {
 	if body, ok := f.puts["pre/ns/flow/uid/task.json"]; ok {
 		t.Errorf("task.json symlink target was put: %q", body)
 	}
-	if m := manifest(t, f); len(m) != 1 || m[0].Path != "task.json" || m[0].Reason != reasonSymlink {
+	if m := manifest(t, f); len(m) != 1 || m[0].Path != taskJSONName || m[0].Reason != reasonSymlink {
+		t.Errorf("manifest = %+v", m)
+	}
+}
+
+// A link whose target does not exist cannot be resolved, but it is still a
+// link pointing out of the directory: held back as a symlink, not a Run error.
+func TestRunWithholdsDanglingTaskJSONSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere", "nonexistent")
+	if err := os.Symlink(target, filepath.Join(dir, taskJSONName)); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeS3(t)
+	cfg := f.cfg(dir)
+	cfg.Results = ""
+	res, err := archive.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run returned error for a dangling task.json link: %v", err)
+	}
+	if res.Uploaded != 0 {
+		t.Errorf("uploaded = %d, want 0", res.Uploaded)
+	}
+	if m := manifest(t, f); len(m) != 1 || m[0].Path != taskJSONName || m[0].Reason != reasonSymlink {
 		t.Errorf("manifest = %+v", m)
 	}
 }
@@ -276,11 +300,11 @@ func TestRunSendsConfigMapVolumeTaskJSON(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, stamp), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(dir, stamp, "task.json"), `{"kind":"Task"}`)
+	write(t, filepath.Join(dir, stamp, taskJSONName), `{"kind":"Task"}`)
 	if err := os.Symlink(stamp, filepath.Join(dir, "..data")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..data", "task.json"), filepath.Join(dir, "task.json")); err != nil {
+	if err := os.Symlink(filepath.Join("..data", taskJSONName), filepath.Join(dir, taskJSONName)); err != nil {
 		t.Fatal(err)
 	}
 	f := newFakeS3(t)
@@ -322,8 +346,8 @@ func TestRunUnreadableTaskJSONFails(t *testing.T) {
 		t.Fatal("must run as non-root: chmod 000 does not make a file unreadable for root")
 	}
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "task.json"), `{}`)
-	if err := os.Chmod(filepath.Join(dir, "task.json"), 0); err != nil {
+	write(t, filepath.Join(dir, taskJSONName), `{}`)
+	if err := os.Chmod(filepath.Join(dir, taskJSONName), 0); err != nil {
 		t.Fatal(err)
 	}
 	f := newFakeS3(t)
@@ -344,7 +368,7 @@ func TestRunWithholdsUnreadableDirectory(t *testing.T) {
 		t.Fatal("must run as non-root: chmod 000 does not make a directory unreadable for root")
 	}
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "task.json"), `{}`)
+	write(t, filepath.Join(dir, taskJSONName), `{}`)
 	write(t, filepath.Join(dir, "results/locked/a.txt"), "a")
 	locked := filepath.Join(dir, "results/locked")
 	if err := os.Chmod(locked, 0); err != nil {
@@ -405,7 +429,7 @@ func TestRunWithholdsNonRegularTaskJSON(t *testing.T) {
 // PUTs against a store that answers 500 to everything.
 func TestRunPutFailureIsNotDelayedByRetries(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "task.json"), `{}`)
+	write(t, filepath.Join(dir, taskJSONName), `{}`)
 	write(t, filepath.Join(dir, "results/a.txt"), "a")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

@@ -126,7 +126,8 @@ func resolveTaskJSON(p string) (string, string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return "", "", err
+		// A dangling or looping link points at nothing inside the directory.
+		return "", "symlink", nil
 	}
 	rel, err := filepath.Rel(dir, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
