@@ -70,7 +70,7 @@ type TaskReconciler struct {
 	// Archive is the zero value when ended Tasks are not sent away.
 	Archive ArchiveConfig
 	// APIReader reads without the manager's cache. It is for objects the
-	// controller holds get on and neither list nor watch: the ConfigMap a State
+	// controller holds only get on, never watch: the ConfigMap a State
 	// run is answered in (ADR-0011 決定4) and the ControllerRevision a task's
 	// definitions are copied into, which a begun task that has a copy reads its
 	// flow from. A cached read needs list and watch — an
@@ -78,6 +78,10 @@ type TaskReconciler struct {
 	// ConfigMap in the cluster in memory to deliver one key. Reading through
 	// here is also what makes the answer's latency the requeue interval rather
 	// than an informer's resync.
+	//
+	// It also lists the pods of a finished Job, but only when the cache shows
+	// none: that read is bounded to one Job's pods by label, so it holds
+	// nothing in memory.
 	APIReader client.Reader
 }
 
