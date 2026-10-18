@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,6 +61,7 @@ const (
 
 	flagEndpoint          = "--endpoint"
 	flagBucket            = "--bucket"
+	flagSecure            = "--secure"
 	flagManifestKeyPrefix = "--manifest-key-prefix"
 )
 
@@ -72,6 +74,8 @@ type ArchiveConfig struct {
 	Region            string
 	CredentialsSecret string
 	Timeout           time.Duration
+	// Insecure reaches the endpoint over plain HTTP.
+	Insecure bool
 }
 
 // Enabled reports whether endpoint, bucket and secret are all given.
@@ -373,7 +377,7 @@ func (r *TaskReconciler) archivePrefix(task *flowv1alpha1.Task, flow string) str
 }
 
 func (r *TaskReconciler) archiveStatusAt(prefix string) *flowv1alpha1.ArchiveStatus {
-	return &flowv1alpha1.ArchiveStatus{Location: archiveLocation(r.Archive.Bucket, prefix), Endpoint: r.Archive.Endpoint}
+	return &flowv1alpha1.ArchiveStatus{Location: archiveLocation(r.Archive.Bucket, prefix), Endpoint: r.Archive.Endpoint, Insecure: r.Archive.Insecure}
 }
 
 func archiveLocation(bucket, prefix string) string {
@@ -396,7 +400,7 @@ func archiveStatusOf(job *batchv1.Job) (*flowv1alpha1.ArchiveStatus, bool) {
 		if prefix == "" || bucket == "" || endpoint == "" {
 			return nil, false
 		}
-		return &flowv1alpha1.ArchiveStatus{Location: archiveLocation(bucket, prefix), Endpoint: endpoint}, true
+		return &flowv1alpha1.ArchiveStatus{Location: archiveLocation(bucket, prefix), Endpoint: endpoint, Insecure: args[flagSecure] == "false"}, true
 	}
 	return nil, false
 }
@@ -493,6 +497,7 @@ func (r *TaskReconciler) buildArchiveJob(task *flowv1alpha1.Task, pvc, prefix, f
 		flagBucket + "=" + cfg.Bucket,
 		"--region=" + cfg.Region,
 		flagManifestKeyPrefix + "=" + prefix,
+		flagSecure + "=" + strconv.FormatBool(!cfg.Insecure),
 	}
 	mounts := []corev1.VolumeMount{{Name: "record", MountPath: recordDir, ReadOnly: true}}
 	volumes := []corev1.Volume{{Name: "record", VolumeSource: corev1.VolumeSource{

@@ -107,6 +107,11 @@ spec:
                     description: Endpoint is the object store's address that Location
                       is on.
                     type: string
+                  insecure:
+                    description: |-
+                      Insecure is true when the record was sent to Endpoint over plain HTTP,
+                      false when over https.
+                    type: boolean
                   location:
                     description: |-
                       Location is the s3:// URL, ending in a slash, under which the record's

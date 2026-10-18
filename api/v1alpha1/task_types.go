@@ -281,6 +281,11 @@ type ArchiveStatus struct {
 	// Endpoint is the object store's address that Location is on.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// Insecure is true when the record was sent to Endpoint over plain HTTP,
+	// false when over https.
+	// +optional
+	Insecure bool `json:"insecure,omitempty"`
 }
 
 // +kubebuilder:object:root=true
