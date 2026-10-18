@@ -149,17 +149,18 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 		// one with no destination configured would be sending to nowhere.
 		var existing batchv1.Job
 		err := r.Get(ctx, types.NamespacedName{Name: archiveJobName(task.Name), Namespace: task.Namespace}, &existing)
-		if apierrors.IsNotFound(err) && meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
-			// The upload was begun and its Job is gone, so nothing will ever
-			// settle it; say so rather than delete the Task still Unknown.
-			msg := "the archive Job is gone before the upload settled"
-			return true, r.failArchived(ctx, task, &batchv1.Job{}, msg)
-		}
-		if apierrors.IsNotFound(err) || (err == nil && !metav1.IsControlledBy(&existing, task)) {
-			return false, nil
-		}
-		if err != nil {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return false, err
+		}
+		if apierrors.IsNotFound(err) || !metav1.IsControlledBy(&existing, task) {
+			if meta.FindStatusCondition(task.Status.Conditions, archivedType) != nil {
+				// The upload was begun and its Job is gone or not ours, so
+				// nothing will ever settle it; say so rather than delete the
+				// Task still Unknown.
+				msg := "the archive Job is gone before the upload settled"
+				return true, r.failArchived(ctx, task, &batchv1.Job{}, msg)
+			}
+			return false, nil
 		}
 	}
 	job, err := r.ensureArchiveJob(ctx, task)

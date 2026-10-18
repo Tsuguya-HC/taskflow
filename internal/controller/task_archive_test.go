@@ -608,7 +608,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			fx.reconcile()
 			fx.reconcile()
 
-			Expect(gone()).To(BeTrue(), "the Job is gone; nothing will ever settle this upload")
+			Expect(gone()).To(BeTrue(), "the Job is gone; the upload is settled as failed, then the task is deleted")
 		})
 
 		// #280: a task must not be deleted with Archived still Unknown; the
@@ -620,6 +620,41 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
 			Expect(k8sClient.Delete(fx.ctx, archiveJob(), client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 			Eventually(archiveJobs).Should(BeZero())
+
+			fx.reconciler.Archive = ArchiveConfig{}
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+			fx.reconcile()
+			fx.reconcile()
+
+			Expect(gone()).To(BeTrue())
+			Expect(fx.announced()).To(ContainElement(And(HavePrefix("Warning"), ContainSubstring(reasonUploadFail))),
+				"deletion must follow a decided outcome, announced")
+		})
+
+		// #280: the same invariant when the vanished Job's name was taken by
+		// a Job another owner controls.
+		It("settles the upload as failed before deleting a task whose unsettled Job was replaced by a stranger's", func() {
+			ended()
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+			Expect(k8sClient.Delete(fx.ctx, archiveJob(), client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+			Eventually(archiveJobs).Should(BeZero())
+
+			stray := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: archiveJobName(fx.name), Namespace: resourceNamespace, OwnerReferences: strayOwner(),
+				},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: agentName, Image: agentImage}},
+				}}},
+			}
+			Expect(k8sClient.Create(fx.ctx, stray)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(fx.ctx, stray, client.PropagationPolicy(metav1.DeletePropagationBackground))
+			})
 
 			fx.reconciler.Archive = ArchiveConfig{}
 			clock = time.Now().AddDate(10, 0, 0)
@@ -702,6 +737,35 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 
 			Expect(err).To(MatchError(ContainSubstring(boom.Error())))
 			Expect(gone()).To(BeFalse(), "a Job that could not be read may still be sending")
+		})
+
+		// Catches the switched-off guard settling an upload as failed on a
+		// read error that says nothing about the Job being gone.
+		It("does not settle the upload as failed when the Job cannot be read", func() {
+			ended()
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+
+			boom := errors.New("the apiserver blinked")
+			watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			fx.reconciler.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*batchv1.Job); ok {
+						return boom
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			clock = expiresAt.Add(time.Minute)
+			fx.reconciler.Archive = ArchiveConfig{}
+			_, err = fx.reconciler.Reconcile(fx.ctx, reqFor(fx.name))
+
+			Expect(err).To(MatchError(ContainSubstring(boom.Error())))
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+			Expect(gone()).To(BeFalse())
 		})
 
 		It("deletes at the date when the Job of that name belongs to another owner", func() {
