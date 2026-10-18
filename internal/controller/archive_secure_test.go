@@ -72,15 +72,17 @@ func TestArchiveStatusOfSecure(t *testing.T) {
 		"false":  {[]string{"--secure=false"}, true},
 	}
 	for name, c := range cases {
-		st, ok := archiveStatusOf(archiveArgsJob(append(append([]string{}, base...), c.extra...)...))
-		if !ok {
-			t.Fatalf("%s: not read", name)
-		}
-		if st.Insecure != c.insecure {
-			t.Errorf("%s: Insecure=%v, want %v", name, st.Insecure, c.insecure)
-		}
-		if st.Endpoint != secureTestEndpoint {
-			t.Errorf("%s: endpoint changed to %q", name, st.Endpoint)
-		}
+		t.Run(name, func(t *testing.T) {
+			st, ok := archiveStatusOf(archiveArgsJob(append(append([]string{}, base...), c.extra...)...))
+			if !ok {
+				t.Fatal("not read")
+			}
+			if st.Insecure != c.insecure {
+				t.Errorf("Insecure=%v, want %v", st.Insecure, c.insecure)
+			}
+			if st.Endpoint != secureTestEndpoint {
+				t.Errorf("endpoint changed to %q", st.Endpoint)
+			}
+		})
 	}
 }

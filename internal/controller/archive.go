@@ -74,8 +74,7 @@ type ArchiveConfig struct {
 	Region            string
 	CredentialsSecret string
 	Timeout           time.Duration
-	// Insecure reaches the endpoint over plain HTTP.
-	Insecure bool
+	Insecure          bool
 }
 
 // Enabled reports whether endpoint, bucket and secret are all given.
