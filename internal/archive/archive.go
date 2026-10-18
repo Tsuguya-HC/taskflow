@@ -23,11 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"syscall"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -105,6 +108,34 @@ func (p *putter) put(key string, body []byte) bool {
 	return true
 }
 
+// resolveTaskJSON returns the path to open for task.json. A kubelet ConfigMap
+// volume shows every key as a symlink (task.json -> ..data/task.json), so a
+// symlink is followed only while it stays inside the directory it was handed
+// in; anything pointing out of it comes back as the "symlink" reason.
+func resolveTaskJSON(p string) (string, string, error) {
+	info, err := os.Lstat(p)
+	if err != nil {
+		return "", "", err
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		return p, "", nil
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(p))
+	if err != nil {
+		return "", "", err
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		// A dangling or looping link points at nothing inside the directory.
+		return "", "symlink", nil
+	}
+	rel, err := filepath.Rel(dir, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "symlink", nil
+	}
+	return resolved, "", nil
+}
+
 // Run puts task.json, the shelf's regular files and manifest.json.
 func Run(ctx context.Context, cfg Config) (Result, error) {
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
@@ -127,23 +158,36 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 	// Files are sent whole: the size is known before the PUT, which is what
 	// lets a single PUT stand in for multipart.
-	taskInfo, err := os.Lstat(cfg.TaskJSON)
+	taskPath, state, err := resolveTaskJSON(cfg.TaskJSON)
 	if err != nil {
 		return Result{}, fmt.Errorf("read task json: %w", err)
 	}
-	if taskInfo.Mode()&fs.ModeSymlink != 0 {
-		hold("task.json", "symlink")
-	} else if !taskInfo.Mode().IsRegular() {
-		hold("task.json", "not-regular")
+	if state != "" {
+		hold("task.json", state)
 	} else {
-		body, err := os.ReadFile(cfg.TaskJSON)
+		// The type is judged on the descriptor that is read, not on the path.
+		// O_NONBLOCK keeps a FIFO from blocking the open.
+		f, err := os.OpenFile(taskPath, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			return Result{}, fmt.Errorf("read task json: %w", err)
 		}
-		if rule := Inspect(body); rule != "" {
-			hold("task.json", rule)
-		} else if p.put(path.Join(cfg.KeyPrefix, "task.json"), body) {
-			p.result.Uploaded++
+		defer func() { _ = f.Close() }()
+		info, err := f.Stat()
+		if err != nil {
+			return Result{}, fmt.Errorf("read task json: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			hold("task.json", "not-regular")
+		} else {
+			body, err := io.ReadAll(f)
+			if err != nil {
+				return Result{}, fmt.Errorf("read task json: %w", err)
+			}
+			if rule := Inspect(body); rule != "" {
+				hold("task.json", rule)
+			} else if p.put(path.Join(cfg.KeyPrefix, "task.json"), body) {
+				p.result.Uploaded++
+			}
 		}
 	}
 
