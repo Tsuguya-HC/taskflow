@@ -126,7 +126,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("sidecar "+cmd, flag.ContinueOnError)
 	fs.StringVar(&o.out, contract.FlagOut, "",
 		"this run's own directory: the declared directories are created directly in it")
-	fs.StringVar(&o.termLog, "termination-log", "/dev/termination-log", "where the answer is written for the controller")
+	fs.StringVar(&o.termLog, termLogName, defaultTermLog, "where the answer is written for the controller")
 	fs.StringVar(&o.sealTo, contract.FlagSealTo, "", "publish only: move the run's directory here once sealed")
 	fs.StringVar(&o.sweep, contract.FlagSweep, "",
 		"prepare only: comma-separated runIDs whose leftovers beside this run are cleared away first")
@@ -392,7 +392,7 @@ func newArchiveFlagSet(cfg *archive.Config, termLogOut *string) *flag.FlagSet {
 	fs.BoolVar(&cfg.Secure, "secure", true, "use https to reach the endpoint")
 	fs.StringVar(&cfg.Bucket, "bucket", "", "bucket name")
 	fs.StringVar(&cfg.Region, "region", "", "bucket region")
-	fs.StringVar(termLogOut, "termination-log", defaultTermLog, "where the answer is written for the controller")
+	fs.StringVar(termLogOut, termLogName, defaultTermLog, "where the answer is written for the controller")
 	return fs
 }
 
