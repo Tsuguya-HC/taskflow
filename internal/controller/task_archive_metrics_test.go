@@ -62,7 +62,7 @@ func collectedArchiveOutcomes() map[[2]string]float64 {
 var archiveOutcomeNames = []string{metrics.ArchiveUploaded, metrics.ArchiveWithheld, metrics.ArchiveFailed}
 
 func enabledArchive() ArchiveConfig {
-	return ArchiveConfig{Endpoint: archiveTestEndpoint, Bucket: "records", CredentialsSecret: "archive-creds"}
+	return ArchiveConfig{Endpoint: archiveTestEndpoint, Bucket: archiveTestBucket, CredentialsSecret: "archive-creds"}
 }
 
 var _ = Describe("What the archive outcomes say before a record is sent", func() {
@@ -193,4 +193,7 @@ var _ = Describe("What the archive outcomes say once the controller is assembled
 	})
 })
 
-const archiveTestEndpoint = "s3.example:9000"
+const (
+	archiveTestEndpoint = "s3.example:9000"
+	archiveTestBucket   = "records"
+)

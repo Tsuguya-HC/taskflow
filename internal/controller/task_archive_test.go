@@ -69,7 +69,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		expiresAt = clock.Add(time.Hour)
 		fx.reconciler.Now = func() time.Time { return clock }
 		fx.reconciler.Archive = ArchiveConfig{
-			Endpoint: archiveTestEndpoint, Bucket: "records", Prefix: "taskflow/", Region: "us-east-1",
+			Endpoint: archiveTestEndpoint, Bucket: archiveTestBucket, Prefix: "taskflow/", Region: "us-east-1",
 			CredentialsSecret: secretName, Timeout: timeout,
 		}
 	})
@@ -205,7 +205,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			args := strings.Join(append(append([]string{}, c.Command...), c.Args...), " ")
 			Expect(args).To(ContainSubstring("archive"))
 			Expect(args).To(ContainSubstring(archiveTestEndpoint))
-			Expect(args).To(ContainSubstring("records"))
+			Expect(args).To(ContainSubstring(archiveTestBucket))
 
 			var fromMap bool
 			for _, v := range pod.Volumes {
