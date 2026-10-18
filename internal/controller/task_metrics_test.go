@@ -110,8 +110,8 @@ func collectedFinallyOutcomes() map[finallyOutcome]float64 {
 	return out
 }
 
-// forgetFlowMetrics drops every series of one flow, which is what a freshly
-// started controller process has before it reconciles anything.
+// forgetFlowMetrics drops one flow's task and finally outcome series, which is
+// what a freshly started controller process has before it reconciles anything.
 func forgetFlowMetrics(flow string) {
 	by := prometheus.Labels{metrics.LabelFlow: flow}
 	metrics.TaskOutcomes.DeletePartialMatch(by)

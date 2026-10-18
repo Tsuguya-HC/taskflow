@@ -21,6 +21,12 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	flowv1alpha1 "github.com/Tsuguya-HC/taskflow/api/v1alpha1"
 
 	"github.com/Tsuguya-HC/taskflow/internal/metrics"
 )
@@ -111,6 +117,78 @@ var _ = Describe("What the archive outcomes say before a record is sent", func()
 
 		for key := range collectedArchiveOutcomes() {
 			Expect(key[0]).NotTo(Equal(metrics.FlowUnresolved))
+		}
+	})
+})
+
+// A flow's zero has to be there again after a reconcile on every path that
+// resolves the flow, not only the first reconcile of a new task, which reads
+// the live flow. Each spec removes what the first reconcile reported so only
+// the path under test can bring it back.
+var _ = Describe("What the archive outcomes say on the paths a started task resolves its flow by", func() {
+	forgetFlowArchive := func(flow string) {
+		metrics.ArchiveOutcomes.DeletePartialMatch(prometheus.Labels{metrics.LabelFlow: flow})
+	}
+	expectZeroes := func(flow string) {
+		got := collectedArchiveOutcomes()
+		for _, o := range archiveOutcomeNames {
+			value, ok := got[[2]string{flow, o}]
+			Expect(ok).To(BeTrue(), "%s was not reported again", o)
+			Expect(value).To(BeZero())
+		}
+	}
+
+	It("reports them for a started task that reads its flow from the copy", func() {
+		fx := newFixture()
+		fx.reconciler.Archive = enabledArchive()
+		fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+		fx.reconcile()
+		Expect(fx.get().Status.Phase).NotTo(BeEmpty())
+
+		forgetFlowArchive(fx.name)
+		fx.reconcile()
+		expectZeroes(fx.name)
+	})
+
+	It("reports them for a task at a framework phase that reads its flow from the copy", func() {
+		fx := newFixture()
+		fx.reconciler.Archive = enabledArchive()
+		fx.makeFlow()
+		fx.makeHandler()
+		fx.makeTask()
+		fx.reconcile()
+
+		tk := fx.get()
+		tk.Status.Phase = flowv1alpha1.PhaseTaskFailed
+		Expect(k8sClient.Status().Update(fx.ctx, tk)).To(Succeed())
+
+		forgetFlowArchive(fx.name)
+		fx.reconcile()
+		expectZeroes(fx.name)
+	})
+})
+
+// Reconcile is called directly by every other spec, so nothing else goes
+// through the assembly that production uses.
+var _ = Describe("What the archive outcomes say once the controller is assembled", func() {
+	It("reports the unresolved flow's three outcomes at zero from SetupWithManager", func() {
+		metrics.ArchiveOutcomes.DeletePartialMatch(prometheus.Labels{metrics.LabelFlow: metrics.FlowUnresolved})
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:     k8sClient.Scheme(),
+			Metrics:    metricsserver.Options{BindAddress: "0"},
+			Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		r := &TaskReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Archive: enabledArchive()}
+		Expect(r.SetupWithManager(mgr)).To(Succeed())
+
+		got := collectedArchiveOutcomes()
+		for _, o := range archiveOutcomeNames {
+			_, ok := got[[2]string{metrics.FlowUnresolved, o}]
+			Expect(ok).To(BeTrue(), "%s was not primed by SetupWithManager", o)
 		}
 	})
 })

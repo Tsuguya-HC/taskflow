@@ -287,7 +287,8 @@ func (r *TaskReconciler) resolveFlow(
 			return nil, nil, err
 		}
 		if flow != nil {
-			// Say what this flow's endings are before any of them happens (ADR-0010).
+			// Say what this flow's endings, and its archive outcomes when archiving is
+			// on, are before any of them happens (ADR-0010).
 			r.primeFlow(flow)
 			return flow, handlers, nil
 		}
@@ -1772,8 +1773,9 @@ func (r *TaskReconciler) primeUnresolvedArchive() {
 	}
 }
 
-// primeFlow primes everything a resolved flow reports before it happens: its
-// endings, and its archive outcomes when archiving is enabled.
+// primeFlow is the one call every flow-resolving path makes, so a path that
+// primed only the endings cannot leave the flow's archive outcomes absent
+// until the first archive.
 func (r *TaskReconciler) primeFlow(flow *flowv1alpha1.TaskFlow) {
 	primeFlowMetrics(flow)
 	if r.Archive.Enabled() {
