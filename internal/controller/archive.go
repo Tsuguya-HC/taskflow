@@ -143,6 +143,18 @@ func (r *TaskReconciler) driveArchive(ctx context.Context, task *flowv1alpha1.Ta
 	if archiveSettled(task) {
 		return false, nil
 	}
+	if !r.Archive.Enabled() {
+		// Switched off: only a Job already ours is followed to its end. Making
+		// one with no destination configured would be sending to nowhere.
+		var existing batchv1.Job
+		err := r.Get(ctx, types.NamespacedName{Name: archiveJobName(task.Name), Namespace: task.Namespace}, &existing)
+		if apierrors.IsNotFound(err) || (err == nil && !metav1.IsControlledBy(&existing, task)) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 	job, err := r.ensureArchiveJob(ctx, task)
 	if err != nil {
 		return false, err

@@ -556,6 +556,25 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(gone()).To(BeFalse(), "an unsettled upload holds the task whatever the flags say now")
 			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
 		})
+
+		// Catches archiveHeld holding on to an Unknown condition whatever the
+		// Job and its Pod look like: with the switch off nothing else gives up
+		// on a Pod that is gone, and the task would outlive its date forever.
+		It("gives up on a task whose pod is gone for good and deletes it", func() {
+			ended()
+			fx.reconcile()
+			completeWithoutPod(archiveJob())
+			fx.reconcile()
+			Expect(archived()).NotTo(BeNil())
+			Expect(archived().Status).To(Equal(metav1.ConditionUnknown))
+
+			fx.reconciler.Archive = ArchiveConfig{}
+			clock = time.Now().AddDate(10, 0, 0)
+			fx.reconcile()
+			fx.reconcile()
+
+			Expect(gone()).To(BeTrue(), "the pod is gone for good; nothing will ever settle this upload")
+		})
 	})
 
 	Describe("a restart with the archive switched off and the Job unreadable or not ours", func() {
