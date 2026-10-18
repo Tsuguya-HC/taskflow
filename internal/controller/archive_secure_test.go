@@ -21,7 +21,7 @@ func archiveArgsJob(args ...string) *batchv1.Job {
 
 func argsOfBuilt(insecure bool) []string {
 	r := &TaskReconciler{Archive: ArchiveConfig{
-		Endpoint: secureTestEndpoint, Bucket: "records", Region: "us-east-1",
+		Endpoint: secureTestEndpoint, Bucket: archiveTestBucket, Region: "us-east-1",
 		CredentialsSecret: "creds", Insecure: insecure,
 	}}
 	task := &flowv1alpha1.Task{}

@@ -287,8 +287,9 @@ func (r *TaskReconciler) resolveFlow(
 			return nil, nil, err
 		}
 		if flow != nil {
-			// Say what this flow's endings are before any of them happens (ADR-0010).
-			primeFlowMetrics(flow)
+			// Say what this flow's endings, and its archive outcomes when archiving is
+			// on, are before any of them happens (ADR-0010).
+			r.primeFlow(flow)
 			return flow, handlers, nil
 		}
 	}
@@ -302,7 +303,7 @@ func (r *TaskReconciler) liveFlow(ctx context.Context, task *flowv1alpha1.Task) 
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.Flow, Namespace: task.Namespace}, flow); err != nil {
 		return nil, err
 	}
-	primeFlowMetrics(flow)
+	r.primeFlow(flow)
 	return flow, nil
 }
 
@@ -348,7 +349,7 @@ func (r *TaskReconciler) startedDefinitions(
 		return nil, nil, false, err
 	}
 	if flow != nil {
-		primeFlowMetrics(flow)
+		r.primeFlow(flow)
 		if !taskstate.Pinned(&task.Status) && !stopped(&task.Status, &flow.Spec) {
 			taskstate.Pin(&task.Status)
 			if err := r.Status().Update(ctx, task); err != nil {
@@ -397,7 +398,7 @@ func (r *TaskReconciler) startedDefinitions(
 	if err != nil {
 		return nil, nil, false, err
 	}
-	primeFlowMetrics(flow)
+	r.primeFlow(flow)
 	return flow, handlers, false, nil
 }
 
@@ -1754,10 +1755,30 @@ func endingFor(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.primeUnresolvedArchive()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&flowv1alpha1.Task{}).
 		// Jobs are owned, so finishing one wakes the task that started it.
 		Owns(&batchv1.Job{}).
 		Named("task").
 		Complete(r)
+}
+
+// primeUnresolvedArchive creates the archive outcomes' series for tasks whose
+// flow never resolved, when archiving is enabled. It is a method rather than an
+// init() because whether archiving is on is the reconciler's setting.
+func (r *TaskReconciler) primeUnresolvedArchive() {
+	if r.Archive.Enabled() {
+		metrics.PrimeArchiveOutcomes(metrics.FlowUnresolved)
+	}
+}
+
+// primeFlow is the one call every flow-resolving path makes, so a path that
+// primed only the endings cannot leave the flow's archive outcomes absent
+// until the first archive.
+func (r *TaskReconciler) primeFlow(flow *flowv1alpha1.TaskFlow) {
+	primeFlowMetrics(flow)
+	if r.Archive.Enabled() {
+		metrics.PrimeArchiveOutcomes(flow.Name)
+	}
 }

@@ -69,7 +69,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 		expiresAt = clock.Add(time.Hour)
 		fx.reconciler.Now = func() time.Time { return clock }
 		fx.reconciler.Archive = ArchiveConfig{
-			Endpoint: "s3.example:9000", Bucket: "records", Prefix: "taskflow/", Region: "us-east-1",
+			Endpoint: archiveTestEndpoint, Bucket: archiveTestBucket, Prefix: "taskflow/", Region: "us-east-1",
 			CredentialsSecret: secretName, Timeout: timeout,
 		}
 	})
@@ -204,8 +204,8 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 			Expect(c.EnvFrom[0].SecretRef.Name).To(Equal(secretName))
 			args := strings.Join(append(append([]string{}, c.Command...), c.Args...), " ")
 			Expect(args).To(ContainSubstring("archive"))
-			Expect(args).To(ContainSubstring("s3.example:9000"))
-			Expect(args).To(ContainSubstring("records"))
+			Expect(args).To(ContainSubstring(archiveTestEndpoint))
+			Expect(args).To(ContainSubstring(archiveTestBucket))
 
 			var fromMap bool
 			for _, v := range pod.Volumes {
@@ -888,7 +888,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 
 			Expect(archiveStatus()).To(And(
 				HaveKeyWithValue("location", "s3://records/taskflow/"+resourceNamespace+"/"+fx.name+"/"+string(tk.UID)+"/"),
-				HaveKeyWithValue("endpoint", "s3.example:9000")))
+				HaveKeyWithValue("endpoint", archiveTestEndpoint)))
 		})
 
 		It("files the location under _unresolved when the task's flow is not there", func() {
@@ -1133,7 +1133,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 
 			fx.reconcile()
 
-			Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", "s3.example:9000"))
+			Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", archiveTestEndpoint))
 			Expect(archiveStatus()).To(HaveKey("location"))
 		})
 
@@ -1163,7 +1163,7 @@ var _ = Describe("archiving an ended task before it is deleted", func() {
 
 				fx.reconcile()
 
-				Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", "s3.example:9000"))
+				Expect(archiveStatus()).To(HaveKeyWithValue("endpoint", archiveTestEndpoint))
 				Expect(archiveStatus()).To(HaveKeyWithValue("location",
 					And(HavePrefix("s3://"), Not(ContainSubstring("old/prefix")), Not(ContainSubstring("old-bucket")))))
 			},
