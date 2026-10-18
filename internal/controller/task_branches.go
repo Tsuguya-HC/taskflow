@@ -25,7 +25,6 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -161,9 +160,8 @@ func (r *TaskReconciler) observeBranch(
 		return r.judgeBranch(flow, run, runs, nil, timedOut(job)), 0, nil
 	}
 
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(job.Namespace),
-		client.MatchingLabels{batchv1.ControllerUidLabel: string(job.UID)}); err != nil {
+	pods, err := r.podsOf(ctx, job)
+	if err != nil {
 		return nil, 0, err
 	}
 	switch {

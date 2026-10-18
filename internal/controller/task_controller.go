@@ -609,9 +609,8 @@ func (r *TaskReconciler) driveJobRun(
 		return ctrl.Result{}, r.settleRun(ctx, task, flow, run, nil, timedOut(job))
 	}
 
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(job.Namespace),
-		client.MatchingLabels{batchv1.ControllerUidLabel: string(job.UID)}); err != nil {
+	pods, err := r.podsOf(ctx, job)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -640,6 +639,36 @@ func (r *TaskReconciler) driveJobRun(
 	}
 	answer := collect.FromPods(pods.Items, directories, forks(&flow.Spec, run.Phase))
 	return ctrl.Result{}, r.settleRun(ctx, task, flow, run, &answer, "")
+}
+
+// podsOf lists the pods of a finished Job. An empty list from the cache is not
+// believed: the Job and Pod informers are separate, so a controller that has
+// just taken over can see a Job Complete before it sees its pods. The API
+// server is asked before the answer is given up as missing; only when it too
+// finds nothing are the pods really gone.
+func (r *TaskReconciler) podsOf(ctx context.Context, job *batchv1.Job) (corev1.PodList, error) {
+	var pods corev1.PodList
+	opts := []client.ListOption{
+		client.InNamespace(job.Namespace),
+		client.MatchingLabels{batchv1.ControllerUidLabel: string(job.UID)},
+	}
+	if err := r.List(ctx, &pods, opts...); err != nil {
+		return pods, err
+	}
+	if len(pods.Items) > 0 || r.APIReader == nil {
+		return pods, nil
+	}
+	if err := r.APIReader.List(ctx, &pods, opts...); err != nil {
+		return pods, err
+	}
+	log := logf.FromContext(ctx)
+	if len(pods.Items) > 0 {
+		log.Info("pods of a finished job were missing from the cache and read from the API server",
+			"job", job.Name, "pods", len(pods.Items))
+	} else {
+		log.Info("a finished job has no pods in the cache or on the API server", "job", job.Name)
+	}
+	return pods, nil
 }
 
 // persistRun writes the run in flight back to status when this reconcile
