@@ -100,8 +100,8 @@ func TestPrepareClosesTheRunAndOpensTheChildren(t *testing.T) {
 // with out closed, a create under it is refused for anyone without the owner's
 // power to reopen it.
 func TestClosedOutRefusesAnUndeclaredDirectory(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory modes")
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: directory modes do not restrict root")
 	}
 	out := prepared(t)
 	err := os.Mkdir(filepath.Join(out, "undeclared"), 0o755)
@@ -381,8 +381,8 @@ func TestMoveRelocatesTheDirectoryAndKeepsItClosed(t *testing.T) {
 // and left that way for the next one. work/ itself is closed to force the
 // rename to fail there rather than at the Lstat(to) early return.
 func TestMoveRenameFailureLeavesTheRunClosed(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: directory modes do not restrict root")
 	}
 	root := t.TempDir()
 	work := filepath.Join(root, "work")
@@ -416,8 +416,8 @@ func TestMoveRenameFailureLeavesTheRunClosed(t *testing.T) {
 // MkdirAll that would make it. from must be left exactly as Prepare closed
 // it, since nothing past the shelf's creation was reached.
 func TestMoveFailsWhenTheShelfCannotBeCreated(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: directory modes do not restrict root")
 	}
 	root := t.TempDir()
 	from := filepath.Join(root, "work", "3")
@@ -644,8 +644,8 @@ func TestMakeRunClearsWhatTheLastAttemptLeft(t *testing.T) {
 // bargain Sweep strikes with the abandoned runs, applied to this run's own
 // leftovers.
 func TestMakeRunFailsWhenTheExistingDirectoryCannotBeRemoved(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: directory modes do not restrict root")
 	}
 	root := t.TempDir()
 	dir := filepath.Join(root, "3")
@@ -825,8 +825,8 @@ func TestSweepRemovesOnlyTheListed(t *testing.T) {
 // uid can always chmod its way back in, so this only shows the half a unit
 // test can.
 func TestSweepFailsWhenARunCannotBeRemoved(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: directory modes do not restrict root")
 	}
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "1", "ok"), 0o755); err != nil {
@@ -1065,8 +1065,8 @@ func TestShelveRefusesANonDirectoryAtTheRunPath(t *testing.T) {
 // laid down, the same as TestMoveFailsWhenTheShelfCannotBeCreated does for
 // Move — the two share openDir for exactly this reason.
 func TestShelveFailsWhenTheShelfCannotBeCreated(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
+	if os.Geteuid() == 0 {
+		t.Fatal("must run as non-root: directory modes do not restrict root")
 	}
 	root := t.TempDir()
 	run := filepath.Join(root, "results", "2")
