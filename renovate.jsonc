@@ -17,7 +17,7 @@
     // このプリセットが aqua.yaml のパッケージ版・レジストリ ref・ワークフローの
     // aqua_version を拾う唯一の手段。レジストリ ref だけは aqua.yaml 側の
     // `# renovate: depName=aquaproj/aqua-registry` コメントが必須
-    "github>aquaproj/aqua-renovate-config#2.13.0"
+    "github>aquaproj/aqua-renovate-config#2.14.0"
   ],
 
   "minimumReleaseAge": "3 days",
